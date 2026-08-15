@@ -113,3 +113,39 @@ fn test_integration_corrupted_config_file() {
         other => panic!("Expected ConfigError::Parse, got {:?}", other),
     }
 }
+
+#[test]
+fn test_integration_init_template_lifecycle() {
+    let dir = tempdir().expect("Failed to create tempdir");
+    let config_path = dir.path().join("subfolder").join("config.toml");
+
+    // 1. Initialize fresh template
+    let generated = Config::init_file(&config_path, false)
+        .expect("Initializing config in non-existent path should succeed");
+    assert_eq!(generated, config_path);
+    assert!(config_path.exists());
+
+    // 2. Parse generated config and verify all agents/workspaces
+    let config = Config::load_from_file(&config_path)
+        .expect("Generated template must be immediately loadable");
+    assert_eq!(config.default_agent, "claude");
+    assert!(config.get_agent("claude").is_some());
+    assert!(config.get_agent("agy").is_some());
+    assert!(config.get_agent("copilot").is_some());
+    assert!(config.get_agent("aider").is_some());
+    assert!(config.get_workspace("ecommerce").is_some());
+
+    // 3. Re-init without force fails with AlreadyExists
+    let err = Config::init_file(&config_path, false)
+        .expect_err("Re-init without force must return ConfigError::AlreadyExists");
+    match err {
+        ConfigError::AlreadyExists(p) => assert_eq!(p, config_path),
+        other => panic!("Expected ConfigError::AlreadyExists, got {:?}", other),
+    }
+
+    // 4. Overwrite dummy content with force=true
+    fs::write(&config_path, "corrupted = true").expect("Failed to write dummy content");
+    Config::init_file(&config_path, true).expect("Re-init with force=true must succeed");
+    let reloaded = Config::load_from_file(&config_path).expect("Reloading overwritten config");
+    assert_eq!(reloaded.default_agent, "claude");
+}

@@ -14,6 +14,10 @@ use botai::tui::{DashboardState, TuiApp};
 fn main() -> Result<()> {
     let cli = Cli::parse_args();
 
+    if let Some(Commands::Init { force, stdout }) = cli.command {
+        return cmd_init(cli.config.as_deref(), force, stdout);
+    }
+
     let config_path = match cli.config {
         Some(path) => path,
         None => Config::default_path().context(
@@ -31,6 +35,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => run_default_dashboard(&config),
+        Some(Commands::Init { .. }) => unreachable!(),
         Some(Commands::Start {
             workspace,
             project,
@@ -47,6 +52,27 @@ fn main() -> Result<()> {
         Some(Commands::List) => cmd_list(&config),
         Some(Commands::Destroy { project, force }) => cmd_destroy(&project, force),
     }
+}
+
+/// `botai init [--force] [--stdout]`
+fn cmd_init(config_override: Option<&Path>, force: bool, stdout: bool) -> Result<()> {
+    if stdout {
+        print!("{}", Config::default_template());
+        return Ok(());
+    }
+
+    let target_path = match config_override {
+        Some(path) => path.to_path_buf(),
+        None => Config::default_path().context(
+            "Could not determine default configuration directory. Please specify --config <FILE>.",
+        )?,
+    };
+
+    Config::init_file(&target_path, force)
+        .with_context(|| format!("Failed to initialize configuration at {:?}", target_path))?;
+
+    println!("Initialized botai configuration at: {:?}", target_path);
+    Ok(())
 }
 
 /// Default action: launches interactive TUI dashboard / multiplexer.

@@ -17,15 +17,33 @@
   - Windows: `%APPDATA%\botai\config.toml`
 - **Workspaces**: Define named sets of local repositories (e.g., `fullstack` contains `backend`, `frontend`, `proto`).
 - **Agent Definitions**: Configurable agent launch commands, arguments, and environment variables.
-- **Environment & Variable Injection**: Support per-workspace environment variables (e.g. port offsets, API configurations).
+- **Configuration Template Generation (`botai init`)**:
+  - Built-in generator for a fully documented, self-describing configuration file with extensive explanatory comments.
+  - Serves as an interactive starting template and inline documentation for all supported agents, workspaces, repos, and environment variable configurations.
+  - Automatically targets the standard platform configuration location with safe directory creation and overwrite guards.
 
-### Example `config.toml`
+### Annotated `config.toml` Template
 ```toml
+# ==============================================================================
+# botai - Configuration File
+# ==============================================================================
+# Default locations:
+#   - Linux/macOS: ~/.config/botai/config.toml (or $XDG_CONFIG_HOME/botai/config.toml)
+#   - Windows:     %APPDATA%\botai\config.toml
+# ==============================================================================
+
+# Global default AI agent tool to use when a workspace does not specify an override.
 default_agent = "claude"
+
+# ------------------------------------------------------------------------------
+# Agent Definitions
+# ------------------------------------------------------------------------------
+# Configure the AI agent CLI commands, CLI arguments, and environment variables.
 
 [agents.claude]
 command = "claude"
 args = []
+# env = { ANTHROPIC_API_KEY = "sk-ant-..." }
 
 [agents.agy]
 command = "agy"
@@ -34,6 +52,19 @@ args = []
 [agents.copilot]
 command = "gh"
 args = ["copilot", "suggest"]
+
+[agents.aider]
+command = "aider"
+args = ["--no-auto-commits"]
+
+# ------------------------------------------------------------------------------
+# Workspaces
+# ------------------------------------------------------------------------------
+# Define named multi-repo workspaces. Each workspace specifies:
+# - description: Optional summary of the workspace.
+# - default_agent: Optional agent override specific to this workspace.
+# - repos: List of absolute or relative paths to local Git repositories.
+# - env: Environment variables injected into the agent session.
 
 [workspaces.ecommerce]
 description = "E-commerce platform services"
@@ -106,6 +137,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Launches the agent CLI (with initial prompt if provided) and drops user into the interactive TUI session.
 - **`botai attach <project-name>`**: Re-attaches to an ongoing project session.
 - **`botai list`**: Lists configured workspaces, active projects, worktrees, and running sessions.
+- **`botai init [--force] [--stdout]`**:
+  - Generates an annotated configuration template serving as both documentation and an editable starter configuration.
+  - Defaults to writing to standard platform configuration path (`~/.config/botai/config.toml` or `%APPDATA%\botai\config.toml`), or the custom file passed via global `--config <FILE>`.
+  - Automatically creates parent directories if they do not exist.
+  - Refuses to overwrite an existing configuration file unless `--force` (`-f`) is passed.
+  - `--stdout` (`-s`): Outputs the configuration template directly to `stdout` without creating or modifying files on disk.
 - **`botai destroy <project-name> [--force]`**:
   - Refuses deletion if any worktree contains uncommitted git changes unless `--force` is specified.
   - Cleans up git worktrees and removes the project directory.

@@ -43,6 +43,17 @@ pub enum Commands {
     /// List all configured workspaces, repositories, and active projects.
     List,
 
+    /// Initialize a fully commented configuration file template.
+    Init {
+        /// Overwrite destination configuration file if it already exists.
+        #[arg(short, long)]
+        force: bool,
+
+        /// Output template configuration to stdout instead of writing to disk.
+        #[arg(short, long)]
+        stdout: bool,
+    },
+
     /// Safely teardown a project by removing its git worktrees and directory.
     Destroy {
         /// Name of the project directory to destroy.
@@ -127,6 +138,41 @@ mod tests {
     fn test_cli_list_subcommand() {
         let cli = Cli::try_parse_from(["botai", "list"]).expect("Failed to parse list");
         assert_eq!(cli.command, Some(Commands::List));
+    }
+
+    #[test]
+    fn test_cli_init_subcommand_defaults() {
+        let cli = Cli::try_parse_from(["botai", "init"]).expect("Failed to parse init");
+        match cli.command {
+            Some(Commands::Init { force, stdout }) => {
+                assert!(!force);
+                assert!(!stdout);
+            }
+            _ => panic!("Expected Init command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_init_subcommand_flags() {
+        let cli = Cli::try_parse_from(["botai", "init", "--force", "--stdout"])
+            .expect("Failed to parse init with long flags");
+        match cli.command {
+            Some(Commands::Init { force, stdout }) => {
+                assert!(force);
+                assert!(stdout);
+            }
+            _ => panic!("Expected Init command"),
+        }
+
+        let cli_short = Cli::try_parse_from(["botai", "init", "-f", "-s"])
+            .expect("Failed to parse init with short flags");
+        match cli_short.command {
+            Some(Commands::Init { force, stdout }) => {
+                assert!(force);
+                assert!(stdout);
+            }
+            _ => panic!("Expected Init command"),
+        }
     }
 
     #[test]

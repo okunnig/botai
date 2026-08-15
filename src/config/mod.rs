@@ -15,6 +15,9 @@ pub enum ConfigError {
     #[error("Config file not found at: {0}")]
     NotFound(PathBuf),
 
+    #[error("Configuration file already exists at '{0}'. Use --force to overwrite.")]
+    AlreadyExists(PathBuf),
+
     #[error("Workspace '{0}' not found in configuration")]
     WorkspaceNotFound(String),
 
@@ -24,6 +27,61 @@ pub enum ConfigError {
     #[error("Could not determine config directory")]
     ConfigDirNotFound,
 }
+
+/// Default template content for `config.toml` with rich explanatory comments.
+pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# ==============================================================================
+# botai - Agent Orchestrator Configuration File
+# ==============================================================================
+# Default locations:
+#   - Linux/macOS: ~/.config/botai/config.toml (or $XDG_CONFIG_HOME/botai/config.toml)
+#   - Windows:     %APPDATA%\botai\config.toml
+# ==============================================================================
+
+# Global default AI agent tool to use when a workspace does not specify an override.
+default_agent = "claude"
+
+# ------------------------------------------------------------------------------
+# Agent Definitions
+# ------------------------------------------------------------------------------
+# Configure the AI agent CLI commands, CLI arguments, and environment variables.
+# Each entry defines a tool that botai can launch inside a project's root PTY.
+
+[agents.claude]
+command = "claude"
+args = []
+# env = { ANTHROPIC_API_KEY = "sk-ant-..." }
+
+[agents.agy]
+command = "agy"
+args = []
+
+[agents.copilot]
+command = "gh"
+args = ["copilot", "suggest"]
+
+[agents.aider]
+command = "aider"
+args = ["--no-auto-commits"]
+
+# ------------------------------------------------------------------------------
+# Workspaces
+# ------------------------------------------------------------------------------
+# Define named multi-repo workspaces. Each workspace specifies:
+# - description: (Optional) Human-readable summary of the workspace purpose.
+# - default_agent: (Optional) Specific agent override for this workspace.
+# - repos: (Required) List of absolute or relative paths to local Git repositories.
+# - env: (Optional) Per-workspace environment variables injected into the agent.
+
+[workspaces.ecommerce]
+description = "E-commerce platform services"
+default_agent = "agy"
+repos = [
+    "/home/user/code/ecommerce-api",
+    "/home/user/code/ecommerce-web",
+    "/home/user/code/ecommerce-shared"
+]
+env = { PORT = "8080", NODE_ENV = "development" }
+"#;
 
 /// Configuration for an AI agent tool (e.g., Claude Code, agy, Copilot CLI).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +126,31 @@ pub struct Config {
 }
 
 impl Config {
+    /// Returns the default annotated configuration template.
+    pub fn default_template() -> &'static str {
+        DEFAULT_CONFIG_TEMPLATE
+    }
+
+    /// Initializes a configuration file at the specified path.
+    ///
+    /// If the target file already exists and `force` is false, returns `ConfigError::AlreadyExists`.
+    /// Automatically creates parent directories if needed.
+    pub fn init_file<P: AsRef<Path>>(path: P, force: bool) -> Result<PathBuf, ConfigError> {
+        let path = path.as_ref();
+        if path.exists() && !force {
+            return Err(ConfigError::AlreadyExists(path.to_path_buf()));
+        }
+
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
+        std::fs::write(path, Self::default_template())?;
+        Ok(path.to_path_buf())
+    }
+
     /// Parses configuration from a TOML string.
     pub fn load_from_str(s: &str) -> Result<Self, ConfigError> {
         let config: Config = toml::from_str(s)?;
@@ -594,5 +677,105 @@ env = { GREETING = "こんにちは" }
         );
         assert_eq!(ws.repos[1], PathBuf::from("/home/user/日本語/リポジトリ"));
         assert_eq!(ws.env.get("GREETING"), Some(&"こんにちは".to_string()));
+    }
+
+    #[test]
+    fn test_default_template_is_valid_config() {
+        let template = Config::default_template();
+        assert!(!template.is_empty(), "Template must not be empty");
+        assert!(
+            template.contains("default_agent = \"claude\""),
+            "Template must contain default_agent"
+        );
+        assert!(
+            template.contains("[agents.claude]"),
+            "Template must define claude agent"
+        );
+        assert!(
+            template.contains("[agents.agy]"),
+            "Template must define agy agent"
+        );
+        assert!(
+            template.contains("[agents.copilot]"),
+            "Template must define copilot agent"
+        );
+        assert!(
+            template.contains("[agents.aider]"),
+            "Template must define aider agent"
+        );
+        assert!(
+            template.contains("[workspaces.ecommerce]"),
+            "Template must define sample workspace"
+        );
+
+        let parsed = Config::load_from_str(template)
+            .expect("Default template must parse cleanly into Config struct");
+
+        assert_eq!(parsed.default_agent, "claude");
+        assert_eq!(parsed.agents.len(), 4);
+        assert!(parsed.get_agent("claude").is_some());
+        assert!(parsed.get_agent("agy").is_some());
+        assert!(parsed.get_agent("copilot").is_some());
+        assert!(parsed.get_agent("aider").is_some());
+
+        let ws = parsed
+            .get_workspace("ecommerce")
+            .expect("ecommerce workspace must exist in template");
+        assert_eq!(ws.default_agent.as_deref(), Some("agy"));
+        assert_eq!(ws.repos.len(), 3);
+        assert_eq!(ws.env.get("PORT"), Some(&"8080".to_string()));
+    }
+
+    #[test]
+    fn test_init_file_creates_new_file_and_directories() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+        let nested_config = temp_dir.path().join("nested").join("sub").join("config.toml");
+
+        assert!(!nested_config.exists());
+
+        let written_path = Config::init_file(&nested_config, false)
+            .expect("init_file should succeed when file does not exist");
+        assert_eq!(written_path, nested_config);
+        assert!(nested_config.exists());
+
+        let loaded = Config::load_from_file(&nested_config)
+            .expect("Generated config file must be valid and readable");
+        assert_eq!(loaded.default_agent, "claude");
+    }
+
+    #[test]
+    fn test_init_file_already_exists_fails_without_force() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+        let config_path = temp_dir.path().join("config.toml");
+
+        // First initialization
+        Config::init_file(&config_path, false).expect("First init should succeed");
+        assert!(config_path.exists());
+
+        // Second initialization without force
+        let err = Config::init_file(&config_path, false)
+            .expect_err("Second init without force should fail");
+
+        match err {
+            ConfigError::AlreadyExists(p) => assert_eq!(p, config_path),
+            other => panic!("Expected ConfigError::AlreadyExists, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_init_file_overwrites_with_force() {
+        let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
+        let config_path = temp_dir.path().join("config.toml");
+
+        std::fs::write(&config_path, "corrupted toml content")
+            .expect("Failed to write dummy content");
+
+        // Initialization with force should overwrite
+        let written_path = Config::init_file(&config_path, true)
+            .expect("init_file with force=true must succeed and overwrite");
+        assert_eq!(written_path, config_path);
+
+        let content = std::fs::read_to_string(&config_path).expect("Failed to read file");
+        assert!(content.contains("default_agent = \"claude\""));
     }
 }
