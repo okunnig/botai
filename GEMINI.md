@@ -13,7 +13,7 @@ A cross-platform terminal session orchestrator and multiplexer for AI agent CLI 
 - All build artifacts and temporary files must be directed to `/tmp/botai-build` (configured in `.cargo/config.toml` via `build.target-dir = "/tmp/botai-build"`).
 
 ## Architecture & Requirements
-See [REQS.md](file:///home/okunnig/programming/botai/REQS.md) for full technical requirements, configuration schemas, CLI specifications, and git worktree lifecycle details.
+See [REQS.md](REQS.md) for full technical requirements, configuration schemas, CLI specifications, and git worktree lifecycle details.
 
 ## Implementation
 - use of `unsafe` is strictly forbidden
