@@ -151,8 +151,18 @@ repos = []
     // 9. Submit creation with Enter
     app.handle_launcher_key(key(KeyCode::Enter));
 
-    // Modal closes and session is active
+    // Quick launcher closes and setup modal opens
     assert!(app.quick_launcher.is_none());
+    assert!(app.setup_modal.is_some());
+
+    let start = std::time::Instant::now();
+    while app.setup_modal.is_some() && start.elapsed() < std::time::Duration::from_secs(5) {
+        app.poll_setup_progress();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // Modal closes and session is active
+    assert!(app.setup_modal.is_none());
     assert_eq!(app.registry.len(), 1);
     assert_eq!(
         app.registry.active_session().unwrap().project_name(),
@@ -163,6 +173,7 @@ repos = []
         "payments"
     );
     assert!(cwd.join("stripe-webhooks").join("AGENTS.md").is_file());
+
 
     // 10. Open launcher again via Ctrl+Space then 'C' from inside the active session
     app.handle_key_event(ctrl_space_key());

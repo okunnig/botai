@@ -208,13 +208,24 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Interactive Project Creation Modal**:
   - Floating centered modal triggered by `n` or workspace selection.
   - Input fields for `Project Name:` and optional `Initial Prompt:`.
-  - Automatically initializes worktrees, generates `AGENTS.md`, spawns the configured AI agent in a PTY, and switches to the live multiplexer session.
+  - On submission (`Enter`), transitions smoothly into the **Asynchronous Live Setup Progress & Log Modal**.
+- **Asynchronous Live Setup Progress & Log Modal**:
+  - Executes git repository cloning, fetching, worktree initialization, context generation, and PTY process spawning on a background worker thread without blocking the TUI event loop or multiplexer.
+  - Displays real-time step indicators (`Step [1/4]..[4/4]`), status messages, an animated activity spinner, and a scrollable tailing log window streaming stdout/stderr messages.
+  - **Success Transition**: Automatically adds the newly created session to `SessionRegistry`, switches focus to the new project tab, and dismisses the setup modal.
+  - **Error Retention & Rollback**: On failure (e.g. branch collision, network timeout, git clone failure), cleanly rolls back partially created directories and worktrees, keeps the setup modal open displaying the error description and full logs, and prompts `[Esc] / [Enter] Close` so diagnostic details are never lost.
+- **Destroy Project Confirmation Modal**:
+  - Pressing `d` on the Left Panel (Existing Projects) opens a dedicated centered confirmation modal (` Confirm Destroy Project `) styled with alert theme colors.
+  - Prompts: `Are you sure you want to destroy project '<project_name>'? This will permanently remove the project directory and its git worktrees.`
+  - **Confirmation**: Pressing `y`, `Y`, or `Enter` closes the modal and executes clean project directory and worktree removal.
+  - **Cancellation**: Pressing `n`, `N`, or `Esc` closes the modal without performing any destructive action.
+  - Hardware cursor is automatically hidden while the confirmation modal is open.
 - **Dashboard Keybindings**:
   - `Tab` / `Left` / `Right`: Switch active panel focus.
   - `Up` / `Down`: Navigate list items within the active panel.
   - `Enter`: Attach to selected project (Left Panel) or open creation modal (Right Panel).
   - `n`: Trigger new project modal for the selected workspace.
-  - `d`: Destroy selected project directory (with confirmation check).
+  - `d`: Open destroy confirmation modal for the selected project.
   - `q` / `Esc`: Quit `botai`.
 
 ---
@@ -228,8 +239,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - **Workspace Selector**: Defaults to the active project's workspace (or the first configured workspace); cycled using `Left` / `Right`.
     - **Project Name Input**: Text entry field with interactive editing.
     - **Initial Prompt Input**: Optional text entry field for initial task instruction.
-    - **Inline Error Feedback**: If creation fails (e.g. branch or worktree collision, directory exists, clone failure), the modal remains open displaying an inline error banner so input is not lost.
-    - **Submission**: On `Enter`, creates worktrees, generates `AGENTS.md`, spawns the agent in a new PTY session, registers it in `SessionRegistry`, closes the modal, and switches immediately to the new session tab.
+    - **Submission**: On `Enter`, closes the quick launcher and transitions immediately into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker to execute repository cloning, worktree creation, `AGENTS.md` context synthesis, and agent PTY launching without freezing the active session.
+    - **Inline & Modal Error Feedback**: If creation fails, full diagnostic logs and error banners are retained until dismissed via `[Esc]` or `[Enter]`.
   - **Attach Existing Project Tab**:
     - Lists local project directories in CWD (directories with `AGENTS.md`).
     - Navigated via `Up` / `Down` / `j` / `k`.
@@ -239,6 +250,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `Left` / `Right`: Switch between 'Create New' and 'Attach Existing' tabs when tab bar is focused, or cycle workspaces when workspace field is focused.
   - `Enter`: Submit create or attach action.
   - `Esc`: Dismiss modal and return focus to active terminal PTY.
+
 
 ---
 

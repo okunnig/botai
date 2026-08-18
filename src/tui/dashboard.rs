@@ -149,6 +149,34 @@ impl CreationModalState {
     }
 }
 
+/// State for the destroy project confirmation modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DestroyModalState {
+    pub project_name: String,
+}
+
+impl DestroyModalState {
+    /// Creates a new `DestroyModalState` targeting the given project.
+    pub fn new(project_name: impl Into<String>) -> Self {
+        Self {
+            project_name: project_name.into(),
+        }
+    }
+
+    /// Handles keyboard events within the destroy confirmation modal.
+    pub fn handle_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                Some(DashboardAction::Destroy(self.project_name.clone()))
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                Some(DashboardAction::None)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Full state for the interactive two-panel launcher dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardState {
@@ -158,6 +186,7 @@ pub struct DashboardState {
     pub selected_project_idx: usize,
     pub selected_workspace_idx: usize,
     pub creation_modal: Option<CreationModalState>,
+    pub destroy_modal: Option<DestroyModalState>,
 }
 
 impl DashboardState {
@@ -170,6 +199,7 @@ impl DashboardState {
             selected_project_idx: 0,
             selected_workspace_idx: 0,
             creation_modal: None,
+            destroy_modal: None,
         }
     }
 
@@ -252,6 +282,9 @@ impl DashboardState {
 
     /// Returns the hardware cursor position if a modal or input field is actively focused.
     pub fn cursor_position(&self, area: Rect) -> Option<Position> {
+        if self.destroy_modal.is_some() {
+            return None;
+        }
         self.creation_modal
             .as_ref()
             .and_then(|modal| modal.cursor_position(area))
@@ -259,6 +292,15 @@ impl DashboardState {
 
     /// Handles a keyboard event and returns any triggered `DashboardAction`.
     pub fn handle_key(&mut self, key: KeyEvent) -> DashboardAction {
+        if let Some(mut modal) = self.destroy_modal.take() {
+            if let Some(action) = modal.handle_key(key) {
+                return action;
+            } else {
+                self.destroy_modal = Some(modal);
+                return DashboardAction::None;
+            }
+        }
+
         if let Some(mut modal) = self.creation_modal.take() {
             if key.code == KeyCode::Esc {
                 return DashboardAction::None;
@@ -294,10 +336,9 @@ impl DashboardState {
                     let idx = self
                         .selected_project_idx
                         .min(self.local_projects.len().saturating_sub(1));
-                    DashboardAction::Destroy(self.local_projects[idx].clone())
-                } else {
-                    DashboardAction::None
+                    self.destroy_modal = Some(DestroyModalState::new(&self.local_projects[idx]));
                 }
+                DashboardAction::None
             }
             KeyCode::Enter => match self.active_panel {
                 ActivePanel::Projects => {
@@ -320,6 +361,7 @@ impl DashboardState {
         }
     }
 }
+
 
 /// Renders the full two-panel dashboard, status footer, and optional floating creation modal into the given `Buffer`.
 pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, theme: &Theme) {
@@ -452,11 +494,69 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     let footer = Paragraph::new(footer_text).style(footer_style);
     footer.render(footer_area, buf);
 
-    // 4. Render Floating Creation Modal if active
-    if let Some(ref modal) = state.creation_modal {
+    // 4. Render Floating Destroy Modal or Creation Modal if active
+    if let Some(ref modal) = state.destroy_modal {
+        render_destroy_modal(modal, area, buf, theme);
+    } else if let Some(ref modal) = state.creation_modal {
         render_creation_modal(modal, area, buf, theme);
     }
 }
+
+fn render_destroy_modal(modal: &DestroyModalState, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let width = 76.min(area.width.saturating_sub(4));
+    let height = 8.min(area.height.saturating_sub(2));
+
+    if width < 20 || height < 5 {
+        return;
+    }
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    // Clear background of modal area
+    Clear.render(modal_area, buf);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Confirm Destroy Project ")
+        .border_style(
+            Style::default()
+                .fg(theme.status_error)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let inner = block.inner(modal_area);
+    block.render(modal_area, buf);
+
+    let lines = vec![
+        Line::from(vec![
+            Span::raw("Are you sure you want to destroy project '"),
+            Span::styled(
+                &modal.project_name,
+                Style::default()
+                    .fg(theme.modal_title)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("'?"),
+        ]),
+        Line::from(Span::styled(
+            "This will permanently remove the project directory and its git worktrees.",
+            Style::default().fg(theme.status_bar_fg),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            " [y] / [Enter] Confirm  |  [n] / [Esc] Cancel ",
+            Style::default()
+                .fg(theme.key_hint)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines);
+    paragraph.render(inner, buf);
+}
+
 
 fn render_creation_modal(modal: &CreationModalState, area: Rect, buf: &mut Buffer, theme: &Theme) {
     let width = 64.min(area.width.saturating_sub(4));
@@ -1032,7 +1132,7 @@ command = "claude"
     }
 
     #[test]
-    fn test_destroy_action_from_left_panel() {
+    fn test_destroy_action_from_left_panel_confirmation_flow() {
         let mut state = DashboardState::new(
             vec!["ws".into()],
             vec!["proj-to-delete".into(), "proj-safe".into()],
@@ -1040,16 +1140,82 @@ command = "claude"
         state.active_panel = ActivePanel::Projects;
         state.selected_project_idx = 0;
 
+        // Press 'd' -> opens destroy modal, returns None
         let action = state.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(action, DashboardAction::None);
+        assert_eq!(
+            state.destroy_modal,
+            Some(DestroyModalState {
+                project_name: "proj-to-delete".to_string()
+            })
+        );
+
+        // Cancel with 'n'
+        let action = state.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(action, DashboardAction::None);
+        assert!(state.destroy_modal.is_none());
+
+        // Open again and cancel with Esc
+        state.handle_key(key(KeyCode::Char('d')));
+        assert!(state.destroy_modal.is_some());
+        let action = state.handle_key(key(KeyCode::Esc));
+        assert_eq!(action, DashboardAction::None);
+        assert!(state.destroy_modal.is_none());
+
+        // Open again and confirm with 'y'
+        state.handle_key(key(KeyCode::Char('d')));
+        assert!(state.destroy_modal.is_some());
+        let action = state.handle_key(key(KeyCode::Char('y')));
         assert_eq!(
             action,
             DashboardAction::Destroy("proj-to-delete".to_string())
         );
+        assert!(state.destroy_modal.is_none());
 
-        // On Workspaces panel, 'd' key does nothing
+        // Open again and confirm with Enter
+        state.handle_key(key(KeyCode::Char('d')));
+        assert!(state.destroy_modal.is_some());
+        let action = state.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            action,
+            DashboardAction::Destroy("proj-to-delete".to_string())
+        );
+        assert!(state.destroy_modal.is_none());
+
+        // On Workspaces panel, 'd' key does nothing and doesn't open modal
         state.switch_panel();
         let action = state.handle_key(key(KeyCode::Char('d')));
         assert_eq!(action, DashboardAction::None);
+        assert!(state.destroy_modal.is_none());
+    }
+
+    #[test]
+    fn test_render_destroy_modal() {
+        let mut state = DashboardState::new(
+            vec!["ws".into()],
+            vec!["legacy-app".into()],
+        );
+        state.destroy_modal = Some(DestroyModalState::new("legacy-app"));
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+
+        render_dashboard(&state, area, &mut buf, &theme);
+        let rendered = buf
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Confirm Destroy Project"));
+        assert!(rendered.contains("Are you sure you want to destroy project 'legacy-app'?"));
+        assert!(rendered.contains("This will permanently remove the project directory"));
+        assert!(rendered.contains("[y] / [Enter] Confirm"));
+        assert!(rendered.contains("[n] / [Esc] Cancel"));
+
+        // Cursor should be hidden when destroy modal is active
+        assert_eq!(state.cursor_position(area), None);
     }
 
     #[test]

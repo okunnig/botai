@@ -31,6 +31,9 @@ use crate::tui::events::{map_key_event, TuiAction};
 use crate::tui::quick_launcher::{
     render_quick_launcher, QuickLauncherAction, QuickLauncherState,
 };
+use crate::tui::setup_modal::{
+    render_setup_modal, SetupModalState, SetupProgressEvent,
+};
 use crate::tui::status_bar::StatusBar;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{compute_layout, TerminalView};
@@ -44,12 +47,14 @@ pub struct TuiApp {
     pub tick_rate: Duration,
     pub dashboard: Option<DashboardState>,
     pub quick_launcher: Option<QuickLauncherState>,
+    pub setup_modal: Option<SetupModalState>,
     pub config: Option<Config>,
     pub cwd: Option<PathBuf>,
     pub viewport_size: Option<(u16, u16)>,
     pub leader_active: bool,
     pub showing_dashboard: bool,
 }
+
 
 struct TerminalCleanupGuard;
 
@@ -98,6 +103,7 @@ impl TuiApp {
             tick_rate: Duration::from_millis(30),
             dashboard: None,
             quick_launcher: None,
+            setup_modal: None,
             config: None,
             cwd: None,
             viewport_size: None,
@@ -122,6 +128,13 @@ impl TuiApp {
         self.quick_launcher = Some(quick_launcher);
         self
     }
+
+    /// Sets the setup modal state on `TuiApp`.
+    pub fn with_setup_modal(mut self, setup_modal: SetupModalState) -> Self {
+        self.setup_modal = Some(setup_modal);
+        self
+    }
+
 
     /// Sets the configuration on `TuiApp`.
     pub fn with_config(mut self, config: Config) -> Self {
@@ -190,7 +203,7 @@ impl TuiApp {
         self.resize_all_sessions(initial_term_area.width, initial_term_area.height);
 
         while !self.should_quit {
-            // 1. Synchronize viewport dimensions before processing PTY streams or drawing
+            // Synchronize viewport dimensions before processing PTY streams or drawing
             let current_size = terminal.size()?;
             let (_, term_area) = compute_layout(ratatui::layout::Rect::new(
                 0,
@@ -202,6 +215,9 @@ impl TuiApp {
                 self.viewport_size = Some((term_area.width, term_area.height));
                 self.resize_all_sessions(term_area.width, term_area.height);
             }
+
+            // 1. Poll setup progress events
+            self.poll_setup_progress();
 
             // 2. Process PTY outputs for all sessions
             self.process_pty_streams();
@@ -254,6 +270,10 @@ impl TuiApp {
                         f.set_cursor_position(pos);
                     }
                 }
+
+                if let Some(setup_modal) = &self.setup_modal {
+                    render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
+                }
             })?;
 
             // 4. Handle user input with timeout up to tick_rate
@@ -264,7 +284,9 @@ impl TuiApp {
                     match event::read()? {
                         Event::Key(key) => {
                             if key.kind == KeyEventKind::Press {
-                                if self.quick_launcher.is_some() {
+                                if self.setup_modal.is_some() {
+                                    self.handle_setup_modal_key(key);
+                                } else if self.quick_launcher.is_some() {
                                     self.handle_launcher_key(key);
                                 } else if self.is_showing_dashboard() {
                                     self.handle_dashboard_key(key);
@@ -285,6 +307,7 @@ impl TuiApp {
                     }
                 }
             }
+
 
             if last_tick.elapsed() >= self.tick_rate {
                 last_tick = Instant::now();
@@ -397,18 +420,8 @@ impl TuiApp {
                     project,
                     prompt,
                 } => {
-                    match self.create_and_start_project(&workspace, &project, prompt.as_deref()) {
-                        Ok(()) => {
-                            let new_idx = self.registry.len().saturating_sub(1);
-                            let _ = self.registry.set_active_index(new_idx);
-                            self.showing_dashboard = false;
-                            self.quick_launcher = None;
-                        }
-                        Err(err) => {
-                            launcher.set_error(err.to_string());
-                            self.quick_launcher = Some(launcher);
-                        }
-                    }
+                    self.quick_launcher = None;
+                    self.start_project_creation(&workspace, &project, prompt.as_deref());
                 }
                 QuickLauncherAction::Attach(project) => {
                     if let Some(pos) = self
@@ -477,14 +490,7 @@ impl TuiApp {
                 project,
                 prompt,
             } => {
-                if self
-                    .create_and_start_project(&workspace, &project, prompt.as_deref())
-                    .is_ok()
-                {
-                    let new_idx = self.registry.len().saturating_sub(1);
-                    let _ = self.registry.set_active_index(new_idx);
-                    self.showing_dashboard = false;
-                }
+                self.start_project_creation(&workspace, &project, prompt.as_deref());
             }
             DashboardAction::Destroy(project) => {
                 if let Some(session) = self.registry.get_by_project(&project) {
@@ -496,6 +502,84 @@ impl TuiApp {
             DashboardAction::None => {}
         }
     }
+
+    /// Polls setup modal events (if any) and adds newly created project sessions to registry upon completion.
+    pub fn poll_setup_progress(&mut self) {
+        if let Some(modal) = &mut self.setup_modal {
+            modal.tick();
+            if let Some((ps, pty, vt)) = modal.poll_events() {
+                let _ = self.registry.add(ps, pty, vt);
+                let new_idx = self.registry.len().saturating_sub(1);
+                let _ = self.registry.set_active_index(new_idx);
+                self.setup_modal = None;
+                self.showing_dashboard = false;
+            }
+        }
+    }
+
+    /// Handles keyboard events when the setup modal is active.
+    pub fn handle_setup_modal_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(modal) = &mut self.setup_modal {
+            if modal.handle_key(key) {
+                self.setup_modal = None;
+                if self.is_showing_dashboard() {
+                    self.refresh_dashboard();
+                }
+            }
+        }
+    }
+
+    /// Starts asynchronous project creation on a background worker thread and activates `setup_modal`.
+    pub fn start_project_creation(
+        &mut self,
+        workspace_name: &str,
+        project_name: &str,
+        prompt: Option<&str>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let modal = SetupModalState::new(
+            project_name,
+            workspace_name,
+            prompt.map(String::from),
+            rx,
+        );
+        self.setup_modal = Some(modal);
+
+        if self.registry.get_by_project(project_name).is_some() {
+            let _ = tx.send(SetupProgressEvent::Error(format!(
+                "Project '{}' already has an active session in registry",
+                project_name
+            )));
+            if let Some(modal) = &mut self.setup_modal {
+                let _ = modal.poll_events();
+            }
+            return;
+        }
+
+        let cwd = self
+            .cwd
+            .clone()
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let config = self.config.clone();
+        let viewport_size = self.viewport_size.unwrap_or((100, 30));
+        let ws_name = workspace_name.to_string();
+        let proj_name = project_name.to_string();
+        let prompt_owned = prompt.map(String::from);
+
+        std::thread::spawn(move || {
+            crate::tui::setup_modal::run_setup_worker(
+                ws_name,
+                proj_name,
+                prompt_owned,
+                config,
+                cwd,
+                viewport_size,
+                tx,
+            );
+        });
+    }
+
 
     /// Attaches to an existing project directory and adds its session to the registry.
     pub fn attach_project(&mut self, project_name: &str) -> anyhow::Result<()> {
@@ -982,8 +1066,19 @@ repos = []
         );
         app.handle_launcher_key(enter_key);
 
-        // Modal should close on success and registry should contain 1 active session
+        // Quick launcher should close and setup_modal should open
         assert!(app.quick_launcher.is_none());
+        assert!(app.setup_modal.is_some());
+
+        // Wait for setup worker to finish
+        let start = std::time::Instant::now();
+        while app.setup_modal.is_some() && start.elapsed() < Duration::from_secs(5) {
+            app.poll_setup_progress();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Setup modal should close on success and registry should contain 1 active session
+        assert!(app.setup_modal.is_none());
         assert_eq!(app.registry.len(), 1);
         let active = app.registry.active_session().unwrap();
         assert_eq!(active.project_name(), "billing-service");
@@ -994,7 +1089,7 @@ repos = []
         );
         assert!(cwd.join("billing-service").join("AGENTS.md").is_file());
 
-        // 4. Try creating another project with the same name -> Collision should keep modal open with error
+        // 4. Try creating another project with the same name -> Collision should open setup_modal with error
         app.open_quick_launcher();
         let mut launcher = app.quick_launcher.take().unwrap();
         launcher.focus = crate::tui::quick_launcher::LauncherFocus::ProjectName;
@@ -1007,14 +1102,15 @@ repos = []
         app.quick_launcher = Some(launcher);
 
         app.handle_launcher_key(enter_key);
-        assert!(app.quick_launcher.is_some(), "Modal must remain open on error");
+        assert!(app.quick_launcher.is_none());
+        assert!(app.setup_modal.is_some(), "Setup modal must be open on error");
         assert!(
-            app.quick_launcher
+            app.setup_modal
                 .as_ref()
                 .unwrap()
-                .error_message
+                .error
                 .is_some(),
-            "Error message must be set on collision"
+            "Error message must be set in setup_modal on collision"
         );
     }
 
@@ -1597,6 +1693,102 @@ repos = []
 
         // Directory must be removed
         assert!(!proj_dir.exists());
+    }
+
+    #[test]
+    fn test_tui_app_start_project_creation_success() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        #[cfg(windows)]
+        let shell_cmd = "cmd.exe";
+        #[cfg(not(windows))]
+        let shell_cmd = "sh";
+
+        let config_toml = format!(
+            r#"
+default_agent = "mock"
+repos_dir = "{}/repos"
+
+[agents.mock]
+command = "{}"
+args = []
+
+[workspaces.test_ws]
+repos = []
+"#,
+            cwd.display().to_string().replace('\\', "/"),
+            shell_cmd
+        );
+        let config = Config::load_from_str(&config_toml).unwrap();
+
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_config(config)
+            .with_cwd(cwd.clone());
+
+        app.start_project_creation("test_ws", "async-proj", Some("Initial prompt"));
+        assert!(app.setup_modal.is_some());
+
+        // Wait up to 5 seconds for worker thread to finish
+        let start = std::time::Instant::now();
+        while app.setup_modal.is_some() && start.elapsed() < Duration::from_secs(5) {
+            app.poll_setup_progress();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(
+            app.setup_modal.is_none(),
+            "Setup modal should close upon successful completion"
+        );
+        assert_eq!(app.registry.len(), 1);
+        let active = app.registry.active_session().unwrap();
+        assert_eq!(active.project_name(), "async-proj");
+        assert_eq!(active.workspace_name(), "test_ws");
+        assert!(cwd.join("async-proj").join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn test_tui_app_start_project_creation_duplicate_error_retention_and_close() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, &cwd).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("active-proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry).with_cwd(cwd.clone());
+
+        // Try creating project with name that already exists in registry
+        app.start_project_creation("ws", "active-proj", None);
+        assert!(app.setup_modal.is_some());
+        let modal = app.setup_modal.as_ref().unwrap();
+        assert!(modal.error.is_some());
+        assert!(modal.is_finished);
+
+        // Key press other than Esc/Enter should keep modal open
+        let dummy_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_setup_modal_key(dummy_key);
+        assert!(app.setup_modal.is_some());
+
+        // Esc key should dismiss modal
+        let esc_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_setup_modal_key(esc_key);
+        assert!(app.setup_modal.is_none());
     }
 }
 

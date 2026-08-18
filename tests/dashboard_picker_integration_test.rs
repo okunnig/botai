@@ -189,21 +189,30 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     );
     assert!(state.creation_modal.is_none());
 
-    // 11. Test Destroy action on Projects panel
+    // 11. Test Destroy confirmation modal action on Projects panel
     state.handle_key(key(KeyCode::Tab)); // Switch back to Projects
     assert_eq!(state.active_panel, ActivePanel::Projects);
     state.selected_project_idx = 0; // "payment-gateway"
 
     let action = state.handle_key(key(KeyCode::Char('d')));
+    assert_eq!(action, DashboardAction::None);
+    assert_eq!(
+        state.destroy_modal,
+        Some(botai::tui::DestroyModalState::new("payment-gateway"))
+    );
+
+    let action = state.handle_key(key(KeyCode::Char('y')));
     assert_eq!(
         action,
         DashboardAction::Destroy("payment-gateway".to_string())
     );
+    assert!(state.destroy_modal.is_none());
 
     // 12. Test Quit action
     let action = state.handle_key(key(KeyCode::Char('q')));
     assert_eq!(action, DashboardAction::Quit);
 }
+
 
 #[test]
 fn test_integration_tui_app_with_dashboard_actions() {
