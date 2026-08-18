@@ -131,22 +131,25 @@ impl TuiApp {
         self.resize_all_sessions(initial_term_area.width, initial_term_area.height);
 
         while !self.should_quit {
-            // 1. Process PTY outputs for all sessions
+            // 1. Synchronize viewport dimensions before processing PTY streams or drawing
+            let current_size = terminal.size()?;
+            let (_, term_area) = compute_layout(ratatui::layout::Rect::new(
+                0,
+                0,
+                current_size.width,
+                current_size.height,
+            ));
+            if self.viewport_size != Some((term_area.width, term_area.height)) {
+                self.viewport_size = Some((term_area.width, term_area.height));
+                self.resize_all_sessions(term_area.width, term_area.height);
+            }
+
+            // 2. Process PTY outputs for all sessions
             self.process_pty_streams();
 
-            // 2. Draw active frame
+            // 3. Draw active frame
             terminal.draw(|f| {
                 let (status_area, term_area) = compute_layout(f.area());
-
-                // Ensure session sizes match term_area
-                if self.viewport_size != Some((term_area.width, term_area.height)) {
-                    self.viewport_size = Some((term_area.width, term_area.height));
-                    self.resize_all_sessions(term_area.width, term_area.height);
-                } else if let Some(active) = self.registry.active_session() {
-                    if active.vt().size() != (term_area.width, term_area.height) {
-                        self.resize_all_sessions(term_area.width, term_area.height);
-                    }
-                }
 
                 if self.registry.is_empty() && self.dashboard.is_some() {
                     if let Some(dashboard) = &self.dashboard {
@@ -181,26 +184,33 @@ impl TuiApp {
                 }
             })?;
 
-            // 3. Handle user input with timeout up to tick_rate
+            // 4. Handle user input with timeout up to tick_rate
             let timeout = self.tick_rate.saturating_sub(last_tick.elapsed());
 
             if event::poll(timeout)? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        if self.quick_launcher.is_some() {
-                            self.handle_launcher_key(key);
-                        } else if self.registry.is_empty() && self.dashboard.is_some() {
-                            self.handle_dashboard_key(key);
-                        } else {
-                            self.handle_key_event(key);
+                while event::poll(Duration::from_millis(0))? {
+                    match event::read()? {
+                        Event::Key(key) => {
+                            if key.kind == KeyEventKind::Press {
+                                if self.quick_launcher.is_some() {
+                                    self.handle_launcher_key(key);
+                                } else if self.registry.is_empty() && self.dashboard.is_some() {
+                                    self.handle_dashboard_key(key);
+                                } else {
+                                    self.handle_key_event(key);
+                                }
+                            }
                         }
+                        Event::Resize(cols, rows) => {
+                            let (_, term_area) =
+                                compute_layout(ratatui::layout::Rect::new(0, 0, cols, rows));
+                            if self.viewport_size != Some((term_area.width, term_area.height)) {
+                                self.viewport_size = Some((term_area.width, term_area.height));
+                                self.resize_all_sessions(term_area.width, term_area.height);
+                            }
+                        }
+                        _ => {}
                     }
-                } else if let Event::Resize(cols, rows) = event::read()? {
-                    let _ = terminal.clear();
-                    let (_, term_area) =
-                        compute_layout(ratatui::layout::Rect::new(0, 0, cols, rows));
-                    self.viewport_size = Some((term_area.width, term_area.height));
-                    self.resize_all_sessions(term_area.width, term_area.height);
                 }
             }
 
