@@ -545,6 +545,7 @@ mod tests {
 
         let toml_content = r#"
 default_agent = "claude"
+repos_dir = "/repos"
 
 [agents.claude]
 command = "claude"
@@ -577,6 +578,7 @@ repos = ["/path/repo2"]
         let config = Config::load_from_str(
             r#"
 default_agent = "claude"
+repos_dir = "/repos"
 [agents.claude]
 command = "claude"
 "#,

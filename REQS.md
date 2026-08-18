@@ -16,12 +16,9 @@
   - Linux / macOS: `~/.config/botai/config.toml` (or `$XDG_CONFIG_HOME/botai/config.toml`)
   - Windows: `%APPDATA%\botai\config.toml`
 - **Central Repositories Directory (`repos_dir`)**:
-  - Global configuration field `repos_dir` specifying where remote repositories are cloned and cached.
-  - Defaults to standard platform data directories:
-    - Linux: `~/.local/share/botai/repos` (or `$XDG_DATA_HOME/botai/repos`)
-    - macOS: `~/Library/Application Support/botai/repos`
-    - Windows: `%LOCALAPPDATA%\botai\repos`
-  - Overridable via the `BOTAI_REPOS_DIR` environment variable.
+  - Required global configuration field `repos_dir` specifying where remote repositories are cloned and cached.
+  - Does not assume any implicit default directory; must be explicitly configured in `config.toml` (e.g. `repos_dir = "~/.local/share/botai/repos"` or `repos_dir = "~/code/repos"`).
+  - Can be overridden at runtime via the `BOTAI_REPOS_DIR` environment variable.
 - **Hybrid Repository Declarations**:
   - Repositories in `workspaces.<name>.repos` support:
     - **Remote Git URLs** (`https://...`, `git@...`, `ssh://...`): Automatically cloned into `<repos_dir>/<repo_name>`.
@@ -49,10 +46,9 @@
 # Global default AI agent tool to use when a workspace does not specify an override.
 default_agent = "claude"
 
-# Central directory where remote repositories are cloned and cached.
-# Defaults to ~/.local/share/botai/repos on Linux or %LOCALAPPDATA%\botai\repos on Windows.
-# Can also be overridden by setting the BOTAI_REPOS_DIR environment variable.
-# repos_dir = "~/.local/share/botai/repos"
+# Central directory where remote repositories are cloned and cached (required).
+# Can also be overridden at runtime by setting the BOTAI_REPOS_DIR environment variable.
+repos_dir = "~/.local/share/botai/repos"
 
 # ------------------------------------------------------------------------------
 # Agent Definitions

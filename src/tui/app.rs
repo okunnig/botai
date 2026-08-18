@@ -234,7 +234,8 @@ impl TuiApp {
             return Ok(());
         }
 
-        let default_config = Config::load_from_str("default_agent = \"claude\"\n").ok();
+        let default_config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
         let config = self.config.as_ref().or(default_config.as_ref());
 
         let agent_name = config.map(|c| c.default_agent.as_str()).unwrap_or("claude");
@@ -287,7 +288,8 @@ impl TuiApp {
             .unwrap_or_else(|| PathBuf::from("."));
         let project_dir = cwd.join(project_name);
 
-        let default_config = Config::load_from_str("default_agent = \"claude\"\n").ok();
+        let default_config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
         let config = self.config.as_ref().or(default_config.as_ref());
 
         let ws = config.and_then(|c| c.get_workspace(workspace_name));
@@ -410,13 +412,14 @@ impl TuiApp {
             if let Some(cfg) = &self.config {
                 *dashboard = DashboardState::from_env(cfg, &cwd);
             } else {
-                let default_cfg = Config::load_from_str("default_agent = \"claude\"\n")
-                    .unwrap_or_else(|_| Config {
-                        default_agent: "claude".to_string(),
-                        repos_dir: None,
-                        agents: HashMap::new(),
-                        workspaces: HashMap::new(),
-                    });
+                let default_cfg =
+                    Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                        .unwrap_or_else(|_| Config {
+                            default_agent: "claude".to_string(),
+                            repos_dir: PathBuf::from(".botai_repos"),
+                            agents: HashMap::new(),
+                            workspaces: HashMap::new(),
+                        });
                 *dashboard = DashboardState::from_env(&default_cfg, &cwd);
             }
         }

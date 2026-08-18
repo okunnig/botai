@@ -45,6 +45,7 @@ fn test_integration_dashboard_lifecycle_from_env_to_action() {
     // 2. Setup mock Config with multiple workspaces
     let config_toml = r#"
 default_agent = "claude"
+repos_dir = "/repos"
 
 [agents.claude]
 command = "claude"
@@ -215,6 +216,7 @@ fn test_integration_tui_app_with_dashboard_actions() {
 
     let config_toml = r#"
 default_agent = "mock_shell"
+repos_dir = "/tmp/repos"
 
 [agents.mock_shell]
 command = "sh"

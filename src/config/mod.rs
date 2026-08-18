@@ -48,10 +48,9 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# =================================
 # Global default AI agent tool to use when a workspace does not specify an override.
 default_agent = "claude"
 
-# Central directory where remote repositories are cloned and cached.
-# Defaults to ~/.local/share/botai/repos on Linux or %LOCALAPPDATA%\botai\repos on Windows.
-# Can also be overridden by setting the BOTAI_REPOS_DIR environment variable.
-# repos_dir = "~/.local/share/botai/repos"
+# Central directory where remote repositories are cloned and cached (required).
+# Can also be overridden at runtime by setting the BOTAI_REPOS_DIR environment variable.
+repos_dir = "~/.local/share/botai/repos"
 
 # ------------------------------------------------------------------------------
 # Agent Definitions
@@ -226,9 +225,8 @@ pub struct WorkspaceConfig {
 pub struct Config {
     /// Global fallback default agent name.
     pub default_agent: String,
-    /// Optional central directory where remote repositories are cloned.
-    #[serde(default)]
-    pub repos_dir: Option<PathBuf>,
+    /// Central directory where remote repositories are cloned and cached (required).
+    pub repos_dir: PathBuf,
     /// Defined agent tools.
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
@@ -282,27 +280,16 @@ impl Config {
         directories::BaseDirs::new().map(|dirs| dirs.config_dir().join("botai").join("config.toml"))
     }
 
-    /// Resolves the default central repository storage directory:
-    /// - Linux / macOS: `~/.local/share/botai/repos` (or `$XDG_DATA_HOME/botai/repos`)
-    /// - Windows: `%LOCALAPPDATA%\botai\repos`
-    pub fn default_repos_dir() -> Option<PathBuf> {
-        directories::BaseDirs::new().map(|dirs| dirs.data_dir().join("botai").join("repos"))
-    }
-
     /// Resolves the effective central repository directory, respecting:
-    /// 1. `BOTAI_REPOS_DIR` environment variable
+    /// 1. `BOTAI_REPOS_DIR` environment variable (if set)
     /// 2. `repos_dir` configuration in `config.toml`
-    /// 3. Standard platform data directory fallback
     pub fn resolved_repos_dir(&self) -> PathBuf {
         if let Ok(env_val) = std::env::var("BOTAI_REPOS_DIR") {
             if !env_val.trim().is_empty() {
                 return expand_tilde(env_val.trim());
             }
         }
-        if let Some(dir) = &self.repos_dir {
-            return expand_tilde(dir);
-        }
-        Self::default_repos_dir().unwrap_or_else(|| PathBuf::from(".botai_repos"))
+        expand_tilde(&self.repos_dir)
     }
 
     /// Resolves a single repository entry string into a `ResolvedRepo`.
@@ -421,6 +408,7 @@ mod tests {
 
     const SAMPLE_VALID_TOML: &str = r#"
 default_agent = "claude"
+repos_dir = "/tmp/botai_repos"
 
 [agents.claude]
 command = "claude"
@@ -458,6 +446,7 @@ repos = [
             .expect("Valid TOML config should parse successfully");
 
         assert_eq!(config.default_agent, "claude");
+        assert_eq!(config.repos_dir, PathBuf::from("/tmp/botai_repos"));
         assert_eq!(config.agents.len(), 3);
         assert_eq!(config.workspaces.len(), 2);
 
@@ -518,6 +507,7 @@ repos = [
     fn test_parse_minimal_valid_config() {
         let minimal_toml = r#"
 default_agent = "basic"
+repos_dir = "/tmp/repos"
 
 [agents.basic]
 command = "echo"
@@ -529,6 +519,7 @@ repos = ["/tmp/repo"]
             .expect("Minimal TOML should parse successfully with defaults");
 
         assert_eq!(config.default_agent, "basic");
+        assert_eq!(config.repos_dir, PathBuf::from("/tmp/repos"));
 
         let agent = config.get_agent("basic").expect("Agent 'basic' must exist");
         assert_eq!(agent.command, "echo");
@@ -608,6 +599,7 @@ repos = ["/tmp/repo"]
     fn test_resolve_agent_for_workspace_agent_not_found_on_workspace_override() {
         let toml = r#"
 default_agent = "claude"
+repos_dir = "/tmp/repos"
 
 [agents.claude]
 command = "claude"
@@ -632,6 +624,7 @@ repos = ["/path/to/repo"]
     fn test_resolve_agent_for_workspace_agent_not_found_on_global_fallback() {
         let toml = r#"
 default_agent = "missing_global_agent"
+repos_dir = "/tmp/repos"
 
 [agents.other]
 command = "other"
@@ -686,18 +679,6 @@ repos = ["/path/to/repo"]
                 path_str
             );
         }
-    }
-
-    #[test]
-    fn test_default_repos_dir_resolution() {
-        let repos_dir = Config::default_repos_dir();
-        assert!(repos_dir.is_some());
-        let path = repos_dir.unwrap();
-        assert!(
-            path.ends_with("botai/repos") || path.ends_with(r"botai\repos"),
-            "Expected repos dir to end with botai/repos, got: {:?}",
-            path
-        );
     }
 
     #[test]
@@ -820,6 +801,7 @@ repos = [
     fn test_resolve_workspace_repos_collision_error() {
         let toml = r#"
 default_agent = "claude"
+repos_dir = "/tmp/repos"
 
 [workspaces.conflicted]
 repos = [
@@ -849,9 +831,27 @@ repos = [
     }
 
     #[test]
+    fn test_error_missing_required_repos_dir() {
+        let toml_missing_repos_dir = r#"
+default_agent = "claude"
+
+[agents.claude]
+command = "claude"
+"#;
+        let err = Config::load_from_str(toml_missing_repos_dir)
+            .expect_err("Config missing required repos_dir field should produce a Parse error");
+
+        match err {
+            ConfigError::Parse(_) => (),
+            other => panic!("Expected ConfigError::Parse, got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_error_malformed_toml_syntax() {
         let malformed_toml = r#"
 default_agent = "claude"
+repos_dir = "/tmp/repos"
 [agents.claude
 command = "claude"
 "#;
@@ -867,6 +867,8 @@ command = "claude"
     #[test]
     fn test_error_missing_required_default_agent() {
         let toml_missing_default_agent = r#"
+repos_dir = "/tmp/repos"
+
 [agents.claude]
 command = "claude"
 
@@ -886,6 +888,7 @@ repos = ["/path/to/repo"]
     fn test_error_missing_agent_command() {
         let toml_missing_command = r#"
 default_agent = "claude"
+repos_dir = "/tmp/repos"
 
 [agents.claude]
 args = ["--some-arg"]
@@ -906,6 +909,7 @@ repos = ["/path/to/repo"]
     fn test_error_missing_workspace_repos() {
         let toml_missing_repos = r#"
 default_agent = "claude"
+repos_dir = "/tmp/repos"
 
 [agents.claude]
 command = "claude"
@@ -926,6 +930,7 @@ description = "Missing repos field"
     fn test_error_invalid_field_type() {
         let toml_invalid_type = r#"
 default_agent = "claude"
+repos_dir = "/tmp/repos"
 
 [agents.claude]
 command = "claude"
@@ -987,6 +992,7 @@ repos = "not-a-list"
     fn test_cross_platform_repo_paths() {
         let toml_paths = r#"
 default_agent = "claude"
+repos_dir = "/tmp/repos"
 
 [agents.claude]
 command = "claude"
@@ -1016,6 +1022,7 @@ repos = [
     fn test_unicode_in_workspace_and_paths() {
         let toml_unicode = r#"
 default_agent = "claude"
+repos_dir = "/home/пользователь/botai_repos"
 
 [agents.claude]
 command = "claude"
@@ -1056,8 +1063,8 @@ env = { GREETING = "こんにちは" }
             "Template must contain default_agent"
         );
         assert!(
-            template.contains("repos_dir"),
-            "Template must mention repos_dir"
+            template.contains("repos_dir = \"~/.local/share/botai/repos\""),
+            "Template must define repos_dir"
         );
         assert!(
             template.contains("[agents.claude]"),
@@ -1084,6 +1091,10 @@ env = { GREETING = "こんにちは" }
             .expect("Default template must parse cleanly into Config struct");
 
         assert_eq!(parsed.default_agent, "claude");
+        assert_eq!(
+            parsed.repos_dir,
+            PathBuf::from("~/.local/share/botai/repos")
+        );
         assert_eq!(parsed.agents.len(), 4);
         assert!(parsed.get_agent("claude").is_some());
         assert!(parsed.get_agent("agy").is_some());

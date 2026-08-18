@@ -9,6 +9,7 @@ fn test_integration_full_config_lifecycle() {
 
     let toml_content = r#"
 default_agent = "claude"
+repos_dir = "/var/repos"
 
 [agents.claude]
 command = "claude"
@@ -45,6 +46,7 @@ env = { REACT_APP_API_URL = "http://localhost:8080" }
 
     // 2. Validate parsed structures
     assert_eq!(config.default_agent, "claude");
+    assert_eq!(config.repos_dir, std::path::PathBuf::from("/var/repos"));
     assert_eq!(config.agents.len(), 2);
     assert_eq!(config.workspaces.len(), 2);
 
