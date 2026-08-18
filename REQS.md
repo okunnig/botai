@@ -146,6 +146,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Accurately tracks cursor coordinates and visibility state (`\x1b[?25h` / `\x1b[?25l`) from the active session's VT parser.
   - Positions the terminal hardware cursor directly at the active input position during interactive sessions, rendering the native block cursor where user input is focused.
   - Automatically positions cursor in active text fields within dialogs/modals and hides the cursor when appropriate.
+- **Session Termination & Exit Transitions**:
+  - **Multi-Session Scenario (Normal Exit)**: When an agent process exits cleanly (exit code 0) and other session tabs remain active, the finished tab is automatically closed and focus transitions immediately to the adjacent active session tab.
+  - **Last / Only Session Scenario (Context-Aware Exit)**:
+    - If `botai` was launched from the dashboard, terminating the last session automatically transitions back to the interactive project dashboard (with refreshed project directories).
+    - If `botai` was launched directly via CLI (`botai start` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
+  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the `Error ⚠️` badge and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Alt+X to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
 - **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, workspace, and key hints.
 - **Leader-Free Hotkeys**:
   - `Alt + 1` .. `Alt + 9`: Directly switch to project session 1 to 9.

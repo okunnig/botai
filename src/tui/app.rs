@@ -10,13 +10,22 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{
+    backend::CrosstermBackend,
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    Terminal,
+};
 
 use crate::config::Config;
 use crate::context::{generate_agents_md, ProjectContext, RepoMapping};
 use crate::git::{create_worktree, remove_worktree};
 use crate::notify::{ActivityTracker, NotificationService};
-use crate::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen};
+use crate::session::{
+    ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
+};
 use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
 use crate::tui::events::{map_key_event, TuiAction};
 use crate::tui::quick_launcher::{
@@ -46,6 +55,33 @@ impl Drop for TerminalCleanupGuard {
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
+}
+
+/// Renders an error / crash banner at the bottom line of the given viewport area.
+pub fn render_error_banner(exit_code: Option<u32>, area: Rect, buf: &mut Buffer) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let code_str = exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "1".to_string());
+    let msg = format!(
+        " [Process exited with code {} - Press Enter or Alt+X to dismiss] ",
+        code_str
+    );
+    let banner_y = area.bottom().saturating_sub(1);
+    let style = Style::default()
+        .bg(Color::Red)
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+
+    for x in area.left()..area.right() {
+        if let Some(cell) = buf.cell_mut((x, banner_y)) {
+            cell.set_style(style).set_char(' ');
+        }
+    }
+    let line = Line::from(Span::styled(&msg, style));
+    buf.set_line(area.x, banner_y, &line, area.width);
 }
 
 impl TuiApp {
@@ -92,6 +128,18 @@ impl TuiApp {
     /// Resizes all registered sessions to the specified viewport column and row dimensions.
     pub fn resize_all_sessions(&mut self, cols: u16, rows: u16) {
         self.registry.resize_all(cols, rows);
+    }
+
+    /// Removes a session by ID and handles exit transitions (dashboard refresh or quitting).
+    pub fn close_session(&mut self, id: &str) {
+        let _ = self.registry.remove(id);
+        if self.registry.is_empty() {
+            if self.dashboard.is_some() {
+                self.refresh_dashboard();
+            } else {
+                self.should_quit = true;
+            }
+        }
     }
 
     /// Runs the interactive TUI application event loop.
@@ -164,7 +212,13 @@ impl TuiApp {
                     if let Some(active) = self.registry.active_session() {
                         f.render_widget(TerminalView::new(active.vt()), term_area);
 
-                        if !active.vt().hide_cursor() {
+                        if active.status() == SessionStatus::Error {
+                            render_error_banner(
+                                active.project_session.exit_code,
+                                term_area,
+                                f.buffer_mut(),
+                            );
+                        } else if !active.vt().hide_cursor() {
                             let (col, row) = active.vt().cursor_position();
                             if col < term_area.width && row < term_area.height {
                                 f.set_cursor_position(ratatui::layout::Position::new(
@@ -225,9 +279,9 @@ impl TuiApp {
     /// Reads output bytes from all running PTY sessions into their respective VT screens.
     pub fn process_pty_streams(&mut self) {
         let now = Instant::now();
-        let sessions = self.registry.list_mut();
+        let mut clean_exits = Vec::new();
 
-        for session in sessions {
+        for session in self.registry.list_mut() {
             if let Ok(bytes) = session.pty_mut().read_nonblocking() {
                 if !bytes.is_empty() {
                     session.vt_mut().process(&bytes);
@@ -244,6 +298,10 @@ impl TuiApp {
                 .flatten()
                 .and_then(|s| s.code.map(|c| c as i32));
 
+            if let Some(code) = exit_code {
+                session.project_session.exit_code = Some(code as u32);
+            }
+
             let (status, notif, _) = self.tracker.evaluate(is_alive, exit_code, now);
             session.project_session.set_status(status);
 
@@ -257,6 +315,18 @@ impl TuiApp {
                 }
                 let _ = self.notifier.notify(&event);
             }
+
+            if !is_alive {
+                if exit_code == Some(0) {
+                    clean_exits.push(session.id().to_string());
+                } else {
+                    session.project_session.set_status(SessionStatus::Error);
+                }
+            }
+        }
+
+        for id in clean_exits {
+            self.close_session(&id);
         }
     }
 
@@ -607,6 +677,34 @@ impl TuiApp {
 
     /// Dispatches key actions based on hotkeys or PTY passthrough.
     pub fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) {
+        let is_active_errored = self
+            .registry
+            .active_session()
+            .map(|s| s.status() == SessionStatus::Error)
+            .unwrap_or(false);
+
+        // If the active session is errored, dismiss it on Enter, Space, or Alt+X
+        if is_active_errored {
+            let is_dismiss_key = match key.code {
+                crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
+                    !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+                }
+                crossterm::event::KeyCode::Char('x') | crossterm::event::KeyCode::Char('X') => {
+                    key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+                }
+                _ => false,
+            };
+
+            if is_dismiss_key {
+                if let Some(active) = self.registry.active_session() {
+                    let id = active.id().to_string();
+                    self.close_session(&id);
+                    return;
+                }
+            }
+        }
+
         let action = map_key_event(key);
 
         match action {
@@ -628,10 +726,7 @@ impl TuiApp {
             TuiAction::CloseSession => {
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
-                    let _ = self.registry.remove(&id);
-                    if self.registry.is_empty() {
-                        self.refresh_dashboard();
-                    }
+                    self.close_session(&id);
                 }
             }
             TuiAction::Passthrough(bytes) => {
@@ -957,6 +1052,229 @@ repos = []
         app.attach_project("attached-resized").unwrap();
         let attached = app.registry.get_by_project("attached-resized").unwrap();
         assert_eq!(attached.vt().size(), (115, 38));
+    }
+
+    #[test]
+    fn test_render_error_banner() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render_error_banner(Some(127), area, &mut buf);
+
+        let bottom_row_text = (0..80)
+            .map(|x| buf.cell((x, 23)).unwrap().symbol())
+            .collect::<String>();
+
+        assert!(bottom_row_text.contains("[Process exited with code 127 - Press Enter or Alt+X to dismiss]"));
+
+        let cell = buf.cell((0, 23)).unwrap();
+        assert_eq!(cell.bg, Color::Red);
+        assert_eq!(cell.fg, Color::White);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_session_exit_normal_multi_session_closes_tab_and_switches_focus() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        #[cfg(windows)]
+        let (cmd1, args1) = ("cmd.exe", vec!["/c", "exit 0"]);
+        #[cfg(not(windows))]
+        let (cmd1, args1) = ("sh", vec!["-c", "exit 0"]);
+
+        #[cfg(windows)]
+        let (cmd2, args2) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd2, args2) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config1 = PtyConfig::new(cmd1, tmp.path()).with_args(args1);
+        let pty1 = PtySession::spawn(config1).unwrap();
+        let vt1 = VtScreen::new(80, 24);
+        let ps1 = ProjectSession::new("proj1-finishing", "ws", "mock");
+        registry.add(ps1, pty1, vt1).unwrap();
+
+        let config2 = PtyConfig::new(cmd2, tmp.path()).with_args(args2);
+        let pty2 = PtySession::spawn(config2).unwrap();
+        let vt2 = VtScreen::new(80, 24);
+        let ps2 = ProjectSession::new("proj2-running", "ws", "mock");
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert_eq!(app.registry.len(), 2);
+        assert_eq!(app.registry.active_index(), Some(0));
+
+        // Wait for session 1 to exit 0
+        std::thread::sleep(Duration::from_millis(150));
+
+        app.process_pty_streams();
+
+        // Session 1 should be removed, leaving only session 2
+        assert_eq!(app.registry.len(), 1);
+        assert_eq!(app.registry.active_index(), Some(0));
+        assert_eq!(app.registry.active_session().unwrap().project_name(), "proj2-running");
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_session_exit_normal_last_session_with_dashboard_returns_to_dashboard() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 0"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 0"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-done", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let dashboard = DashboardState::new(vec!["ws".to_string()], vec![]);
+        let mut app = TuiApp::new(registry).with_dashboard(dashboard);
+
+        // Wait for process to exit 0
+        std::thread::sleep(Duration::from_millis(150));
+
+        app.process_pty_streams();
+
+        // Registry is empty, dashboard is active, should_quit is false
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.dashboard.is_some());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_session_exit_normal_last_session_without_dashboard_sets_should_quit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 0"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 0"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-done", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert!(app.dashboard.is_none());
+
+        // Wait for process to exit 0
+        std::thread::sleep(Duration::from_millis(150));
+
+        app.process_pty_streams();
+
+        // Registry is empty, should_quit is true
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_session_exit_error_retained_and_dismissed_with_enter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 42"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 42"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-fail", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        // Wait for process to exit 42
+        std::thread::sleep(Duration::from_millis(150));
+
+        app.process_pty_streams();
+
+        // Errored session remains in registry with status Error and exit code 42
+        assert_eq!(app.registry.len(), 1);
+        let active = app.registry.active_session().unwrap();
+        assert_eq!(active.status(), SessionStatus::Error);
+        assert_eq!(active.project_session.exit_code, Some(42));
+        assert!(!app.should_quit);
+
+        // Pressing normal keys like 'a' does not dismiss it
+        let key_a = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_key_event(key_a);
+        assert_eq!(app.registry.len(), 1);
+
+        // Pressing Enter dismisses the errored session
+        let enter_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_key_event(enter_key);
+
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_session_exit_error_dismissed_with_space_and_alt_x() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 1"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 1"]);
+
+        // Test Space dismissal with dashboard
+        let mut registry1 = SessionRegistry::new();
+        let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+        let pty1 = PtySession::spawn(config1).unwrap();
+        let vt1 = VtScreen::new(80, 24);
+        let ps1 = ProjectSession::new("proj-space", "ws", "mock");
+        registry1.add(ps1, pty1, vt1).unwrap();
+
+        let dashboard = DashboardState::new(vec!["ws".to_string()], vec![]);
+        let mut app1 = TuiApp::new(registry1).with_dashboard(dashboard);
+        std::thread::sleep(Duration::from_millis(150));
+        app1.process_pty_streams();
+        assert_eq!(app1.registry.len(), 1);
+
+        let space_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app1.handle_key_event(space_key);
+        assert_eq!(app1.registry.len(), 0);
+        assert!(app1.dashboard.is_some());
+        assert!(!app1.should_quit);
+
+        // Test Alt+X dismissal
+        let mut registry2 = SessionRegistry::new();
+        let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty2 = PtySession::spawn(config2).unwrap();
+        let vt2 = VtScreen::new(80, 24);
+        let ps2 = ProjectSession::new("proj-alt-x", "ws", "mock");
+        registry2.add(ps2, pty2, vt2).unwrap();
+
+        let mut app2 = TuiApp::new(registry2);
+        std::thread::sleep(Duration::from_millis(150));
+        app2.process_pty_streams();
+        assert_eq!(app2.registry.len(), 1);
+
+        let alt_x = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::ALT,
+        );
+        app2.handle_key_event(alt_x);
+        assert_eq!(app2.registry.len(), 0);
+        assert!(app2.should_quit);
     }
 }
 

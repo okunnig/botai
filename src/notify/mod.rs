@@ -100,11 +100,11 @@ impl ActivityTracker {
     ) -> (SessionStatus, Option<NotificationEvent>, &str) {
         let (status, notif) = if !is_alive {
             match exit_code {
-                Some(0) | None => (
+                Some(0) => (
                     SessionStatus::Done,
                     Some(NotificationEvent::Completed {
                         project_name: String::new(),
-                        exit_code,
+                        exit_code: Some(0),
                     }),
                 ),
                 Some(code) => (
@@ -112,6 +112,13 @@ impl ActivityTracker {
                     Some(NotificationEvent::Error {
                         project_name: String::new(),
                         message: format!("Process exited with status code {code}"),
+                    }),
+                ),
+                None => (
+                    SessionStatus::Error,
+                    Some(NotificationEvent::Error {
+                        project_name: String::new(),
+                        message: "Process terminated unexpectedly".to_string(),
                     }),
                 ),
             }
