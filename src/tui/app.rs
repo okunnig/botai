@@ -196,6 +196,7 @@ impl TuiApp {
                         }
                     }
                 } else if let Event::Resize(cols, rows) = event::read()? {
+                    let _ = terminal.clear();
                     let (_, term_area) =
                         compute_layout(ratatui::layout::Rect::new(0, 0, cols, rows));
                     self.viewport_size = Some((term_area.width, term_area.height));

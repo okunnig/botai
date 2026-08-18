@@ -257,10 +257,14 @@ fn cmd_start(
         .context("Failed to generate AGENTS.md context file")?;
     println!("Generated context orientation file at {:?}", agents_md_path);
 
+    let (term_cols, term_rows) = crossterm::terminal::size()
+        .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
+        .unwrap_or((100, 30));
+
     // Build PTY configuration and spawn agent process
     let mut pty_config = PtyConfig::new(&agent.command, &project_dir)
         .with_args(agent.args.clone())
-        .with_dimensions(100, 30);
+        .with_dimensions(term_cols, term_rows);
 
     for (k, v) in &agent.env {
         pty_config = pty_config.with_env(k, v);
@@ -271,7 +275,7 @@ fn cmd_start(
 
     let pty = PtySession::spawn(pty_config)
         .with_context(|| format!("Failed to spawn agent command '{}'", agent.command))?;
-    let vt = VtScreen::new(100, 30);
+    let vt = VtScreen::new(term_cols, term_rows);
     let mut ps = ProjectSession::new(project_name, workspace_name, agent_name);
     if let Some(p) = prompt {
         ps = ps.with_prompt(p);
@@ -304,12 +308,16 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
         .get_agent(&config.default_agent)
         .with_context(|| format!("Default agent '{}' not found", config.default_agent))?;
 
+    let (term_cols, term_rows) = crossterm::terminal::size()
+        .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
+        .unwrap_or((100, 30));
+
     let pty_config = PtyConfig::new(&agent.command, &project_dir)
         .with_args(agent.args.clone())
-        .with_dimensions(100, 30);
+        .with_dimensions(term_cols, term_rows);
 
     let pty = PtySession::spawn(pty_config)?;
-    let vt = VtScreen::new(100, 30);
+    let vt = VtScreen::new(term_cols, term_rows);
     let ps = ProjectSession::new(project_name, "attached", &config.default_agent);
 
     let mut registry = SessionRegistry::new();
