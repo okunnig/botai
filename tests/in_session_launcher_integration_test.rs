@@ -12,8 +12,8 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-fn alt_key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::ALT)
+fn ctrl_space_key() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)
 }
 
 #[test]
@@ -65,8 +65,11 @@ repos = []
     assert!(app.registry.is_empty());
     assert!(app.quick_launcher.is_none());
 
-    // 2. Open quick launcher via Alt+C
-    app.handle_key_event(alt_key(KeyCode::Char('c')));
+    // 2. Open quick launcher via Ctrl+Space then 'c'
+    app.handle_key_event(ctrl_space_key());
+    assert!(app.leader_active);
+    app.handle_key_event(key(KeyCode::Char('c')));
+    assert!(!app.leader_active);
     assert!(app.quick_launcher.is_some());
 
     let launcher = app.quick_launcher.as_ref().unwrap();
@@ -99,7 +102,7 @@ repos = []
         .map(|cell| cell.symbol())
         .collect::<String>();
 
-    assert!(rendered.contains("Quick Project Launcher (Alt+C)"));
+    assert!(rendered.contains("Quick Project Launcher (Ctrl+Space c)"));
     assert!(rendered.contains("1. Create New Project"));
     assert!(rendered.contains("2. Attach Existing Project"));
     assert!(rendered.contains("Workspace:"));
@@ -160,8 +163,11 @@ repos = []
     );
     assert!(cwd.join("stripe-webhooks").join("AGENTS.md").is_file());
 
-    // 10. Open launcher again via Alt+C from inside the active session
-    app.handle_key_event(alt_key(KeyCode::Char('C')));
+    // 10. Open launcher again via Ctrl+Space then 'C' from inside the active session
+    app.handle_key_event(ctrl_space_key());
+    assert!(app.leader_active);
+    app.handle_key_event(make_key(KeyCode::Char('C'), KeyModifiers::SHIFT));
+    assert!(!app.leader_active);
     assert!(app.quick_launcher.is_some());
     // Active workspace should default to "payments" (the active session's workspace)
     assert_eq!(
@@ -201,7 +207,8 @@ repos = []
     assert_eq!(app.registry.active_index(), Some(1));
 
     // 13. Open launcher and attach "stripe-webhooks" (which is already active as session 0)
-    app.handle_key_event(alt_key(KeyCode::Char('c')));
+    app.handle_key_event(ctrl_space_key());
+    app.handle_key_event(key(KeyCode::Char('c')));
     let mut launcher = app.quick_launcher.take().unwrap();
     launcher.switch_tab(LauncherTab::Attach);
     // Find index of stripe-webhooks in local_projects
@@ -225,7 +232,8 @@ repos = []
     );
 
     // 14. Open launcher and test Dismiss / Cancel via Esc
-    app.handle_key_event(alt_key(KeyCode::Char('c')));
+    app.handle_key_event(ctrl_space_key());
+    app.handle_key_event(key(KeyCode::Char('c')));
     assert!(app.quick_launcher.is_some());
     app.handle_launcher_key(key(KeyCode::Esc));
     assert!(app.quick_launcher.is_none());

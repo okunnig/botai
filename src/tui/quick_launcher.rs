@@ -267,9 +267,8 @@ impl QuickLauncherState {
         let has_alt = key.modifiers.contains(KeyModifiers::ALT);
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // Cancel / Dismiss modal via Esc or Alt+C toggle or Ctrl+C
+        // Cancel / Dismiss modal via Esc or Ctrl+C
         if key.code == KeyCode::Esc
-            || (has_alt && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C')))
             || (has_ctrl && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C')))
         {
             return QuickLauncherAction::Cancel;
@@ -460,7 +459,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
     // Outer container block
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Quick Project Launcher (Alt+C) ")
+        .title(" Quick Project Launcher (Ctrl+Space c) ")
         .border_style(
             Style::default()
                 .fg(Color::Cyan)
@@ -1069,19 +1068,16 @@ mod tests {
     }
 
     #[test]
-    fn test_esc_and_alt_c_cancels() {
+    fn test_esc_and_ctrl_c_cancels() {
         let mut launcher = QuickLauncherState::new(vec!["ws".into()], vec![], None);
 
         let action = launcher.handle_key(key(KeyCode::Esc));
         assert_eq!(action, QuickLauncherAction::Cancel);
 
-        let action = launcher.handle_key(make_key(KeyCode::Char('c'), KeyModifiers::ALT));
-        assert_eq!(action, QuickLauncherAction::Cancel);
-
-        let action = launcher.handle_key(make_key(KeyCode::Char('C'), KeyModifiers::ALT));
-        assert_eq!(action, QuickLauncherAction::Cancel);
-
         let action = launcher.handle_key(make_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(action, QuickLauncherAction::Cancel);
+
+        let action = launcher.handle_key(make_key(KeyCode::Char('C'), KeyModifiers::CONTROL));
         assert_eq!(action, QuickLauncherAction::Cancel);
     }
 
@@ -1102,7 +1098,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(rendered.contains("Quick Project Launcher (Alt+C)"));
+        assert!(rendered.contains("Quick Project Launcher (Ctrl+Space c)"));
         assert!(rendered.contains("1. Create New Project"));
         assert!(rendered.contains("2. Attach Existing Project"));
         assert!(rendered.contains("Workspace:"));

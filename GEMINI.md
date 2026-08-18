@@ -12,7 +12,7 @@ A cross-platform terminal session orchestrator and multiplexer for AI agent CLI 
 - **Project**: An isolated, multi-repo work environment created inside `CWD/<project_name>`. Each repository gets a git worktree checked out to a new branch `<project_name>`.
 - **Context Synthesis**: Auto-generated multi-repo orientation context (`AGENTS.md`) at the project root for seamless agent multi-directory comprehension.
 - **Agent Instance & Monitoring**: Single AI agent CLI process per project root with desktop notifications and real-time status badges in the TUI (Thinking, Waiting for Input, Done).
-- **TUI Multiplexer**: Native Rust-powered terminal multiplexing (`portable-pty`, `ratatui`, `crossterm`) with leader-free keybindings (`Alt+1..9`, `Alt+N/P`, `Alt+D`).
+- **TUI Multiplexer**: Native Rust-powered terminal multiplexing (`portable-pty`, `ratatui`, `crossterm`) with `Ctrl+Space` leader key architecture (`Ctrl+Space` -> `1..9`, `c`/`n`, `n`/`p`, `w`, `d`, `q`).
 
 ## Build Configuration
 - All build artifacts and temporary files must be directed to `/tmp/botai-build` (configured in `.cargo/config.toml` via `build.target-dir = "/tmp/botai-build"`).

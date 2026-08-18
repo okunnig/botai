@@ -3,19 +3,23 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// High-level actions triggered by user keyboard events or internal TUI timers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TuiAction {
-    /// Switches to the session at the specified 0-based index (`Alt + 1` .. `Alt + 9`).
+    /// Enters leader mode (`Ctrl + Space`).
+    EnterLeader,
+    /// Cancels leader mode (`Esc` or unrecognized key while leader is active).
+    CancelLeader,
+    /// Switches to the session at the specified 0-based index (`1` .. `9`).
     SwitchSession(usize),
-    /// Cycles to the next active session (`Alt + n` / `Alt + N`).
+    /// Cycles to the next active session (`n` / `N`).
     NextSession,
-    /// Cycles to the previous active session (`Alt + p` / `Alt + P`).
+    /// Cycles to the previous active session (`p` / `P`).
     PrevSession,
-    /// Detaches from the active session (`Alt + d` / `Alt + D`).
+    /// Detaches from the active session (`d` / `D`).
     Detach,
-    /// Closes / terminates the active session (`Alt + x` / `Alt + X`).
+    /// Closes / terminates the active session (`w` / `W` or `x` / `X`).
     CloseSession,
-    /// Opens the in-session Quick Project Launcher modal (`Alt + c` / `Alt + C`).
+    /// Opens the in-session Quick Project Launcher modal (`c` / `C`).
     OpenLauncher,
-    /// Quits the entire botai dashboard (`Alt + q` / `Alt + Q`).
+    /// Quits the entire botai dashboard (`q` / `Q`).
     Quit,
     /// Raw byte sequence forwarded directly to the active session's PTY.
     Passthrough(Vec<u8>),
@@ -29,9 +33,14 @@ pub enum TuiAction {
 pub struct KeyHandler;
 
 impl KeyHandler {
-    /// Maps a crossterm `KeyEvent` into a `TuiAction`.
-    pub fn map_key_event(event: KeyEvent) -> TuiAction {
-        map_key_event(event)
+    /// Maps a crossterm `KeyEvent` and leader state into a `TuiAction`.
+    pub fn map_key_event(event: KeyEvent, leader_active: bool) -> TuiAction {
+        map_key_event(event, leader_active)
+    }
+
+    /// Checks if a crossterm `KeyEvent` represents `Ctrl+Space`.
+    pub fn is_ctrl_space(event: &KeyEvent) -> bool {
+        is_ctrl_space(event)
     }
 
     /// Converts a crossterm `KeyEvent` into raw terminal input bytes suitable for writing to a PTY.
@@ -40,28 +49,48 @@ impl KeyHandler {
     }
 }
 
-/// Maps a crossterm `KeyEvent` into a high-level `TuiAction`.
-pub fn map_key_event(event: KeyEvent) -> TuiAction {
-    let has_alt = event.modifiers.contains(KeyModifiers::ALT);
+/// Checks if a crossterm `KeyEvent` represents `Ctrl+Space` across various terminal encodings.
+pub fn is_ctrl_space(event: &KeyEvent) -> bool {
     let has_ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
+    match event.code {
+        KeyCode::Char(' ') if has_ctrl => true,
+        KeyCode::Char('@') if has_ctrl => true,
+        KeyCode::Char('\0') => true,
+        KeyCode::Null => true,
+        _ => false,
+    }
+}
 
-    if has_alt && !has_ctrl {
-        match event.code {
-            KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
-                let index = (c.to_digit(10).unwrap() - 1) as usize;
-                return TuiAction::SwitchSession(index);
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => return TuiAction::NextSession,
-            KeyCode::Char('p') | KeyCode::Char('P') => return TuiAction::PrevSession,
-            KeyCode::Char('c') | KeyCode::Char('C') => return TuiAction::OpenLauncher,
-            KeyCode::Char('d') | KeyCode::Char('D') => return TuiAction::Detach,
-            KeyCode::Char('x') | KeyCode::Char('X') => return TuiAction::CloseSession,
-            KeyCode::Char('q') | KeyCode::Char('Q') => return TuiAction::Quit,
-            _ => {}
+/// Maps a crossterm `KeyEvent` and leader state into a high-level `TuiAction`.
+pub fn map_key_event(event: KeyEvent, leader_active: bool) -> TuiAction {
+    if !leader_active {
+        if is_ctrl_space(&event) {
+            return TuiAction::EnterLeader;
         }
+        return TuiAction::Passthrough(key_to_bytes(&event));
     }
 
-    TuiAction::Passthrough(key_to_bytes(&event))
+    // Leader mode is active
+    if is_ctrl_space(&event) {
+        return TuiAction::Passthrough(vec![0x00]);
+    }
+
+    match event.code {
+        KeyCode::Char(c) if ('1'..='9').contains(&c) => {
+            let index = (c.to_digit(10).unwrap() - 1) as usize;
+            TuiAction::SwitchSession(index)
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') => TuiAction::OpenLauncher,
+        KeyCode::Char('n') | KeyCode::Char('N') => TuiAction::NextSession,
+        KeyCode::Char('p') | KeyCode::Char('P') => TuiAction::PrevSession,
+        KeyCode::Char('w') | KeyCode::Char('W') | KeyCode::Char('x') | KeyCode::Char('X') => {
+            TuiAction::CloseSession
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') => TuiAction::Detach,
+        KeyCode::Char('q') | KeyCode::Char('Q') => TuiAction::Quit,
+        KeyCode::Char(' ') => TuiAction::Passthrough(vec![0x00]),
+        _ => TuiAction::CancelLeader,
+    }
 }
 
 /// Converts a crossterm `KeyEvent` into standard ANSI / VT byte sequences for PTY passthrough.
@@ -76,7 +105,7 @@ pub fn key_to_bytes(event: &KeyEvent) -> Vec<u8> {
                 return vec![lower as u8 - b'a' + 1];
             }
             return match c {
-                '@' | ' ' => vec![0x00],
+                '@' | ' ' | '\0' => vec![0x00],
                 '[' => vec![0x1b],
                 '\\' => vec![0x1c],
                 ']' => vec![0x1d],
@@ -85,6 +114,10 @@ pub fn key_to_bytes(event: &KeyEvent) -> Vec<u8> {
                 _ => c.to_string().into_bytes(),
             };
         }
+    }
+
+    if event.code == KeyCode::Null || event.code == KeyCode::Char('\0') {
+        return vec![0x00];
     }
 
     let bytes = match event.code {
@@ -147,74 +180,160 @@ mod tests {
     }
 
     #[test]
-    fn test_map_key_event_alt_hotkeys_switch_session() {
+    fn test_is_ctrl_space_recognition() {
+        // Ctrl+Space
+        assert!(is_ctrl_space(&make_key(KeyCode::Char(' '), KeyModifiers::CONTROL)));
+        // Ctrl+@
+        assert!(is_ctrl_space(&make_key(KeyCode::Char('@'), KeyModifiers::CONTROL)));
+        // Char('\0')
+        assert!(is_ctrl_space(&make_key(KeyCode::Char('\0'), KeyModifiers::NONE)));
+        assert!(is_ctrl_space(&make_key(KeyCode::Char('\0'), KeyModifiers::CONTROL)));
+        // KeyCode::Null
+        assert!(is_ctrl_space(&make_key(KeyCode::Null, KeyModifiers::NONE)));
+
+        // Non-Ctrl+Space
+        assert!(!is_ctrl_space(&make_key(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(!is_ctrl_space(&make_key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+        assert!(!is_ctrl_space(&make_key(KeyCode::Esc, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn test_map_key_event_when_leader_inactive() {
+        // Ctrl+Space enters leader mode
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('1'), KeyModifiers::ALT)),
+            map_key_event(make_key(KeyCode::Char(' '), KeyModifiers::CONTROL), false),
+            TuiAction::EnterLeader
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('@'), KeyModifiers::CONTROL), false),
+            TuiAction::EnterLeader
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('\0'), KeyModifiers::NONE), false),
+            TuiAction::EnterLeader
+        );
+
+        // All other keys pass through
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('1'), KeyModifiers::NONE), false),
+            TuiAction::Passthrough(b"1".to_vec())
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('c'), KeyModifiers::NONE), false),
+            TuiAction::Passthrough(b"c".to_vec())
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Enter, KeyModifiers::NONE), false),
+            TuiAction::Passthrough(b"\r".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_map_key_event_when_leader_active_commands() {
+        // 1..9 switch session
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('1'), KeyModifiers::NONE), true),
             TuiAction::SwitchSession(0)
         );
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('2'), KeyModifiers::ALT)),
-            TuiAction::SwitchSession(1)
+            map_key_event(make_key(KeyCode::Char('5'), KeyModifiers::NONE), true),
+            TuiAction::SwitchSession(4)
         );
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('9'), KeyModifiers::ALT)),
+            map_key_event(make_key(KeyCode::Char('9'), KeyModifiers::NONE), true),
             TuiAction::SwitchSession(8)
         );
-    }
 
-    #[test]
-    fn test_map_key_event_alt_navigation_next_prev() {
+        // c / C opens quick launcher
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('n'), KeyModifiers::ALT)),
-            TuiAction::NextSession
-        );
-        assert_eq!(
-            map_key_event(make_key(KeyCode::Char('N'), KeyModifiers::ALT)),
-            TuiAction::NextSession
-        );
-        assert_eq!(
-            map_key_event(make_key(KeyCode::Char('p'), KeyModifiers::ALT)),
-            TuiAction::PrevSession
-        );
-        assert_eq!(
-            map_key_event(make_key(KeyCode::Char('P'), KeyModifiers::ALT)),
-            TuiAction::PrevSession
-        );
-    }
-
-    #[test]
-    fn test_map_key_event_alt_lifecycle_actions() {
-        assert_eq!(
-            map_key_event(make_key(KeyCode::Char('c'), KeyModifiers::ALT)),
+            map_key_event(make_key(KeyCode::Char('c'), KeyModifiers::NONE), true),
             TuiAction::OpenLauncher
         );
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('C'), KeyModifiers::ALT)),
+            map_key_event(make_key(KeyCode::Char('C'), KeyModifiers::SHIFT), true),
             TuiAction::OpenLauncher
         );
+
+        // n / N next session
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('d'), KeyModifiers::ALT)),
-            TuiAction::Detach
+            map_key_event(make_key(KeyCode::Char('n'), KeyModifiers::NONE), true),
+            TuiAction::NextSession
         );
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('D'), KeyModifiers::ALT)),
-            TuiAction::Detach
+            map_key_event(make_key(KeyCode::Char('N'), KeyModifiers::SHIFT), true),
+            TuiAction::NextSession
+        );
+
+        // p / P prev session
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('p'), KeyModifiers::NONE), true),
+            TuiAction::PrevSession
         );
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('x'), KeyModifiers::ALT)),
+            map_key_event(make_key(KeyCode::Char('P'), KeyModifiers::SHIFT), true),
+            TuiAction::PrevSession
+        );
+
+        // w / W and x / X close session
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('w'), KeyModifiers::NONE), true),
             TuiAction::CloseSession
         );
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('X'), KeyModifiers::ALT)),
+            map_key_event(make_key(KeyCode::Char('W'), KeyModifiers::SHIFT), true),
             TuiAction::CloseSession
         );
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('q'), KeyModifiers::ALT)),
+            map_key_event(make_key(KeyCode::Char('x'), KeyModifiers::NONE), true),
+            TuiAction::CloseSession
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('X'), KeyModifiers::SHIFT), true),
+            TuiAction::CloseSession
+        );
+
+        // d / D detach
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('d'), KeyModifiers::NONE), true),
+            TuiAction::Detach
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('D'), KeyModifiers::SHIFT), true),
+            TuiAction::Detach
+        );
+
+        // q / Q quit
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('q'), KeyModifiers::NONE), true),
             TuiAction::Quit
         );
         assert_eq!(
-            map_key_event(make_key(KeyCode::Char('Q'), KeyModifiers::ALT)),
+            map_key_event(make_key(KeyCode::Char('Q'), KeyModifiers::SHIFT), true),
             TuiAction::Quit
+        );
+
+        // Space / Ctrl+Space forwards literal 0x00
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char(' '), KeyModifiers::NONE), true),
+            TuiAction::Passthrough(vec![0x00])
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char(' '), KeyModifiers::CONTROL), true),
+            TuiAction::Passthrough(vec![0x00])
+        );
+
+        // Esc or any unrecognized key cancels leader mode
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Esc, KeyModifiers::NONE), true),
+            TuiAction::CancelLeader
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('z'), KeyModifiers::NONE), true),
+            TuiAction::CancelLeader
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Up, KeyModifiers::NONE), true),
+            TuiAction::CancelLeader
         );
     }
 
@@ -359,7 +478,7 @@ mod tests {
     #[test]
     fn test_key_handler_passthrough_action() {
         let key = make_key(KeyCode::Char('k'), KeyModifiers::empty());
-        let action = KeyHandler::map_key_event(key);
+        let action = KeyHandler::map_key_event(key, false);
         assert_eq!(action, TuiAction::Passthrough(b"k".to_vec()));
     }
 }

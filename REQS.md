@@ -151,15 +151,18 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Last / Only Session Scenario (Context-Aware Exit)**:
     - If `botai` was launched from the dashboard, terminating the last session automatically transitions back to the interactive project dashboard (with refreshed project directories).
     - If `botai` was launched directly via CLI (`botai start` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
-  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the `Error ⚠️` badge and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Alt+X to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
-- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, workspace, and key hints.
-- **Leader-Free Hotkeys**:
-  - `Alt + 1` .. `Alt + 9`: Directly switch to project session 1 to 9.
-  - `Alt + N` / `Alt + P`: Switch to Next / Previous active project session.
-  - `Alt + C`: Open the Quick Project Launcher & Creator modal to create a new project or attach an existing one while working in an active session.
-  - `Alt + D`: Detach from active session (return to CLI / dashboard).
-  - `Alt + X`: Close / Destroy active project session (with confirmation).
-  - `Alt + Q`: Quit `botai`.
+  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the `Error ⚠️` badge and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
+- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, workspace, key hints, and a visible `[LEADER]` mode indicator when active.
+- **Leader Key Architecture (`Ctrl + Space`)**:
+  - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
+    - `Ctrl + Space` then `1` .. `9`: Directly switch to project session 1 to 9.
+    - `Ctrl + Space` then `c` (or `n`): Open the Quick Project Launcher & Creator modal.
+    - `Ctrl + Space` then `n` / `p`: Switch to Next / Previous active project session.
+    - `Ctrl + Space` then `w` (or `x`): Close / terminate active project session.
+    - `Ctrl + Space` then `d`: Detach from active session (return to CLI / dashboard).
+    - `Ctrl + Space` then `q`: Quit `botai`.
+    - `Ctrl + Space` then `Ctrl + Space` (or `Space`): Forward a literal `Ctrl + Space` (`0x00`) to the active PTY.
+    - `Ctrl + Space` then `Esc` (or any unrecognized key): Cancel leader mode without executing an action.
 
 ---
 
@@ -209,7 +212,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 ---
 
 ## 9. In-Session Quick Launcher & Project Creator Modal
-- **In-Session Trigger (`Alt + C`)**:
+- **In-Session Trigger (`Ctrl + Space` then `c` / `n`)**:
   - Can be invoked at any time while working inside an active terminal session.
   - Renders a floating modal centered over the active terminal view without interrupting background PTY reading or activity tracking.
 - **Tabbed Modal Views**:

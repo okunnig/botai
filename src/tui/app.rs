@@ -46,6 +46,7 @@ pub struct TuiApp {
     pub config: Option<Config>,
     pub cwd: Option<PathBuf>,
     pub viewport_size: Option<(u16, u16)>,
+    pub leader_active: bool,
 }
 
 struct TerminalCleanupGuard;
@@ -66,7 +67,7 @@ pub fn render_error_banner(exit_code: Option<u32>, area: Rect, buf: &mut Buffer)
         .map(|c| c.to_string())
         .unwrap_or_else(|| "1".to_string());
     let msg = format!(
-        " [Process exited with code {} - Press Enter or Alt+X to dismiss] ",
+        " [Process exited with code {} - Press Enter or Ctrl+Space w to dismiss] ",
         code_str
     );
     let banner_y = area.bottom().saturating_sub(1);
@@ -98,6 +99,7 @@ impl TuiApp {
             config: None,
             cwd: None,
             viewport_size: None,
+            leader_active: false,
         }
     }
 
@@ -207,7 +209,10 @@ impl TuiApp {
                         }
                     }
                 } else {
-                    f.render_widget(StatusBar::new(&self.registry), status_area);
+                    f.render_widget(
+                        StatusBar::new(&self.registry).with_leader(self.leader_active),
+                        status_area,
+                    );
 
                     if let Some(active) = self.registry.active_session() {
                         f.render_widget(TerminalView::new(active.vt()), term_area);
@@ -675,7 +680,7 @@ impl TuiApp {
         }
     }
 
-    /// Dispatches key actions based on hotkeys or PTY passthrough.
+    /// Dispatches key actions based on leader hotkeys or PTY passthrough.
     pub fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) {
         let is_active_errored = self
             .registry
@@ -683,15 +688,12 @@ impl TuiApp {
             .map(|s| s.status() == SessionStatus::Error)
             .unwrap_or(false);
 
-        // If the active session is errored, dismiss it on Enter, Space, or Alt+X
-        if is_active_errored {
+        // If the active session is errored, dismiss it on Enter or plain Space (when leader is inactive)
+        if is_active_errored && !self.leader_active {
             let is_dismiss_key = match key.code {
                 crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
                     !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
                         && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
-                }
-                crossterm::event::KeyCode::Char('x') | crossterm::event::KeyCode::Char('X') => {
-                    key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
                 }
                 _ => false,
             };
@@ -705,31 +707,44 @@ impl TuiApp {
             }
         }
 
-        let action = map_key_event(key);
+        let action = map_key_event(key, self.leader_active);
 
         match action {
+            TuiAction::EnterLeader => {
+                self.leader_active = true;
+            }
+            TuiAction::CancelLeader => {
+                self.leader_active = false;
+            }
             TuiAction::Quit | TuiAction::Detach => {
+                self.leader_active = false;
                 self.should_quit = true;
             }
             TuiAction::SwitchSession(idx) => {
+                self.leader_active = false;
                 let _ = self.registry.set_active_index(idx);
             }
             TuiAction::NextSession => {
+                self.leader_active = false;
                 self.registry.next_session();
             }
             TuiAction::PrevSession => {
+                self.leader_active = false;
                 self.registry.prev_session();
             }
             TuiAction::OpenLauncher => {
+                self.leader_active = false;
                 self.open_quick_launcher();
             }
             TuiAction::CloseSession => {
+                self.leader_active = false;
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
                     self.close_session(&id);
                 }
             }
             TuiAction::Passthrough(bytes) => {
+                self.leader_active = false;
                 if let Some(active) = self.registry.active_session_mut() {
                     let _ = active.pty_mut().write_all(&bytes);
                 }
@@ -748,13 +763,58 @@ mod tests {
         let registry = SessionRegistry::new();
         let mut app = TuiApp::new(registry);
         assert!(!app.should_quit);
+        assert!(!app.leader_active);
 
+        // Enter leader mode via Ctrl+Space
+        let ctrl_space = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        app.handle_key_event(ctrl_space);
+        assert!(app.leader_active);
+        assert!(!app.should_quit);
+
+        // Press 'q' while leader is active
         let quit_key = crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('q'),
-            crossterm::event::KeyModifiers::ALT,
+            crossterm::event::KeyModifiers::NONE,
         );
         app.handle_key_event(quit_key);
         assert!(app.should_quit);
+        assert!(!app.leader_active);
+    }
+
+    #[test]
+    fn test_tui_app_leader_cancellation_and_passthrough() {
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry);
+        assert!(!app.leader_active);
+
+        // 1. Enter leader mode
+        let ctrl_space = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        app.handle_key_event(ctrl_space);
+        assert!(app.leader_active);
+
+        // 2. Esc cancels leader mode
+        let esc_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_key_event(esc_key);
+        assert!(!app.leader_active);
+
+        // 3. Unrecognized key cancels leader mode
+        app.handle_key_event(ctrl_space);
+        assert!(app.leader_active);
+        let z_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('z'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_key_event(z_key);
+        assert!(!app.leader_active);
     }
 
     #[test]
@@ -770,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tui_app_open_launcher_on_alt_c() {
+    fn test_tui_app_open_launcher_on_leader_c() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
 
@@ -793,13 +853,22 @@ repos = []
 
         assert!(app.quick_launcher.is_none());
 
-        // Send Alt+C key
-        let alt_c = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('c'),
-            crossterm::event::KeyModifiers::ALT,
+        // Send Ctrl+Space to activate leader
+        let ctrl_space = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::CONTROL,
         );
-        app.handle_key_event(alt_c);
+        app.handle_key_event(ctrl_space);
+        assert!(app.leader_active);
 
+        // Send 'c' key
+        let c_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_key_event(c_key);
+
+        assert!(!app.leader_active);
         assert!(app.quick_launcher.is_some());
         let launcher = app.quick_launcher.as_ref().unwrap();
         assert_eq!(launcher.workspaces, vec!["ecommerce".to_string()]);
@@ -1064,7 +1133,7 @@ repos = []
             .map(|x| buf.cell((x, 23)).unwrap().symbol())
             .collect::<String>();
 
-        assert!(bottom_row_text.contains("[Process exited with code 127 - Press Enter or Alt+X to dismiss]"));
+        assert!(bottom_row_text.contains("[Process exited with code 127 - Press Enter or Ctrl+Space w to dismiss]"));
 
         let cell = buf.cell((0, 23)).unwrap();
         assert_eq!(cell.bg, Color::Red);
@@ -1224,7 +1293,7 @@ repos = []
     }
 
     #[test]
-    fn test_session_exit_error_dismissed_with_space_and_alt_x() {
+    fn test_session_exit_error_dismissed_with_space_and_leader_w() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
         #[cfg(windows)]
@@ -1255,12 +1324,12 @@ repos = []
         assert!(app1.dashboard.is_some());
         assert!(!app1.should_quit);
 
-        // Test Alt+X dismissal
+        // Test Ctrl+Space then 'w' dismissal
         let mut registry2 = SessionRegistry::new();
         let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
         let pty2 = PtySession::spawn(config2).unwrap();
         let vt2 = VtScreen::new(80, 24);
-        let ps2 = ProjectSession::new("proj-alt-x", "ws", "mock");
+        let ps2 = ProjectSession::new("proj-leader-w", "ws", "mock");
         registry2.add(ps2, pty2, vt2).unwrap();
 
         let mut app2 = TuiApp::new(registry2);
@@ -1268,11 +1337,18 @@ repos = []
         app2.process_pty_streams();
         assert_eq!(app2.registry.len(), 1);
 
-        let alt_x = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('x'),
-            crossterm::event::KeyModifiers::ALT,
+        let ctrl_space = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::CONTROL,
         );
-        app2.handle_key_event(alt_x);
+        app2.handle_key_event(ctrl_space);
+        assert!(app2.leader_active);
+
+        let w_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app2.handle_key_event(w_key);
         assert_eq!(app2.registry.len(), 0);
         assert!(app2.should_quit);
     }

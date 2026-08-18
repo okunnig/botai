@@ -52,9 +52,12 @@ fn test_integration_tui_multiplexer_navigation_and_rendering() {
     assert_eq!(registry.len(), 2);
     assert_eq!(registry.active_index(), Some(0));
 
-    // Test Alt+2 hotkey mapping and switching
-    let alt_2_event = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT);
-    let action = map_key_event(alt_2_event);
+    // Test Ctrl+Space leader then '2' hotkey mapping and switching
+    let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+    assert_eq!(map_key_event(ctrl_space, false), TuiAction::EnterLeader);
+
+    let key_2_event = KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE);
+    let action = map_key_event(key_2_event, true);
     assert_eq!(action, TuiAction::SwitchSession(1));
 
     if let TuiAction::SwitchSession(idx) = action {
@@ -68,9 +71,10 @@ fn test_integration_tui_multiplexer_navigation_and_rendering() {
         "frontend-ui"
     );
 
-    // Test Alt+P (Prev) hotkey
-    let alt_p_event = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT);
-    let action = map_key_event(alt_p_event);
+    // Test Ctrl+Space leader then 'p' (Prev) hotkey
+    assert_eq!(map_key_event(ctrl_space, false), TuiAction::EnterLeader);
+    let p_event = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+    let action = map_key_event(p_event, true);
     assert_eq!(action, TuiAction::PrevSession);
     if let TuiAction::PrevSession = action {
         registry.prev_session();
@@ -170,5 +174,5 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
         .map(|c| c.symbol())
         .collect::<String>();
     assert!(text2.contains("interactive-cli"));
-    assert!(text2.contains("Alt+C:New/Open"));
+    assert!(text2.contains("Ctrl+Space:Leader"));
 }
