@@ -48,6 +48,7 @@ fn main() -> Result<()> {
             agent.as_deref(),
             prompt.as_deref(),
         ),
+        Some(Commands::Sync { workspace }) => cmd_sync(&config, workspace.as_deref()),
         Some(Commands::Attach { project }) => cmd_attach(&config, &project),
         Some(Commands::List) => cmd_list(&config),
         Some(Commands::Destroy { project, force }) => cmd_destroy(&project, force),
@@ -72,6 +73,63 @@ fn cmd_init(config_override: Option<&Path>, force: bool, stdout: bool) -> Result
         .with_context(|| format!("Failed to initialize configuration at {:?}", target_path))?;
 
     println!("Initialized botai configuration at: {:?}", target_path);
+    Ok(())
+}
+
+/// `botai sync [workspace]`
+fn cmd_sync(config: &Config, workspace_filter: Option<&str>) -> Result<()> {
+    let repos_dir = config.resolved_repos_dir();
+    println!("=== botai Repository Sync ===");
+    println!("Central Repos Directory: {:?}", repos_dir);
+
+    let workspaces_to_sync: Vec<&str> = match workspace_filter {
+        Some(ws_name) => {
+            if !config.workspaces.contains_key(ws_name) {
+                bail!("Workspace '{}' not found in configuration", ws_name);
+            }
+            vec![ws_name]
+        }
+        None => {
+            let mut keys: Vec<&str> = config.workspaces.keys().map(|s| s.as_str()).collect();
+            keys.sort();
+            keys
+        }
+    };
+
+    if workspaces_to_sync.is_empty() {
+        println!("No workspaces configured to sync.");
+        return Ok(());
+    }
+
+    for ws_name in workspaces_to_sync {
+        println!("\n--- Workspace: {} ---", ws_name);
+        let resolved = config.resolve_workspace_repos(ws_name)?;
+        for repo in resolved {
+            if !repo.exists_locally() {
+                if let Some(url) = &repo.clone_url {
+                    println!("  [clone] Cloning '{}' from {}...", repo.name, url);
+                    botai::git::clone_repo(url, &repo.local_path).with_context(|| {
+                        format!("Failed to clone repository '{}' from '{}'", repo.name, url)
+                    })?;
+                    println!("  ✓ Cloned {} into {:?}", repo.name, repo.local_path);
+                } else {
+                    eprintln!(
+                        "  ✗ Local repository not found at {:?} (no remote clone URL configured)",
+                        repo.local_path
+                    );
+                }
+            } else {
+                print!("  [fetch] Fetching updates for '{}'...", repo.name);
+                if let Err(e) = botai::git::fetch_repo(&repo.local_path) {
+                    println!(" (fetch failed: {}, using cached branch)", e);
+                } else {
+                    println!(" ✓ Updated");
+                }
+            }
+        }
+    }
+
+    println!("\nSynchronization completed successfully.");
     Ok(())
 }
 
@@ -110,6 +168,35 @@ fn cmd_start(
         .get_agent(agent_name)
         .with_context(|| format!("Agent '{agent_name}' not found in configuration"))?;
 
+    let resolved_repos = config
+        .resolve_workspace_repos(workspace_name)
+        .with_context(|| format!("Failed to resolve repositories for workspace '{workspace_name}'"))?;
+
+    // Auto-clone any missing repositories and fetch updates best-effort
+    for repo in &resolved_repos {
+        if !repo.exists_locally() {
+            if let Some(url) = &repo.clone_url {
+                println!(
+                    "Repository '{}' is not cached locally. Auto-cloning from {}...",
+                    repo.name, url
+                );
+                botai::git::clone_repo(url, &repo.local_path).with_context(|| {
+                    format!("Failed to clone repository '{}' from '{}'", repo.name, url)
+                })?;
+                println!("✓ Cloned into {:?}", repo.local_path);
+            } else {
+                bail!(
+                    "Local repository '{}' not found at {:?}. Please verify your configuration.",
+                    repo.name,
+                    repo.local_path
+                );
+            }
+        } else {
+            // Best-effort fetch
+            let _ = botai::git::fetch_repo(&repo.local_path);
+        }
+    }
+
     let cwd = env::current_dir().context("Failed to get current working directory")?;
     let project_dir = cwd.join(project_name);
 
@@ -125,31 +212,30 @@ fn cmd_start(
 
     let mut repo_mappings = Vec::new();
 
-    // Create worktree for each repo in the workspace
-    for repo_path in &ws.repos {
-        let repo_name = repo_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("repo");
-
-        let worktree_path = project_dir.join(repo_name);
+    // Create worktree for each resolved repo in the workspace
+    for repo in &resolved_repos {
+        let worktree_path = project_dir.join(&repo.name);
 
         println!(
-            "Creating worktree for repo {:?} at {:?}",
-            repo_path, worktree_path
+            "Creating worktree for repo '{}' at {:?}",
+            repo.name, worktree_path
         );
 
-        create_worktree(repo_path, &worktree_path, project_name).with_context(|| {
-            format!(
-                "Failed to create git worktree for {:?} checked out to branch '{}'",
-                repo_path, project_name
-            )
-        })?;
+        if let Err(e) = create_worktree(&repo.local_path, &worktree_path, project_name) {
+            // Rollback on failure
+            let _ = fs::remove_dir_all(&project_dir);
+            return Err(e).with_context(|| {
+                format!(
+                    "Failed to create git worktree for {:?} checked out to branch '{}'",
+                    repo.local_path, project_name
+                )
+            });
+        }
 
         repo_mappings.push(RepoMapping::new(
-            repo_name,
-            repo_path.clone(),
-            worktree_path.clone(),
+            repo.name.clone(),
+            repo.local_path.clone(),
+            worktree_path,
         ));
     }
 
@@ -230,7 +316,11 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
 
 /// `botai list`
 fn cmd_list(config: &Config) -> Result<()> {
-    println!("=== Configured Workspaces ===");
+    println!("=== botai Configuration ===");
+    println!("Default Agent: {}", config.default_agent);
+    println!("Central Repos Directory: {:?}", config.resolved_repos_dir());
+
+    println!("\n=== Configured Workspaces ===");
     if config.workspaces.is_empty() {
         println!("  (None configured)");
     } else {
@@ -243,8 +333,26 @@ fn cmd_list(config: &Config) -> Result<()> {
                 println!("  Default Agent: {}", agent);
             }
             println!("  Repositories:");
-            for repo in &ws.repos {
-                println!("    • {:?}", repo);
+            match config.resolve_workspace_repos(name) {
+                Ok(resolved) => {
+                    for repo in resolved {
+                        let status = if repo.exists_locally() {
+                            if repo.clone_url.is_some() {
+                                "[cached in repos_dir]"
+                            } else {
+                                "[local path]"
+                            }
+                        } else if repo.clone_url.is_some() {
+                            "[missing - will auto-clone]"
+                        } else {
+                            "[missing local path]"
+                        };
+                        println!("    • {} -> {:?} {}", repo.name, repo.local_path, status);
+                    }
+                }
+                Err(e) => {
+                    println!("    (Configuration error: {})", e);
+                }
             }
         }
     }

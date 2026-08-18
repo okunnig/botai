@@ -34,6 +34,12 @@ pub enum Commands {
         prompt: Option<String>,
     },
 
+    /// Synchronize workspace repositories by cloning missing repos and fetching latest updates.
+    Sync {
+        /// Optional workspace name to sync. If omitted, synchronizes all configured workspaces.
+        workspace: Option<String>,
+    },
+
     /// Attach to an ongoing project session in the TUI multiplexer.
     Attach {
         /// Project name to attach to.
@@ -118,6 +124,26 @@ mod tests {
                 assert_eq!(prompt, Some("Implement cart discount logic".to_string()));
             }
             _ => panic!("Expected Start command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_sync_subcommand() {
+        let cli_all = Cli::try_parse_from(["botai", "sync"]).expect("Failed to parse sync all");
+        match cli_all.command {
+            Some(Commands::Sync { workspace }) => {
+                assert_eq!(workspace, None);
+            }
+            _ => panic!("Expected Sync command"),
+        }
+
+        let cli_ws = Cli::try_parse_from(["botai", "sync", "ecommerce"])
+            .expect("Failed to parse sync workspace");
+        match cli_ws.command {
+            Some(Commands::Sync { workspace }) => {
+                assert_eq!(workspace, Some("ecommerce".to_string()));
+            }
+            _ => panic!("Expected Sync command with workspace"),
         }
     }
 

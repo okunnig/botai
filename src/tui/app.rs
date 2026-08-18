@@ -317,19 +317,24 @@ impl TuiApp {
         fs::create_dir_all(&project_dir)?;
 
         let mut repo_mappings = Vec::new();
-        if let Some(ws) = ws {
-            for repo_path in &ws.repos {
-                let repo_name = repo_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("repo");
-                let worktree_path = project_dir.join(repo_name);
-                let _ = create_worktree(repo_path, &worktree_path, project_name);
-                repo_mappings.push(RepoMapping::new(
-                    repo_name,
-                    repo_path.clone(),
-                    worktree_path,
-                ));
+        if let Some(cfg) = config {
+            if let Ok(resolved_repos) = cfg.resolve_workspace_repos(workspace_name) {
+                for repo in resolved_repos {
+                    if !repo.exists_locally() {
+                        if let Some(url) = &repo.clone_url {
+                            let _ = crate::git::clone_repo(url, &repo.local_path);
+                        }
+                    } else {
+                        let _ = crate::git::fetch_repo(&repo.local_path);
+                    }
+                    let worktree_path = project_dir.join(&repo.name);
+                    let _ = create_worktree(&repo.local_path, &worktree_path, project_name);
+                    repo_mappings.push(RepoMapping::new(
+                        repo.name,
+                        repo.local_path,
+                        worktree_path,
+                    ));
+                }
             }
         }
 
@@ -408,6 +413,7 @@ impl TuiApp {
                 let default_cfg = Config::load_from_str("default_agent = \"claude\"\n")
                     .unwrap_or_else(|_| Config {
                         default_agent: "claude".to_string(),
+                        repos_dir: None,
                         agents: HashMap::new(),
                         workspaces: HashMap::new(),
                     });

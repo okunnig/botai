@@ -30,6 +30,13 @@ pub enum GitError {
 
     #[error("Invalid branch name: '{0}'")]
     InvalidBranchName(String),
+
+    #[error("Failed to clone repository from '{url}' to '{path}': {stderr}")]
+    CloneFailed {
+        url: String,
+        path: PathBuf,
+        stderr: String,
+    },
 }
 
 /// Trait defining Git worktree management operations.
@@ -73,7 +80,7 @@ pub struct GitWorktreeManager;
 use std::process::Command;
 
 /// Checks whether a given path is an existing, valid Git repository.
-fn ensure_git_repo(repo_path: &Path) -> Result<(), GitError> {
+pub fn ensure_git_repo(repo_path: &Path) -> Result<(), GitError> {
     if !repo_path.exists() {
         return Err(GitError::RepoNotFound(repo_path.to_path_buf()));
     }
@@ -92,7 +99,65 @@ impl GitWorktreeManager {
         Self
     }
 
-    /// Creates a worktree at `worktree_path` checked out to `branch_name` branched off default branch.
+    /// Clones a remote repository to `target_path`. If already an existing git repo, succeeds as no-op.
+    pub fn clone_repo(url: &str, target_path: &Path) -> Result<(), GitError> {
+        if target_path.exists() && ensure_git_repo(target_path).is_ok() {
+            return Ok(());
+        }
+
+        if let Some(parent) = target_path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
+        let output = Command::new("git")
+            .arg("clone")
+            .arg(url)
+            .arg(target_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(GitError::CloneFailed {
+                url: url.to_string(),
+                path: target_path.to_path_buf(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Performs a best-effort `git fetch origin` for `repo_path`.
+    pub fn fetch_repo(repo_path: &Path) -> Result<(), GitError> {
+        ensure_git_repo(repo_path)?;
+        let output = Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(GitError::CommandFailed {
+                command: "git fetch origin".to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Checks if a remote branch exists (e.g. `origin/main`).
+    pub fn remote_branch_exists(repo_path: &Path, remote_branch: &str) -> Result<bool, GitError> {
+        ensure_git_repo(repo_path)?;
+        let ref_name = format!("refs/remotes/{}", remote_branch);
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify", &ref_name])
+            .current_dir(repo_path)
+            .output()?;
+        Ok(output.status.success())
+    }
+
+    /// Creates a worktree at `worktree_path` checked out to `branch_name` branched off default branch (or upstream default branch).
     pub fn create_worktree(
         repo_path: &Path,
         worktree_path: &Path,
@@ -116,6 +181,12 @@ impl GitWorktreeManager {
         }
 
         let default_branch = Self::get_default_branch(repo_path)?;
+        let origin_ref = format!("origin/{}", default_branch);
+        let branch_target = if Self::remote_branch_exists(repo_path, &origin_ref).unwrap_or(false) {
+            origin_ref
+        } else {
+            default_branch
+        };
 
         if let Some(parent) = worktree_path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -126,7 +197,7 @@ impl GitWorktreeManager {
         let output = Command::new("git")
             .args(["worktree", "add", "-b", branch_name])
             .arg(worktree_path)
-            .arg(&default_branch)
+            .arg(&branch_target)
             .current_dir(repo_path)
             .output()?;
 
@@ -134,7 +205,7 @@ impl GitWorktreeManager {
             return Err(GitError::CommandFailed {
                 command: format!(
                     "git worktree add -b {} {:?} {}",
-                    branch_name, worktree_path, default_branch
+                    branch_name, worktree_path, branch_target
                 ),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             });
@@ -345,6 +416,21 @@ impl WorktreeManager for GitWorktreeManager {
 
 /// Type alias for GitWorktreeManager.
 pub type GitManager = GitWorktreeManager;
+
+/// Module-level convenience function to clone a repository.
+pub fn clone_repo(url: &str, target_path: &Path) -> Result<(), GitError> {
+    GitWorktreeManager::clone_repo(url, target_path)
+}
+
+/// Module-level convenience function to fetch remote updates.
+pub fn fetch_repo(repo_path: &Path) -> Result<(), GitError> {
+    GitWorktreeManager::fetch_repo(repo_path)
+}
+
+/// Module-level convenience function to check if a remote branch exists.
+pub fn remote_branch_exists(repo_path: &Path, remote_branch: &str) -> Result<bool, GitError> {
+    GitWorktreeManager::remote_branch_exists(repo_path, remote_branch)
+}
 
 /// Module-level convenience function to create a worktree.
 pub fn create_worktree(
@@ -733,5 +819,52 @@ mod tests {
         assert!(wt_path.join("README.md").exists());
         remove_worktree(&repo_path, &wt_path, false).expect("remove worktree");
         assert!(!wt_path.exists());
+    }
+
+    #[test]
+    fn test_clone_repo_local_and_fetch() {
+        let (_dir, origin_repo) = init_mock_repo("main");
+        let client_temp = TempDir::new().expect("tempdir");
+        let cloned_path = client_temp.path().join("cloned_repo");
+
+        // Clone repo
+        let origin_url = origin_repo.to_string_lossy().to_string();
+        clone_repo(&origin_url, &cloned_path).expect("clone local repo");
+        assert!(cloned_path.exists());
+        assert!(cloned_path.join("README.md").exists());
+
+        // Clone again (should be no-op success)
+        clone_repo(&origin_url, &cloned_path).expect("clone existing repo is no-op");
+
+        // Fetch from origin
+        fetch_repo(&cloned_path).expect("fetch from origin");
+
+        // Check remote branch exists
+        assert!(remote_branch_exists(&cloned_path, "origin/main").expect("check remote branch"));
+
+        // Create worktree on cloned repo - should branch off origin/main
+        let wt_path = client_temp.path().join("wt_from_clone");
+        create_worktree(&cloned_path, &wt_path, "feature-cloned").expect("create worktree from clone");
+        assert!(wt_path.exists());
+        assert_eq!(
+            get_current_branch(&wt_path).expect("current branch"),
+            "feature-cloned"
+        );
+    }
+
+    #[test]
+    fn test_clone_repo_invalid_url_fails() {
+        let temp = TempDir::new().expect("tempdir");
+        let target = temp.path().join("invalid");
+        let err = clone_repo("https://invalid.domain.that.does.not.exist.botai/repo.git", &target)
+            .expect_err("Cloning invalid URL should fail");
+
+        match err {
+            GitError::CloneFailed { url, path, .. } => {
+                assert!(url.contains("invalid.domain"));
+                assert_eq!(path, target);
+            }
+            other => panic!("Expected CloneFailed error, got: {:?}", other),
+        }
     }
 }
