@@ -272,3 +272,65 @@ repos = []
     app.handle_dashboard_action(DashboardAction::Quit);
     assert!(app.should_quit);
 }
+
+#[test]
+fn test_integration_detach_returns_to_dashboard_and_reattach() {
+    let tmp = tempdir().expect("Failed to create tempdir");
+    let cwd = tmp.path();
+
+    let proj1 = cwd.join("service-a");
+    fs::create_dir(&proj1).expect("create proj dir");
+    fs::write(proj1.join("AGENTS.md"), "# Service A").expect("write agents md");
+
+    let config_toml = r#"
+default_agent = "mock_shell"
+repos_dir = "/tmp/repos"
+
+[agents.mock_shell]
+command = "sh"
+args = ["-c", "sleep 10"]
+
+[workspaces.test_ws]
+repos = []
+"#;
+    let config = Config::load_from_str(config_toml).expect("load config");
+    let dashboard = DashboardState::from_env(&config, cwd);
+
+    let registry = botai::session::SessionRegistry::new();
+    let mut app = botai::tui::TuiApp::new(registry)
+        .with_dashboard(dashboard)
+        .with_config(config)
+        .with_cwd(cwd.to_path_buf());
+
+    // 1. Initially showing dashboard
+    assert!(app.is_showing_dashboard());
+
+    // 2. Attach project service-a
+    app.handle_dashboard_action(DashboardAction::Attach("service-a".to_string()));
+    assert_eq!(app.registry.len(), 1);
+    assert!(!app.showing_dashboard);
+    assert!(!app.is_showing_dashboard());
+
+    // 3. Send leader Ctrl+Space then Detach ('d')
+    let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+    app.handle_key_event(ctrl_space);
+    assert!(app.leader_active);
+
+    let d_key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+    app.handle_key_event(d_key);
+
+    // Should return to dashboard without quitting, keeping session running
+    assert!(!app.leader_active);
+    assert!(!app.should_quit);
+    assert!(app.showing_dashboard);
+    assert!(app.is_showing_dashboard());
+    assert_eq!(app.registry.len(), 1);
+
+    // 4. Re-attach to service-a from dashboard
+    app.handle_dashboard_action(DashboardAction::Attach("service-a".to_string()));
+    assert!(!app.showing_dashboard);
+    assert!(!app.is_showing_dashboard());
+    assert_eq!(app.registry.active_index(), Some(0));
+    assert_eq!(app.registry.len(), 1);
+}
+

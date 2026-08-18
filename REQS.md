@@ -156,6 +156,10 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - If `botai` was launched from the dashboard, terminating the last session automatically transitions back to the interactive project dashboard (with refreshed project directories).
     - If `botai` was launched directly via CLI (`botai start` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
   - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
+- **Session Detachment & Background Persistence**:
+  - Detaching from an active session (`Ctrl + Space` then `d`):
+    - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
+    - When launched directly from CLI (`botai start` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
 - **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, workspace, key hints, and a visible `[LEADER]` mode indicator when active.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
@@ -163,7 +167,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - `Ctrl + Space` then `c` (or `n`): Open the Quick Project Launcher & Creator modal.
     - `Ctrl + Space` then `n` / `p`: Switch to Next / Previous active project session.
     - `Ctrl + Space` then `w` (or `x`): Close / terminate active project session.
-    - `Ctrl + Space` then `d`: Detach from active session (return to CLI / dashboard).
+    - `Ctrl + Space` then `d`: Detach from active session (returns to dashboard when dashboard is present, or exits to host shell when running in standalone CLI mode).
     - `Ctrl + Space` then `q`: Quit `botai`.
     - `Ctrl + Space` then `Ctrl + Space` (or `Space`): Forward a literal `Ctrl + Space` (`0x00`) to the active PTY.
     - `Ctrl + Space` then `Esc` (or any unrecognized key): Cancel leader mode without executing an action.

@@ -48,6 +48,7 @@ pub struct TuiApp {
     pub cwd: Option<PathBuf>,
     pub viewport_size: Option<(u16, u16)>,
     pub leader_active: bool,
+    pub showing_dashboard: bool,
 }
 
 struct TerminalCleanupGuard;
@@ -101,7 +102,13 @@ impl TuiApp {
             cwd: None,
             viewport_size: None,
             leader_active: false,
+            showing_dashboard: false,
         }
+    }
+
+    /// Returns whether the dashboard should currently be displayed instead of an active session.
+    pub fn is_showing_dashboard(&self) -> bool {
+        (self.showing_dashboard || self.registry.is_empty()) && self.dashboard.is_some()
     }
 
     /// Sets the dashboard state on `TuiApp`.
@@ -139,6 +146,7 @@ impl TuiApp {
         if self.registry.is_empty() {
             if self.dashboard.is_some() {
                 self.refresh_dashboard();
+                self.showing_dashboard = true;
             } else {
                 self.should_quit = true;
             }
@@ -203,7 +211,7 @@ impl TuiApp {
             terminal.draw(|f| {
                 let (status_area, term_area) = compute_layout(f.area());
 
-                if self.registry.is_empty() && self.dashboard.is_some() {
+                if self.is_showing_dashboard() {
                     if let Some(dashboard) = &self.dashboard {
                         render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
                         if let Some(pos) = dashboard.cursor_position(f.area()) {
@@ -258,7 +266,7 @@ impl TuiApp {
                             if key.kind == KeyEventKind::Press {
                                 if self.quick_launcher.is_some() {
                                     self.handle_launcher_key(key);
-                                } else if self.registry.is_empty() && self.dashboard.is_some() {
+                                } else if self.is_showing_dashboard() {
                                     self.handle_dashboard_key(key);
                                 } else {
                                     self.handle_key_event(key);
@@ -393,6 +401,7 @@ impl TuiApp {
                         Ok(()) => {
                             let new_idx = self.registry.len().saturating_sub(1);
                             let _ = self.registry.set_active_index(new_idx);
+                            self.showing_dashboard = false;
                             self.quick_launcher = None;
                         }
                         Err(err) => {
@@ -409,12 +418,14 @@ impl TuiApp {
                         .position(|s| s.project_name() == project)
                     {
                         let _ = self.registry.set_active_index(pos);
+                        self.showing_dashboard = false;
                         self.quick_launcher = None;
                     } else {
                         match self.attach_project(&project) {
                             Ok(()) => {
                                 let new_idx = self.registry.len().saturating_sub(1);
                                 let _ = self.registry.set_active_index(new_idx);
+                                self.showing_dashboard = false;
                                 self.quick_launcher = None;
                             }
                             Err(err) => {
@@ -447,16 +458,39 @@ impl TuiApp {
                 self.should_quit = true;
             }
             DashboardAction::Attach(project) => {
-                let _ = self.attach_project(&project);
+                if let Some(pos) = self
+                    .registry
+                    .list()
+                    .iter()
+                    .position(|s| s.project_name() == project)
+                {
+                    let _ = self.registry.set_active_index(pos);
+                    self.showing_dashboard = false;
+                } else if self.attach_project(&project).is_ok() {
+                    let new_idx = self.registry.len().saturating_sub(1);
+                    let _ = self.registry.set_active_index(new_idx);
+                    self.showing_dashboard = false;
+                }
             }
             DashboardAction::CreateProject {
                 workspace,
                 project,
                 prompt,
             } => {
-                let _ = self.create_and_start_project(&workspace, &project, prompt.as_deref());
+                if self
+                    .create_and_start_project(&workspace, &project, prompt.as_deref())
+                    .is_ok()
+                {
+                    let new_idx = self.registry.len().saturating_sub(1);
+                    let _ = self.registry.set_active_index(new_idx);
+                    self.showing_dashboard = false;
+                }
             }
             DashboardAction::Destroy(project) => {
+                if let Some(session) = self.registry.get_by_project(&project) {
+                    let id = session.id().to_string();
+                    let _ = self.registry.remove(&id);
+                }
                 let _ = self.destroy_project(&project);
             }
             DashboardAction::None => {}
@@ -465,8 +499,14 @@ impl TuiApp {
 
     /// Attaches to an existing project directory and adds its session to the registry.
     pub fn attach_project(&mut self, project_name: &str) -> anyhow::Result<()> {
-        if self.registry.get_by_project(project_name).is_some() {
-            anyhow::bail!("Project '{}' already has an active session in registry", project_name);
+        if let Some(pos) = self
+            .registry
+            .list()
+            .iter()
+            .position(|s| s.project_name() == project_name)
+        {
+            let _ = self.registry.set_active_index(pos);
+            return Ok(());
         }
 
         let cwd = self
@@ -722,9 +762,19 @@ impl TuiApp {
             TuiAction::CancelLeader => {
                 self.leader_active = false;
             }
-            TuiAction::Quit | TuiAction::Detach => {
+            TuiAction::Quit => {
                 self.leader_active = false;
                 self.should_quit = true;
+            }
+            TuiAction::Detach => {
+                self.leader_active = false;
+                if self.dashboard.is_some() {
+                    self.refresh_dashboard();
+                    self.showing_dashboard = true;
+                    self.should_quit = false;
+                } else {
+                    self.should_quit = true;
+                }
             }
             TuiAction::SwitchSession(idx) => {
                 self.leader_active = false;
@@ -1377,6 +1427,176 @@ repos = []
         app2.handle_key_event(w_key);
         assert_eq!(app2.registry.len(), 0);
         assert!(app2.should_quit);
+    }
+
+    #[test]
+    fn test_tui_app_detach_with_dashboard() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("running-proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let dashboard = DashboardState::new(vec!["ws".to_string()], vec![]);
+        let mut app = TuiApp::new(registry).with_dashboard(dashboard);
+
+        assert!(!app.showing_dashboard);
+        assert!(!app.is_showing_dashboard());
+        assert!(!app.should_quit);
+
+        // Enter leader mode Ctrl+Space
+        let ctrl_space = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        app.handle_key_event(ctrl_space);
+        assert!(app.leader_active);
+
+        // Detach key 'd'
+        let d_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_key_event(d_key);
+
+        assert!(!app.leader_active);
+        assert!(!app.should_quit);
+        assert!(app.showing_dashboard);
+        assert!(app.is_showing_dashboard());
+        assert_eq!(app.registry.len(), 1);
+        assert_eq!(app.registry.active_session().unwrap().project_name(), "running-proj");
+    }
+
+    #[test]
+    fn test_tui_app_reattach_to_existing_session_from_dashboard() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+        let pty1 = PtySession::spawn(config1).unwrap();
+        let vt1 = VtScreen::new(80, 24);
+        let ps1 = ProjectSession::new("proj1", "ws", "mock");
+        registry.add(ps1, pty1, vt1).unwrap();
+
+        let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty2 = PtySession::spawn(config2).unwrap();
+        let vt2 = VtScreen::new(80, 24);
+        let ps2 = ProjectSession::new("proj2", "ws", "mock");
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        let dashboard = DashboardState::new(
+            vec!["ws".to_string()],
+            vec!["proj1".to_string(), "proj2".to_string()],
+        );
+        let mut app = TuiApp::new(registry).with_dashboard(dashboard);
+
+        // Detach to dashboard
+        app.showing_dashboard = true;
+        assert!(app.is_showing_dashboard());
+        assert_eq!(app.registry.active_index(), Some(0));
+
+        // Attach "proj2" from dashboard
+        app.handle_dashboard_action(DashboardAction::Attach("proj2".to_string()));
+
+        assert!(!app.showing_dashboard);
+        assert!(!app.is_showing_dashboard());
+        assert_eq!(app.registry.active_index(), Some(1));
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "proj2"
+        );
+        assert_eq!(app.registry.len(), 2);
+    }
+
+    #[test]
+    fn test_tui_app_detach_without_dashboard() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("running-proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert!(app.dashboard.is_none());
+
+        // Enter leader mode Ctrl+Space
+        let ctrl_space = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(' '),
+            crossterm::event::KeyModifiers::CONTROL,
+        );
+        app.handle_key_event(ctrl_space);
+        assert!(app.leader_active);
+
+        // Detach key 'd'
+        let d_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_key_event(d_key);
+
+        assert!(!app.leader_active);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_tui_app_destroy_running_project_from_dashboard() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let proj_dir = cwd.join("active-proj");
+        fs::create_dir(&proj_dir).unwrap();
+        fs::write(proj_dir.join("AGENTS.md"), "# Project").unwrap();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, &proj_dir).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("active-proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let dashboard = DashboardState::new(
+            vec!["ws".to_string()],
+            vec!["active-proj".to_string()],
+        );
+        let mut app = TuiApp::new(registry)
+            .with_dashboard(dashboard)
+            .with_cwd(cwd.clone());
+
+        assert_eq!(app.registry.len(), 1);
+        assert!(proj_dir.exists());
+
+        // Destroy the project from dashboard
+        app.handle_dashboard_action(DashboardAction::Destroy("active-proj".to_string()));
+
+        // Session must be removed from registry
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.registry.get_by_project("active-proj").is_none());
+
+        // Directory must be removed
+        assert!(!proj_dir.exists());
     }
 }
 
