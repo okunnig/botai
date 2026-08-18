@@ -132,7 +132,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - An agent CLI process completes a task or exits.
     - An agent transitions to an idle state awaiting user input / approval.
 - **Real-Time Session Indicators in TUI**:
-  - Live status indicators formatted as a leading solid round dot symbol (`●` U+25CF) inside project tabs in the status bar (e.g., `[● 1: my-project]` for active tabs, `  ● 1: my-project  ` for inactive tabs):
+  - Live status indicators formatted as a leading solid round dot symbol (`●` U+25CF) inside project tabs in the status bar (e.g., `  ● 1: my-project  ` with active/inactive styling):
     - ● **Busy / Thinking**: Themed Busy color (`theme.status_busy`, e.g., Cyan / Electric Blue / Amber) when agent is actively executing.
     - ● **Waiting for Input**: Themed Waiting color (`theme.status_waiting`, e.g., Peach / Amber / Sky Blue) when agent is awaiting user response or confirmation.
     - ● **Done / Idle**: Themed Done color (`theme.status_done`, e.g., Green) when agent finished its assigned prompt or task.

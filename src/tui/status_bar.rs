@@ -38,7 +38,7 @@ impl<'a> StatusBar<'a> {
     }
 
     /// Formats a single tab title for a session entry with leading status dot indicator and hotkey number.
-    pub fn format_tab(index: usize, session: &SessionEntry, is_active: bool) -> String {
+    pub fn format_tab(index: usize, session: &SessionEntry, _is_active: bool) -> String {
         let hotkey = if index < 9 {
             format!("{}", index + 1)
         } else {
@@ -47,11 +47,7 @@ impl<'a> StatusBar<'a> {
 
         let proj = session.project_name();
 
-        if is_active {
-            format!(" [● {}: {}] ", hotkey, proj)
-        } else {
-            format!("  ● {}: {}  ", hotkey, proj)
-        }
+        format!("  ● {}: {}  ", hotkey, proj)
     }
 
     /// Formats a single tab into styled Spans with a themed leading colored status dot indicator.
@@ -81,9 +77,9 @@ impl<'a> StatusBar<'a> {
                 .add_modifier(Modifier::BOLD);
 
             vec![
-                Span::styled(" [", active_style),
+                Span::styled("  ", active_style),
                 Span::styled("●", dot_style_active),
-                Span::styled(format!(" {}: {}] ", hotkey, proj), active_style),
+                Span::styled(format!(" {}: {}  ", hotkey, proj), active_style),
             ]
         } else {
             let inactive_style = Style::default()
@@ -344,13 +340,13 @@ mod tests {
         let entry = SessionEntry::new(ps, pty, vt);
 
         let active_tab = StatusBar::format_tab(0, &entry, true);
-        assert_eq!(active_tab, " [● 1: my-feature] ");
+        assert_eq!(active_tab, "  ● 1: my-feature  ");
 
         let inactive_tab = StatusBar::format_tab(1, &entry, false);
         assert_eq!(inactive_tab, "  ● 2: my-feature  ");
 
         let overflow_active = StatusBar::format_tab(9, &entry, true);
-        assert_eq!(overflow_active, " [● -: my-feature] ");
+        assert_eq!(overflow_active, "  ● -: my-feature  ");
 
         let overflow_inactive = StatusBar::format_tab(9, &entry, false);
         assert_eq!(overflow_inactive, "  ● -: my-feature  ");
@@ -376,7 +372,7 @@ mod tests {
             // Active tab spans
             let active_spans = StatusBar::format_tab_spans(0, &entry, true, &theme);
             assert_eq!(active_spans.len(), 3);
-            assert_eq!(active_spans[0].content, " [");
+            assert_eq!(active_spans[0].content, "  ");
             assert_eq!(active_spans[0].style.fg, Some(theme.tab_active_fg));
             assert_eq!(active_spans[0].style.bg, Some(theme.tab_active_bg));
 
@@ -384,7 +380,7 @@ mod tests {
             assert_eq!(active_spans[1].style.fg, Some(expected_color));
             assert_eq!(active_spans[1].style.bg, Some(theme.tab_active_bg));
 
-            assert_eq!(active_spans[2].content, " 1: test-proj] ");
+            assert_eq!(active_spans[2].content, " 1: test-proj  ");
             assert_eq!(active_spans[2].style.fg, Some(theme.tab_active_fg));
             assert_eq!(active_spans[2].style.bg, Some(theme.tab_active_bg));
 
@@ -458,7 +454,7 @@ mod tests {
         assert_eq!(dot_cell_1.bg, theme.tab_active_bg);
 
         // Session 2 (inactive, WaitingForInput):
-        // Tab 1 length: " [● 1: proj-backend] ".chars().count() = 21, + 1 separator space = 22
+        // Tab 1 length: "  ● 1: proj-backend  ".chars().count() = 21, + 1 separator space = 22
         // Tab 2 starts at x = 22: "  " (2 chars) -> dot at x = 24
         let dot_cell_2 = buffer.cell((24, 0)).unwrap();
         assert_eq!(dot_cell_2.symbol(), "●");
@@ -564,11 +560,11 @@ mod tests {
         let rendered = buffer.content().iter().map(|c| c.symbol()).collect::<String>();
         assert!(rendered.contains("● 1: themed-proj"));
 
-        // Tab bracket cell at (1, 0) matches tab_active_fg and tab_active_bg
-        let bracket_cell = buffer.cell((1, 0)).unwrap();
-        assert_eq!(bracket_cell.symbol(), "[");
-        assert_eq!(bracket_cell.bg, theme.tab_active_bg);
-        assert_eq!(bracket_cell.fg, theme.tab_active_fg);
+        // Tab leading space cell at (1, 0) matches tab_active_fg and tab_active_bg
+        let space_cell = buffer.cell((1, 0)).unwrap();
+        assert_eq!(space_cell.symbol(), " ");
+        assert_eq!(space_cell.bg, theme.tab_active_bg);
+        assert_eq!(space_cell.fg, theme.tab_active_fg);
 
         // Status dot cell at (2, 0) matches status_busy and tab_active_bg
         let dot_cell = buffer.cell((2, 0)).unwrap();
