@@ -100,10 +100,17 @@ repos = ["/tmp/repos/shop"]
     let mut status_buf = Buffer::empty(Rect::new(0, 0, 80, 1));
     StatusBar::render_to_buffer_with_theme(&registry, false, &theme, Rect::new(0, 0, 80, 1), &mut status_buf);
 
-    // Active tab cell background matches cyberpunk tab_active_bg (neon cyan)
-    let active_tab_cell = status_buf.cell((2, 0)).unwrap();
-    assert_eq!(active_tab_cell.bg, theme.tab_active_bg);
-    assert_eq!(active_tab_cell.fg, theme.tab_active_fg);
+    // Active tab bracket cell at (1, 0) matches cyberpunk tab_active_bg and tab_active_fg
+    let active_tab_bracket = status_buf.cell((1, 0)).unwrap();
+    assert_eq!(active_tab_bracket.symbol(), "[");
+    assert_eq!(active_tab_bracket.bg, theme.tab_active_bg);
+    assert_eq!(active_tab_bracket.fg, theme.tab_active_fg);
+
+    // Active tab dot cell at (2, 0) matches cyberpunk status_busy and tab_active_bg
+    let active_tab_dot = status_buf.cell((2, 0)).unwrap();
+    assert_eq!(active_tab_dot.symbol(), "●");
+    assert_eq!(active_tab_dot.bg, theme.tab_active_bg);
+    assert_eq!(active_tab_dot.fg, theme.status_busy);
 
     // Empty status bar cell background matches cyberpunk status_bar_bg
     let empty_cell = status_buf.cell((79, 0)).unwrap();

@@ -1,3 +1,4 @@
+use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 
@@ -6,28 +7,37 @@ use std::time::SystemTime;
 pub enum SessionStatus {
     /// The session is being set up (worktree creation, process spawning).
     Initializing,
-    /// The agent is actively executing, thinking, or streaming tool output (⏳).
+    /// The agent is actively executing, thinking, or streaming tool output (●).
     Busy,
-    /// The agent is idle and waiting for user response, permission, or prompt input (💬).
+    /// The agent is idle and waiting for user response, permission, or prompt input (●).
     WaitingForInput,
-    /// The agent has successfully finished its task or initial prompt (✅).
+    /// The agent has successfully finished its task or initial prompt (●).
     Done,
-    /// The agent encountered a non-zero exit code or execution error (⚠️).
+    /// The agent encountered a non-zero exit code or execution error (●).
     Error,
     /// The session was manually closed, detached, or killed.
     Terminated,
 }
 
 impl SessionStatus {
-    /// Returns the badge icon / emoji representing this status in the TUI status bar.
+    /// Returns the solid round dot status symbol indicator (●).
+    pub fn status_symbol(&self) -> &'static str {
+        "●"
+    }
+
+    /// Returns the badge icon representing this status in the TUI status bar.
     pub fn badge_icon(&self) -> &'static str {
+        self.status_symbol()
+    }
+
+    /// Returns the contextual theme color associated with this status.
+    pub fn status_color(&self, theme: &crate::tui::Theme) -> Color {
         match self {
-            SessionStatus::Initializing => "🔄",
-            SessionStatus::Busy => "⏳",
-            SessionStatus::WaitingForInput => "💬",
-            SessionStatus::Done => "✅",
-            SessionStatus::Error => "⚠️",
-            SessionStatus::Terminated => "⏹️",
+            SessionStatus::Busy => theme.status_busy,
+            SessionStatus::WaitingForInput => theme.status_waiting,
+            SessionStatus::Done => theme.status_done,
+            SessionStatus::Error => theme.status_error,
+            SessionStatus::Initializing | SessionStatus::Terminated => theme.status_bar_fg,
         }
     }
 
@@ -180,17 +190,20 @@ mod tests {
 
     #[test]
     fn test_session_status_properties_and_badges() {
-        assert_eq!(SessionStatus::Initializing.badge_icon(), "🔄");
+        assert_eq!(SessionStatus::Initializing.status_symbol(), "●");
+        assert_eq!(SessionStatus::Initializing.badge_icon(), "●");
         assert_eq!(SessionStatus::Initializing.badge_text(), "Initializing");
         assert!(SessionStatus::Initializing.is_active());
         assert!(!SessionStatus::Initializing.is_terminal());
 
-        assert_eq!(SessionStatus::Busy.badge_icon(), "⏳");
+        assert_eq!(SessionStatus::Busy.status_symbol(), "●");
+        assert_eq!(SessionStatus::Busy.badge_icon(), "●");
         assert_eq!(SessionStatus::Busy.badge_text(), "Thinking");
         assert!(SessionStatus::Busy.is_active());
         assert!(!SessionStatus::Busy.is_terminal());
 
-        assert_eq!(SessionStatus::WaitingForInput.badge_icon(), "💬");
+        assert_eq!(SessionStatus::WaitingForInput.status_symbol(), "●");
+        assert_eq!(SessionStatus::WaitingForInput.badge_icon(), "●");
         assert_eq!(
             SessionStatus::WaitingForInput.badge_text(),
             "Waiting for Input"
@@ -198,17 +211,20 @@ mod tests {
         assert!(SessionStatus::WaitingForInput.is_active());
         assert!(!SessionStatus::WaitingForInput.is_terminal());
 
-        assert_eq!(SessionStatus::Done.badge_icon(), "✅");
+        assert_eq!(SessionStatus::Done.status_symbol(), "●");
+        assert_eq!(SessionStatus::Done.badge_icon(), "●");
         assert_eq!(SessionStatus::Done.badge_text(), "Done");
         assert!(!SessionStatus::Done.is_active());
         assert!(SessionStatus::Done.is_terminal());
 
-        assert_eq!(SessionStatus::Error.badge_icon(), "⚠️");
+        assert_eq!(SessionStatus::Error.status_symbol(), "●");
+        assert_eq!(SessionStatus::Error.badge_icon(), "●");
         assert_eq!(SessionStatus::Error.badge_text(), "Error");
         assert!(!SessionStatus::Error.is_active());
         assert!(SessionStatus::Error.is_terminal());
 
-        assert_eq!(SessionStatus::Terminated.badge_icon(), "⏹️");
+        assert_eq!(SessionStatus::Terminated.status_symbol(), "●");
+        assert_eq!(SessionStatus::Terminated.badge_icon(), "●");
         assert_eq!(SessionStatus::Terminated.badge_text(), "Terminated");
         assert!(!SessionStatus::Terminated.is_active());
         assert!(SessionStatus::Terminated.is_terminal());
@@ -223,6 +239,59 @@ mod tests {
         assert_eq!(SessionStatus::Done.to_string(), "Done");
         assert_eq!(SessionStatus::Error.to_string(), "Error");
         assert_eq!(SessionStatus::Terminated.to_string(), "Terminated");
+    }
+
+    #[test]
+    fn test_session_status_colors_across_themes() {
+        use crate::tui::Theme;
+
+        let themes = [
+            Theme::tokyo_night(),
+            Theme::catppuccin(),
+            Theme::cyberpunk(),
+            Theme::gruvbox(),
+            Theme::monochrome(),
+            Theme::ansi(),
+        ];
+
+        for theme in &themes {
+            assert_eq!(
+                SessionStatus::Busy.status_color(theme),
+                theme.status_busy,
+                "Busy status color mismatch for theme {}",
+                theme.name
+            );
+            assert_eq!(
+                SessionStatus::WaitingForInput.status_color(theme),
+                theme.status_waiting,
+                "Waiting status color mismatch for theme {}",
+                theme.name
+            );
+            assert_eq!(
+                SessionStatus::Done.status_color(theme),
+                theme.status_done,
+                "Done status color mismatch for theme {}",
+                theme.name
+            );
+            assert_eq!(
+                SessionStatus::Error.status_color(theme),
+                theme.status_error,
+                "Error status color mismatch for theme {}",
+                theme.name
+            );
+            assert_eq!(
+                SessionStatus::Initializing.status_color(theme),
+                theme.status_bar_fg,
+                "Initializing status color mismatch for theme {}",
+                theme.name
+            );
+            assert_eq!(
+                SessionStatus::Terminated.status_color(theme),
+                theme.status_bar_fg,
+                "Terminated status color mismatch for theme {}",
+                theme.name
+            );
+        }
     }
 
     #[test]

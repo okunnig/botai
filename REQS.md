@@ -131,12 +131,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Emits native OS desktop notifications (via `notify-rust` / terminal notifications) when:
     - An agent CLI process completes a task or exits.
     - An agent transitions to an idle state awaiting user input / approval.
-- **Real-Time Session Badges in TUI**:
-  - Live status indicators next to project tabs in the status bar:
-    - ⏳ **Busy / Thinking**: Agent process is actively executing / outputting.
-    - 💬 **Waiting for Input**: Agent process is idle, awaiting user response or confirmation.
-    - ✅ **Done / Idle**: Agent finished its assigned prompt or task.
-    - ⚠️ **Error / Interrupted**: Non-zero exit code or process interruption.
+- **Real-Time Session Indicators in TUI**:
+  - Live status indicators formatted as a leading solid round dot symbol (`●` U+25CF) inside project tabs in the status bar (e.g., `[● 1: my-project]` for active tabs, `  ● 1: my-project  ` for inactive tabs):
+    - ● **Busy / Thinking**: Themed Busy color (`theme.status_busy`, e.g., Cyan / Electric Blue / Amber) when agent is actively executing.
+    - ● **Waiting for Input**: Themed Waiting color (`theme.status_waiting`, e.g., Peach / Amber / Sky Blue) when agent is awaiting user response or confirmation.
+    - ● **Done / Idle**: Themed Done color (`theme.status_done`, e.g., Green) when agent finished its assigned prompt or task.
+    - ● **Error / Interrupted**: Themed Error color (`theme.status_error`, e.g., Red) on non-zero exit code or process failure.
+    - ● **Initializing / Terminated**: Themed status bar foreground color (`theme.status_bar_fg`).
 
 ---
 
@@ -154,7 +155,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Last / Only Session Scenario (Context-Aware Exit)**:
     - If `botai` was launched from the dashboard, terminating the last session automatically transitions back to the interactive project dashboard (with refreshed project directories).
     - If `botai` was launched directly via CLI (`botai start` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
-  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the `Error ⚠️` badge and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
+  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
 - **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, workspace, key hints, and a visible `[LEADER]` mode indicator when active.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
@@ -251,7 +252,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **`ansi` / `default`**: Standard 16-color ANSI terminal fallback palette using native terminal cyan, yellow, green, red, dark gray, and white without 24-bit TrueColor RGB definitions.
 - **Complete TUI Element Coverage**:
   - **Status Bar**: Background, default text, active session tab, inactive tabs, tab index numbers (1..9), leader mode indicator badge and hints.
-  - **Agent Status Indicators**: Distinct contextual colors for Thinking / Busy (⏳), Waiting for Input (💬), Done / Idle (✅), and Error / Interrupted (⚠️).
+  - **Agent Status Indicators**: Distinct contextual theme colors applied to the leading round status dot (`●`) for Thinking / Busy (`status_busy`), Waiting for Input (`status_waiting`), Done / Idle (`status_done`), and Error / Interrupted (`status_error`), with Initializing and Terminated states rendered in `status_bar_fg`.
   - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, and footer help hints.
   - **Modals (Creation Modal & Quick Launcher)**: Dialog borders, active/inactive tab bars, focused input borders/prompts, placeholder text, field labels, and button/key hints.
   - **Exit & Crash Banners**: High-visibility error notification banners rendered across the bottom line upon non-zero process exits.
