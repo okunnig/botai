@@ -156,9 +156,10 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     }
 
     // 9. Render modal in Ratatui TestBackend and verify visual layout
+    let theme = config.theme();
     terminal
         .draw(|f| {
-            render_dashboard(&state, f.area(), f.buffer_mut());
+            render_dashboard(&state, f.area(), f.buffer_mut(), &theme);
         })
         .expect("Failed to draw frame with modal");
 

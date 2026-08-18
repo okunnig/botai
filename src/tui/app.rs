@@ -14,7 +14,7 @@ use ratatui::{
     backend::CrosstermBackend,
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     Terminal,
 };
@@ -32,6 +32,7 @@ use crate::tui::quick_launcher::{
     render_quick_launcher, QuickLauncherAction, QuickLauncherState,
 };
 use crate::tui::status_bar::StatusBar;
+use crate::tui::theme::Theme;
 use crate::tui::ui::{compute_layout, TerminalView};
 
 /// Main application runner managing the TUI loop, PTY streaming, activity tracking, and rendering.
@@ -59,7 +60,7 @@ impl Drop for TerminalCleanupGuard {
 }
 
 /// Renders an error / crash banner at the bottom line of the given viewport area.
-pub fn render_error_banner(exit_code: Option<u32>, area: Rect, buf: &mut Buffer) {
+pub fn render_error_banner(exit_code: Option<u32>, area: Rect, buf: &mut Buffer, theme: &Theme) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -72,8 +73,8 @@ pub fn render_error_banner(exit_code: Option<u32>, area: Rect, buf: &mut Buffer)
     );
     let banner_y = area.bottom().saturating_sub(1);
     let style = Style::default()
-        .bg(Color::Red)
-        .fg(Color::White)
+        .bg(theme.error_banner_bg)
+        .fg(theme.error_banner_fg)
         .add_modifier(Modifier::BOLD);
 
     for x in area.left()..area.right() {
@@ -198,19 +199,22 @@ impl TuiApp {
             self.process_pty_streams();
 
             // 3. Draw active frame
+            let theme = self.config.as_ref().map(|c| c.theme()).unwrap_or_default();
             terminal.draw(|f| {
                 let (status_area, term_area) = compute_layout(f.area());
 
                 if self.registry.is_empty() && self.dashboard.is_some() {
                     if let Some(dashboard) = &self.dashboard {
-                        render_dashboard(dashboard, f.area(), f.buffer_mut());
+                        render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
                         if let Some(pos) = dashboard.cursor_position(f.area()) {
                             f.set_cursor_position(pos);
                         }
                     }
                 } else {
                     f.render_widget(
-                        StatusBar::new(&self.registry).with_leader(self.leader_active),
+                        StatusBar::new(&self.registry)
+                            .with_leader(self.leader_active)
+                            .with_theme(&theme),
                         status_area,
                     );
 
@@ -222,6 +226,7 @@ impl TuiApp {
                                 active.project_session.exit_code,
                                 term_area,
                                 f.buffer_mut(),
+                                &theme,
                             );
                         } else if !active.vt().hide_cursor() {
                             let (col, row) = active.vt().cursor_position();
@@ -236,7 +241,7 @@ impl TuiApp {
                 }
 
                 if let Some(launcher) = &self.quick_launcher {
-                    render_quick_launcher(launcher, f.area(), f.buffer_mut());
+                    render_quick_launcher(launcher, f.area(), f.buffer_mut(), &theme);
                     if let Some(pos) = launcher.cursor_position(f.area()) {
                         f.set_cursor_position(pos);
                     }
@@ -671,6 +676,7 @@ impl TuiApp {
                     Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
                         .unwrap_or_else(|_| Config {
                             default_agent: "claude".to_string(),
+                            theme: "tokyo-night".to_string(),
                             repos_dir: PathBuf::from(".botai_repos"),
                             agents: HashMap::new(),
                             workspaces: HashMap::new(),
@@ -1127,7 +1133,8 @@ repos = []
     fn test_render_error_banner() {
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render_error_banner(Some(127), area, &mut buf);
+        let theme = Theme::default();
+        render_error_banner(Some(127), area, &mut buf, &theme);
 
         let bottom_row_text = (0..80)
             .map(|x| buf.cell((x, 23)).unwrap().symbol())
@@ -1136,8 +1143,27 @@ repos = []
         assert!(bottom_row_text.contains("[Process exited with code 127 - Press Enter or Ctrl+Space w to dismiss]"));
 
         let cell = buf.cell((0, 23)).unwrap();
-        assert_eq!(cell.bg, Color::Red);
-        assert_eq!(cell.fg, Color::White);
+        assert_eq!(cell.bg, theme.error_banner_bg);
+        assert_eq!(cell.fg, theme.error_banner_fg);
+        assert!(cell.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_render_error_banner_themed() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::cyberpunk();
+        render_error_banner(Some(2), area, &mut buf, &theme);
+
+        let bottom_row_text = (0..80)
+            .map(|x| buf.cell((x, 23)).unwrap().symbol())
+            .collect::<String>();
+
+        assert!(bottom_row_text.contains("[Process exited with code 2 - Press Enter or Ctrl+Space w to dismiss]"));
+
+        let cell = buf.cell((0, 23)).unwrap();
+        assert_eq!(cell.bg, theme.error_banner_bg);
+        assert_eq!(cell.fg, theme.error_banner_fg);
         assert!(cell.modifier.contains(Modifier::BOLD));
     }
 

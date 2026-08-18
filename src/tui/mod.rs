@@ -3,6 +3,7 @@ pub mod dashboard;
 pub mod events;
 pub mod quick_launcher;
 pub mod status_bar;
+pub mod theme;
 pub mod ui;
 
 pub use app::TuiApp;
@@ -14,4 +15,5 @@ pub use quick_launcher::{
     render_quick_launcher, LauncherFocus, LauncherTab, QuickLauncherAction, QuickLauncherState,
 };
 pub use status_bar::StatusBar;
+pub use theme::Theme;
 pub use ui::{compute_layout, vt_color_to_ratatui, TerminalView};

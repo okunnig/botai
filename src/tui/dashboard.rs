@@ -4,12 +4,13 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Position, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
 
 use crate::config::Config;
+use crate::tui::theme::Theme;
 
 /// Active panel in the two-panel dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,7 +322,7 @@ impl DashboardState {
 }
 
 /// Renders the full two-panel dashboard, status footer, and optional floating creation modal into the given `Buffer`.
-pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer) {
+pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, theme: &Theme) {
     if area.height < 3 || area.width < 10 {
         return;
     }
@@ -348,10 +349,10 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer) {
     let is_left_active = state.active_panel == ActivePanel::Projects;
     let left_border_style = if is_left_active {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.border_focused)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.border_unfocused)
     };
 
     let left_block = Block::default()
@@ -364,7 +365,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer) {
 
     if state.local_projects.is_empty() {
         let msg = Paragraph::new(" (No local projects found in CWD) ")
-            .style(Style::default().fg(Color::DarkGray));
+            .style(Style::default().fg(theme.input_placeholder));
         msg.render(left_inner, buf);
     } else {
         let items: Vec<ListItem> = state
@@ -377,14 +378,14 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer) {
                     (
                         " > ",
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(theme.selection_fg)
+                            .bg(theme.selection_bg)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else if is_selected {
-                    (" > ", Style::default().fg(Color::Cyan))
+                    (" > ", Style::default().fg(theme.selection_indicator))
                 } else {
-                    ("   ", Style::default().fg(Color::White))
+                    ("   ", Style::default().fg(theme.status_bar_fg))
                 };
                 ListItem::new(format!("{}{}", prefix, proj)).style(style)
             })
@@ -398,10 +399,10 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer) {
     let is_right_active = state.active_panel == ActivePanel::Workspaces;
     let right_border_style = if is_right_active {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.border_focused)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.border_unfocused)
     };
 
     let right_block = Block::default()
@@ -414,7 +415,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer) {
 
     if state.workspaces.is_empty() {
         let msg = Paragraph::new(" (No workspaces found in config) ")
-            .style(Style::default().fg(Color::DarkGray));
+            .style(Style::default().fg(theme.input_placeholder));
         msg.render(right_inner, buf);
     } else {
         let items: Vec<ListItem> = state
@@ -427,14 +428,14 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer) {
                     (
                         " > ",
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(theme.selection_fg)
+                            .bg(theme.selection_bg)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else if is_selected {
-                    (" > ", Style::default().fg(Color::Cyan))
+                    (" > ", Style::default().fg(theme.selection_indicator))
                 } else {
-                    ("   ", Style::default().fg(Color::White))
+                    ("   ", Style::default().fg(theme.status_bar_fg))
                 };
                 ListItem::new(format!("{}{}", prefix, ws)).style(style)
             })
@@ -445,7 +446,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer) {
     }
 
     // 3. Render Status Footer
-    let footer_style = Style::default().bg(Color::DarkGray).fg(Color::White);
+    let footer_style = Style::default().bg(theme.status_bar_bg).fg(theme.status_bar_fg);
     let footer_text =
         " Tab: Switch | ↑/↓: Navigate | Enter: Select | n: New | d: Destroy | q: Quit ";
     let footer = Paragraph::new(footer_text).style(footer_style);
@@ -453,11 +454,11 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer) {
 
     // 4. Render Floating Creation Modal if active
     if let Some(ref modal) = state.creation_modal {
-        render_creation_modal(modal, area, buf);
+        render_creation_modal(modal, area, buf, theme);
     }
 }
 
-fn render_creation_modal(modal: &CreationModalState, area: Rect, buf: &mut Buffer) {
+fn render_creation_modal(modal: &CreationModalState, area: Rect, buf: &mut Buffer, theme: &Theme) {
     let width = 64.min(area.width.saturating_sub(4));
     let height = 9.min(area.height.saturating_sub(2));
 
@@ -478,7 +479,7 @@ fn render_creation_modal(modal: &CreationModalState, area: Rect, buf: &mut Buffe
         .title(title)
         .border_style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.modal_title)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -487,18 +488,18 @@ fn render_creation_modal(modal: &CreationModalState, area: Rect, buf: &mut Buffe
 
     let proj_style = if modal.active_field == 0 {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.modal_label)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme.status_bar_fg)
     };
 
     let prompt_style = if modal.active_field == 1 {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.modal_label)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(theme.status_bar_fg)
     };
 
     let proj_prefix = if modal.active_field == 0 {
@@ -517,18 +518,18 @@ fn render_creation_modal(modal: &CreationModalState, area: Rect, buf: &mut Buffe
             Span::styled(format!("{}Project Name: ", proj_prefix), proj_style),
             Span::styled(
                 &modal.project_name_input,
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.input_text),
             ),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled(format!("{}Initial Prompt: ", prompt_prefix), prompt_style),
-            Span::styled(&modal.prompt_input, Style::default().fg(Color::Yellow)),
+            Span::styled(&modal.prompt_input, Style::default().fg(theme.input_text)),
         ]),
         Line::from(""),
         Line::from(Span::styled(
             " [Tab] Next Field  |  [Enter] Create  |  [Esc] Cancel ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.key_hint),
         )),
     ];
 
@@ -538,13 +539,15 @@ fn render_creation_modal(modal: &CreationModalState, area: Rect, buf: &mut Buffe
 
 impl Widget for &DashboardState {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_dashboard(self, area, buf);
+        let theme = Theme::default();
+        render_dashboard(self, area, buf, &theme);
     }
 }
 
 impl Widget for DashboardState {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_dashboard(&self, area, buf);
+        let theme = Theme::default();
+        render_dashboard(&self, area, buf, &theme);
     }
 }
 
@@ -557,6 +560,142 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn test_render_dashboard_panels_and_footer() {
+        let state = DashboardState::new(
+            vec!["payments".to_string(), "analytics".to_string()],
+            vec!["cart-service".to_string(), "billing-api".to_string()],
+        );
+
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+
+        render_dashboard(&state, area, &mut buf, &theme);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Local Projects (Existing)"));
+        assert!(rendered.contains("Configured Workspaces"));
+        assert!(rendered.contains("cart-service"));
+        assert!(rendered.contains("billing-api"));
+        assert!(rendered.contains("payments"));
+        assert!(rendered.contains("analytics"));
+        assert!(rendered.contains("Tab: Switch"));
+        assert!(rendered.contains("q: Quit"));
+    }
+
+    #[test]
+    fn test_render_dashboard_with_creation_modal() {
+        let mut state = DashboardState::new(
+            vec!["payments".to_string()],
+            vec!["cart-service".to_string()],
+        );
+        state.open_creation_modal();
+        if let Some(ref mut modal) = state.creation_modal {
+            modal.project_name_input = "new-checkout".to_string();
+            modal.prompt_input = "Implement Stripe".to_string();
+        }
+
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+
+        render_dashboard(&state, area, &mut buf, &theme);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Create New Project [payments]"));
+        assert!(rendered.contains("Project Name:"));
+        assert!(rendered.contains("new-checkout"));
+        assert!(rendered.contains("Initial Prompt:"));
+        assert!(rendered.contains("Implement Stripe"));
+        assert!(rendered.contains("[Enter] Create"));
+    }
+
+    #[test]
+    fn test_render_empty_state() {
+        let state = DashboardState::new(vec![], vec![]);
+
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+
+        render_dashboard(&state, area, &mut buf, &theme);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("(No local projects found in CWD)"));
+        assert!(rendered.contains("(No workspaces found in config)"));
+    }
+
+    #[test]
+    fn test_unicode_and_special_character_support() {
+        let mut state = DashboardState::new(
+            vec!["воркспейс-1 🚀".to_string()],
+            vec!["проект-тест 💻".to_string()],
+        );
+
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+        render_dashboard(&state, area, &mut buf, &theme);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("воркспейс-1 🚀"));
+        assert!(rendered.contains("проект-тест 💻"));
+
+        state.open_creation_modal();
+        for c in "проект-юникод".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        let action = state.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            action,
+            DashboardAction::CreateProject {
+                workspace: "воркспейс-1 🚀".to_string(),
+                project: "проект-юникод".to_string(),
+                prompt: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_dashboard_themed_rendering() {
+        let state = DashboardState::new(
+            vec!["ws-backend".to_string()],
+            vec!["proj-api".to_string()],
+        );
+
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::gruvbox();
+
+        render_dashboard(&state, area, &mut buf, &theme);
+
+        // Check footer cell background matches theme.status_bar_bg
+        let footer_cell = buf.cell((0, 19)).unwrap();
+        assert_eq!(footer_cell.bg, theme.status_bar_bg);
+        assert_eq!(footer_cell.fg, theme.status_bar_fg);
     }
 
     #[test]
@@ -922,119 +1061,6 @@ command = "claude"
             DashboardAction::Quit
         );
         assert_eq!(state.handle_key(key(KeyCode::Esc)), DashboardAction::Quit);
-    }
-
-    #[test]
-    fn test_render_dashboard_panels_and_footer() {
-        let state = DashboardState::new(
-            vec!["payments".to_string(), "analytics".to_string()],
-            vec!["cart-service".to_string(), "billing-api".to_string()],
-        );
-
-        let area = Rect::new(0, 0, 100, 20);
-        let mut buf = Buffer::empty(area);
-
-        render_dashboard(&state, area, &mut buf);
-
-        let rendered = buf
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(rendered.contains("Local Projects (Existing)"));
-        assert!(rendered.contains("Configured Workspaces"));
-        assert!(rendered.contains("cart-service"));
-        assert!(rendered.contains("billing-api"));
-        assert!(rendered.contains("payments"));
-        assert!(rendered.contains("analytics"));
-        assert!(rendered.contains("Tab: Switch"));
-        assert!(rendered.contains("q: Quit"));
-    }
-
-    #[test]
-    fn test_render_dashboard_with_creation_modal() {
-        let mut state = DashboardState::new(
-            vec!["payments".to_string()],
-            vec!["cart-service".to_string()],
-        );
-        state.open_creation_modal();
-        if let Some(ref mut modal) = state.creation_modal {
-            modal.project_name_input = "new-checkout".to_string();
-            modal.prompt_input = "Implement Stripe".to_string();
-        }
-
-        let area = Rect::new(0, 0, 100, 20);
-        let mut buf = Buffer::empty(area);
-
-        render_dashboard(&state, area, &mut buf);
-
-        let rendered = buf
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(rendered.contains("Create New Project [payments]"));
-        assert!(rendered.contains("Project Name:"));
-        assert!(rendered.contains("new-checkout"));
-        assert!(rendered.contains("Initial Prompt:"));
-        assert!(rendered.contains("Implement Stripe"));
-        assert!(rendered.contains("[Enter] Create"));
-    }
-
-    #[test]
-    fn test_render_empty_state() {
-        let state = DashboardState::new(vec![], vec![]);
-
-        let area = Rect::new(0, 0, 100, 20);
-        let mut buf = Buffer::empty(area);
-
-        render_dashboard(&state, area, &mut buf);
-
-        let rendered = buf
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(rendered.contains("(No local projects found in CWD)"));
-        assert!(rendered.contains("(No workspaces found in config)"));
-    }
-
-    #[test]
-    fn test_unicode_and_special_character_support() {
-        let mut state = DashboardState::new(
-            vec!["воркспейс-1 🚀".to_string()],
-            vec!["проект-тест 💻".to_string()],
-        );
-
-        let area = Rect::new(0, 0, 100, 20);
-        let mut buf = Buffer::empty(area);
-        render_dashboard(&state, area, &mut buf);
-
-        let rendered = buf
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-
-        assert!(rendered.contains("воркспейс-1 🚀"));
-        assert!(rendered.contains("проект-тест 💻"));
-
-        state.open_creation_modal();
-        for c in "проект-юникод".chars() {
-            state.handle_key(key(KeyCode::Char(c)));
-        }
-        let action = state.handle_key(key(KeyCode::Enter));
-        assert_eq!(
-            action,
-            DashboardAction::CreateProject {
-                workspace: "воркспейс-1 🚀".to_string(),
-                project: "проект-юникод".to_string(),
-                prompt: None,
-            }
-        );
     }
 
     #[test]

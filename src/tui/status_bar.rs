@@ -1,8 +1,9 @@
 use crate::session::{SessionEntry, SessionRegistry};
+use crate::tui::theme::Theme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Widget,
 };
@@ -11,6 +12,7 @@ use ratatui::{
 pub struct StatusBar<'a> {
     registry: &'a SessionRegistry,
     leader_active: bool,
+    theme: Option<&'a Theme>,
 }
 
 impl<'a> StatusBar<'a> {
@@ -19,12 +21,19 @@ impl<'a> StatusBar<'a> {
         Self {
             registry,
             leader_active: false,
+            theme: None,
         }
     }
 
     /// Configures whether leader mode is actively displayed on the status bar.
     pub fn with_leader(mut self, leader_active: bool) -> Self {
         self.leader_active = leader_active;
+        self
+    }
+
+    /// Configures the theme used by the status bar.
+    pub fn with_theme(mut self, theme: &'a Theme) -> Self {
+        self.theme = Some(theme);
         self
     }
 
@@ -46,10 +55,22 @@ impl<'a> StatusBar<'a> {
         }
     }
 
-    /// Renders the status bar directly into a Ratatui `Buffer`.
+    /// Renders the status bar directly into a Ratatui `Buffer` using the default theme.
     pub fn render_to_buffer(
         registry: &SessionRegistry,
         leader_active: bool,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        let default_theme = Theme::default();
+        Self::render_to_buffer_with_theme(registry, leader_active, &default_theme, area, buf);
+    }
+
+    /// Renders the status bar directly into a Ratatui `Buffer` using the specified `Theme`.
+    pub fn render_to_buffer_with_theme(
+        registry: &SessionRegistry,
+        leader_active: bool,
+        theme: &Theme,
         area: Rect,
         buf: &mut Buffer,
     ) {
@@ -58,7 +79,7 @@ impl<'a> StatusBar<'a> {
         }
 
         // Fill entire background cleanly
-        let bg_style = Style::default().bg(Color::DarkGray).fg(Color::White);
+        let bg_style = Style::default().bg(theme.status_bar_bg).fg(theme.status_bar_fg);
         for x in area.left()..area.right() {
             for y in area.top()..area.bottom() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
@@ -73,8 +94,8 @@ impl<'a> StatusBar<'a> {
                 let line = Line::from(Span::styled(
                     leader_msg,
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
+                        .fg(theme.leader_fg)
+                        .bg(theme.leader_bg)
                         .add_modifier(Modifier::BOLD),
                 ));
                 buf.set_line(area.x, area.y, &line, area.width);
@@ -83,7 +104,8 @@ impl<'a> StatusBar<'a> {
                 let line = Line::from(Span::styled(
                     msg,
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.modal_title)
+                        .bg(theme.status_bar_bg)
                         .add_modifier(Modifier::BOLD),
                 ));
                 buf.set_line(area.x, area.y, &line, area.width);
@@ -103,11 +125,11 @@ impl<'a> StatusBar<'a> {
                 let text = Self::format_tab(i, session, is_active);
                 let style = if is_active {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(theme.tab_active_fg)
+                        .bg(theme.tab_active_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White).bg(Color::DarkGray)
+                    Style::default().fg(theme.tab_inactive_fg).bg(theme.tab_inactive_bg)
                 };
                 (text, style)
             })
@@ -154,7 +176,7 @@ impl<'a> StatusBar<'a> {
         if visible_start > 0 {
             spans.push(Span::styled(
                 "◀ ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.leader_bg).bg(theme.status_bar_bg).add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -166,7 +188,7 @@ impl<'a> StatusBar<'a> {
         if visible_end < tab_items.len() {
             spans.push(Span::styled(
                 "▶",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.leader_bg).bg(theme.status_bar_bg).add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -180,16 +202,16 @@ impl<'a> StatusBar<'a> {
             if area.width >= tabs_width + leader_len + 2 {
                 let start_x = area.right().saturating_sub(leader_len + 1);
                 let leader_style = Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(theme.leader_fg)
+                    .bg(theme.leader_bg)
                     .add_modifier(Modifier::BOLD);
                 let leader_line = Line::from(Span::styled(leader_msg, leader_style));
                 buf.set_line(start_x, area.y, &leader_line, leader_len);
             } else if area.width >= leader_len {
                 let start_x = area.right().saturating_sub(leader_len);
                 let leader_style = Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(theme.leader_fg)
+                    .bg(theme.leader_bg)
                     .add_modifier(Modifier::BOLD);
                 let leader_line = Line::from(Span::styled(leader_msg, leader_style));
                 buf.set_line(start_x, area.y, &leader_line, leader_len);
@@ -216,7 +238,7 @@ impl<'a> StatusBar<'a> {
 
             if let Some((hint_str, hint_len)) = hint_to_render {
                 let start_x = area.right().saturating_sub(hint_len + 1);
-                let hint_style = Style::default().fg(Color::LightCyan).bg(Color::DarkGray);
+                let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
                 let hint_line = Line::from(Span::styled(hint_str, hint_style));
                 buf.set_line(start_x, area.y, &hint_line, hint_len);
             }
@@ -226,13 +248,17 @@ impl<'a> StatusBar<'a> {
 
 impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        Self::render_to_buffer(self.registry, self.leader_active, area, buf);
+        let default_theme = Theme::default();
+        let theme = self.theme.unwrap_or(&default_theme);
+        Self::render_to_buffer_with_theme(self.registry, self.leader_active, theme, area, buf);
     }
 }
 
 impl<'a> Widget for &StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        StatusBar::render_to_buffer(self.registry, self.leader_active, area, buf);
+        let default_theme = Theme::default();
+        let theme = self.theme.unwrap_or(&default_theme);
+        StatusBar::render_to_buffer_with_theme(self.registry, self.leader_active, theme, area, buf);
     }
 }
 
@@ -427,5 +453,30 @@ mod tests {
             "Rendered output must contain active tab 8, got: {}",
             rendered60
         );
+    }
+
+    #[test]
+    fn test_status_bar_themed_rendering() {
+        let mut registry = SessionRegistry::new();
+        let (ps, pty, vt) =
+            create_test_session_with_status("themed-proj", "ws", "claude", SessionStatus::Busy);
+        registry.add(ps, pty, vt).unwrap();
+
+        let theme = Theme::cyberpunk();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 1));
+        StatusBar::render_to_buffer_with_theme(&registry, false, &theme, Rect::new(0, 0, 80, 1), &mut buffer);
+
+        // Check active tab text and colors
+        let rendered = buffer.content().iter().map(|c| c.symbol()).collect::<String>();
+        assert!(rendered.contains("1: themed-proj ⏳"));
+
+        // Active tab background cell should match theme.tab_active_bg
+        let active_cell = buffer.cell((2, 0)).unwrap();
+        assert_eq!(active_cell.bg, theme.tab_active_bg);
+        assert_eq!(active_cell.fg, theme.tab_active_fg);
+
+        // Background trailing cells should match theme.status_bar_bg
+        let empty_cell = buffer.cell((79, 0)).unwrap();
+        assert_eq!(empty_cell.bg, theme.status_bar_bg);
     }
 }

@@ -89,7 +89,8 @@ repos = []
     terminal
         .draw(|f| {
             if let Some(l) = &app.quick_launcher {
-                render_quick_launcher(l, f.area(), f.buffer_mut());
+                let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                render_quick_launcher(l, f.area(), f.buffer_mut(), &theme);
             }
         })
         .expect("draw launcher");

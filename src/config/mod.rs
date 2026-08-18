@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::tui::Theme;
+
 /// Errors that can occur during configuration loading, parsing, and resolution.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -47,6 +49,9 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# =================================
 
 # Global default AI agent tool to use when a workspace does not specify an override.
 default_agent = "claude"
+
+# Color theme for the TUI interface ("tokyo-night", "catppuccin", "cyberpunk", "gruvbox", "monochrome", "ansi").
+theme = "tokyo-night"
 
 # Central directory where remote repositories are cloned and cached (required).
 # Can also be overridden at runtime by setting the BOTAI_REPOS_DIR environment variable.
@@ -219,11 +224,18 @@ pub struct WorkspaceConfig {
     pub env: HashMap<String, String>,
 }
 
+fn default_theme() -> String {
+    "tokyo-night".to_string()
+}
+
 /// Root configuration for botai.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Global fallback default agent name.
     pub default_agent: String,
+    /// Color theme for the TUI interface ("tokyo-night", "catppuccin", "cyberpunk", "gruvbox", "monochrome", "ansi").
+    #[serde(default = "default_theme")]
+    pub theme: String,
     /// Central directory where remote repositories are cloned and cached (required).
     pub repos_dir: PathBuf,
     /// Defined agent tools.
@@ -235,6 +247,11 @@ pub struct Config {
 }
 
 impl Config {
+    /// Returns the resolved `Theme` palette configured for the application.
+    pub fn theme(&self) -> Theme {
+        Theme::from_name(&self.theme)
+    }
+
     /// Returns the default annotated configuration template.
     pub fn default_template() -> &'static str {
         DEFAULT_CONFIG_TEMPLATE
@@ -1062,6 +1079,10 @@ env = { GREETING = "こんにちは" }
             "Template must contain default_agent"
         );
         assert!(
+            template.contains("theme = \"tokyo-night\""),
+            "Template must define theme"
+        );
+        assert!(
             template.contains("repos_dir = \"~/.local/share/botai/repos\""),
             "Template must define repos_dir"
         );
@@ -1090,6 +1111,8 @@ env = { GREETING = "こんにちは" }
             .expect("Default template must parse cleanly into Config struct");
 
         assert_eq!(parsed.default_agent, "claude");
+        assert_eq!(parsed.theme, "tokyo-night");
+        assert_eq!(parsed.theme(), Theme::tokyo_night());
         assert_eq!(
             parsed.repos_dir,
             PathBuf::from("~/.local/share/botai/repos")
@@ -1109,6 +1132,64 @@ env = { GREETING = "こんにちは" }
     }
 
     #[test]
+    fn test_config_theme_resolution_and_defaults() {
+        // 1. Missing theme field defaults to "tokyo-night"
+        let toml_no_theme = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+"#;
+        let config_default = Config::load_from_str(toml_no_theme).unwrap();
+        assert_eq!(config_default.theme, "tokyo-night");
+        assert_eq!(config_default.theme(), Theme::tokyo_night());
+
+        // 2. Explicit theme
+        let toml_catppuccin = r#"
+default_agent = "claude"
+theme = "catppuccin"
+repos_dir = "/tmp/repos"
+"#;
+        let config_cat = Config::load_from_str(toml_catppuccin).unwrap();
+        assert_eq!(config_cat.theme, "catppuccin");
+        assert_eq!(config_cat.theme(), Theme::catppuccin());
+
+        // 3. Cyberpunk alias
+        let toml_cyber = r#"
+default_agent = "claude"
+theme = "synthwave"
+repos_dir = "/tmp/repos"
+"#;
+        let config_cyber = Config::load_from_str(toml_cyber).unwrap();
+        assert_eq!(config_cyber.theme(), Theme::cyberpunk());
+
+        // 4. Gruvbox alias
+        let toml_gruvbox = r#"
+default_agent = "claude"
+theme = "gruvbox-dark"
+repos_dir = "/tmp/repos"
+"#;
+        let config_gruv = Config::load_from_str(toml_gruvbox).unwrap();
+        assert_eq!(config_gruv.theme(), Theme::gruvbox());
+
+        // 5. Monochrome alias
+        let toml_mono = r#"
+default_agent = "claude"
+theme = "zinc"
+repos_dir = "/tmp/repos"
+"#;
+        let config_mono = Config::load_from_str(toml_mono).unwrap();
+        assert_eq!(config_mono.theme(), Theme::monochrome());
+
+        // 6. ANSI alias
+        let toml_ansi = r#"
+default_agent = "claude"
+theme = "classic"
+repos_dir = "/tmp/repos"
+"#;
+        let config_ansi = Config::load_from_str(toml_ansi).unwrap();
+        assert_eq!(config_ansi.theme(), Theme::ansi());
+    }
+
+    #[test]
     fn test_init_file_creates_new_file_and_directories() {
         let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
         let nested_config = temp_dir.path().join("nested").join("sub").join("config.toml");
@@ -1123,6 +1204,8 @@ env = { GREETING = "こんにちは" }
         let loaded = Config::load_from_file(&nested_config)
             .expect("Generated config file must be valid and readable");
         assert_eq!(loaded.default_agent, "claude");
+        assert_eq!(loaded.theme, "tokyo-night");
+        assert_eq!(loaded.theme(), Theme::tokyo_night());
     }
 
     #[test]

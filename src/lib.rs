@@ -5,3 +5,5 @@ pub mod git;
 pub mod notify;
 pub mod session;
 pub mod tui;
+
+pub use tui::Theme;

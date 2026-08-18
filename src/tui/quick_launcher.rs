@@ -2,10 +2,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Position, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
+
+use crate::tui::theme::Theme;
 
 /// Active top-level tab in the Quick Launcher modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -441,7 +443,7 @@ impl QuickLauncherState {
 }
 
 /// Renders the floating Quick Launcher modal on top of the given area in the buffer.
-pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut Buffer) {
+pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut Buffer, theme: &Theme) {
     let width = 72.min(area.width.saturating_sub(4));
     let height = 16.min(area.height.saturating_sub(2));
 
@@ -462,7 +464,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
         .title(" Quick Project Launcher (Ctrl+Space c) ")
         .border_style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.border_focused)
                 .add_modifier(Modifier::BOLD),
         );
 
@@ -513,33 +515,33 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
     let create_style = if is_create_tab {
         if is_tab_focused {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(theme.leader_fg)
+                .bg(theme.leader_bg)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(theme.tab_active_fg)
+                .bg(theme.tab_active_bg)
                 .add_modifier(Modifier::BOLD)
         }
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.tab_inactive_fg)
     };
 
     let attach_style = if !is_create_tab {
         if is_tab_focused {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(theme.leader_fg)
+                .bg(theme.leader_bg)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(theme.tab_active_fg)
+                .bg(theme.tab_active_bg)
                 .add_modifier(Modifier::BOLD)
         }
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme.tab_inactive_fg)
     };
 
     let tab_focus_indicator = if is_tab_focused { "▶ " } else { "  " };
@@ -548,7 +550,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
         Span::styled(
             tab_focus_indicator,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.leader_bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" 1. Create New Project ", create_style),
@@ -562,7 +564,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
     let divider_text = divider_char.repeat(divider_area.width as usize);
     let divider_line = Line::from(Span::styled(
         divider_text,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.border_unfocused),
     ));
     buf.set_line(
         divider_area.x,
@@ -580,26 +582,26 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
 
             let ws_style = if ws_focused {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme.modal_label)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.status_bar_fg)
             };
 
             let proj_style = if proj_focused {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme.modal_label)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.status_bar_fg)
             };
 
             let prompt_style = if prompt_focused {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(theme.modal_label)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.status_bar_fg)
             };
 
             let ws_prefix = if ws_focused { "▶ " } else { "  " };
@@ -609,7 +611,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
             let ws_display = if state.workspaces.is_empty() {
                 Span::styled(
                     "(No workspaces found)",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.input_placeholder),
                 )
             } else {
                 let ws_name = state.selected_workspace().unwrap_or("default");
@@ -622,7 +624,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                 Span::styled(
                     count_str,
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.input_text)
                         .add_modifier(Modifier::BOLD),
                 )
             };
@@ -630,14 +632,14 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
             let proj_display = if state.project_name_input.is_empty() && !proj_focused {
                 Span::styled(
                     "<enter project name>",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.input_placeholder),
                 )
             } else {
                 let cursor = if proj_focused { " " } else { "" };
                 Span::styled(
                     format!("{}{}", state.project_name_input, cursor),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.input_text)
                         .add_modifier(Modifier::BOLD),
                 )
             };
@@ -645,13 +647,13 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
             let prompt_display = if state.prompt_input.is_empty() && !prompt_focused {
                 Span::styled(
                     "<optional initial task prompt>",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.input_placeholder),
                 )
             } else {
                 let cursor = if prompt_focused { " " } else { "" };
                 Span::styled(
                     format!("{}{}", state.prompt_input, cursor),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme.input_text),
                 )
             };
 
@@ -682,12 +684,12 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                 let empty_lines = vec![
                     Line::from(Span::styled(
                         " (No local project directories with AGENTS.md found in CWD)",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme.input_placeholder),
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
                         " Switch to 'Create New Project' tab [Tab / ←] to initialize a new project.",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme.input_placeholder),
                     )),
                 ];
                 let msg = Paragraph::new(empty_lines);
@@ -703,14 +705,14 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                             (
                                 " ▶ ",
                                 Style::default()
-                                    .fg(Color::Black)
-                                    .bg(Color::Cyan)
+                                    .fg(theme.selection_fg)
+                                    .bg(theme.selection_bg)
                                     .add_modifier(Modifier::BOLD),
                             )
                         } else if is_selected {
-                            (" ▶ ", Style::default().fg(Color::Cyan))
+                            (" ▶ ", Style::default().fg(theme.selection_indicator))
                         } else {
-                            ("   ", Style::default().fg(Color::White))
+                            ("   ", Style::default().fg(theme.status_bar_fg))
                         };
                         ListItem::new(format!("{}{}", prefix, proj)).style(style)
                     })
@@ -728,7 +730,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
             let err_line = Line::from(Span::styled(
                 format!(" ✖ Error: {}", err),
                 Style::default()
-                    .fg(Color::LightRed)
+                    .fg(theme.error_banner_bg)
                     .add_modifier(Modifier::BOLD),
             ));
             buf.set_line(err_area.x, err_area.y, &err_line, err_area.width);
@@ -746,7 +748,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
     };
     let footer_line = Line::from(Span::styled(
         footer_text,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.key_hint),
     ));
     buf.set_line(
         footer_area.x,
@@ -758,13 +760,15 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
 
 impl Widget for &QuickLauncherState {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_quick_launcher(self, area, buf);
+        let theme = Theme::default();
+        render_quick_launcher(self, area, buf, &theme);
     }
 }
 
 impl Widget for QuickLauncherState {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        render_quick_launcher(&self, area, buf);
+        let theme = Theme::default();
+        render_quick_launcher(&self, area, buf, &theme);
     }
 }
 
@@ -1090,7 +1094,8 @@ mod tests {
         );
 
         let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
-        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer);
+        let theme = Theme::default();
+        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer, &theme);
 
         let rendered = buffer
             .content()
@@ -1113,7 +1118,8 @@ mod tests {
         launcher.set_error("Branch collision: 'test' already exists");
 
         let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
-        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer);
+        let theme = Theme::default();
+        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer, &theme);
 
         let rendered = buffer
             .content()
@@ -1134,7 +1140,8 @@ mod tests {
         launcher.switch_tab(LauncherTab::Attach);
 
         let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
-        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer);
+        let theme = Theme::default();
+        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer, &theme);
 
         let rendered = buffer
             .content()
@@ -1145,6 +1152,23 @@ mod tests {
         assert!(rendered.contains("my-backend"));
         assert!(rendered.contains("my-frontend"));
         assert!(rendered.contains("Attach"));
+    }
+
+    #[test]
+    fn test_quick_launcher_themed_rendering() {
+        let launcher = QuickLauncherState::new(
+            vec!["ws-main".into()],
+            vec!["proj-local".into()],
+            Some("ws-main"),
+        );
+
+        let theme = Theme::cyberpunk();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
+        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer, &theme);
+
+        // Check container border top-left cell
+        let border_cell = buffer.cell((4, 2)).unwrap();
+        assert_eq!(border_cell.fg, theme.border_focused);
     }
 
     #[test]

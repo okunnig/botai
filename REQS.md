@@ -46,6 +46,9 @@
 # Global default AI agent tool to use when a workspace does not specify an override.
 default_agent = "claude"
 
+# Color theme for the TUI interface ("tokyo-night", "catppuccin", "cyberpunk", "gruvbox", "monochrome", "ansi").
+theme = "tokyo-night"
+
 # Central directory where remote repositories are cloned and cached (required).
 # Can also be overridden at runtime by setting the BOTAI_REPOS_DIR environment variable.
 repos_dir = "~/.local/share/botai/repos"
@@ -231,4 +234,26 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `Left` / `Right`: Switch between 'Create New' and 'Attach Existing' tabs when tab bar is focused, or cycle workspaces when workspace field is focused.
   - `Enter`: Submit create or attach action.
   - `Esc`: Dismiss modal and return focus to active terminal PTY.
+
+---
+
+## 10. UI Theming & Color Schemes
+- **Declarative Theme Configuration**:
+  - Configured globally in `config.toml` via the `theme` setting (e.g. `theme = "tokyo-night"`).
+  - Defaults to `"tokyo-night"` if omitted or unrecognized.
+  - Theme names are normalized case-insensitively and support aliases (e.g., `"catppuccin"` / `"catppuccin-mocha"`, `"gruvbox"` / `"gruvbox-dark"`, `"monochrome"` / `"slate"` / `"minimal"`, `"ansi"` / `"default"` / `"classic"`).
+- **Supported Built-in Palettes**:
+  - **`tokyo-night`** (Default): Modern deep slate/navy chrome (`#1a1b26`), electric cyan & blue tab highlights (`#7aa2f7`), vibrant purple borders (`#bb9af7`), and warm amber gold leader mode (`#e0af68`).
+  - **`catppuccin` / `catppuccin-mocha`**: Soothing dark pastel palette (`#1e1e2e`), mauve borders (`#cba6f7`), sky blue selections (`#89dceb`), peach input highlights (`#fab387`), and crust backgrounds.
+  - **`cyberpunk` / `synthwave`**: High-contrast dark cyber aesthetic (`#0a0a0f`), hot neon magenta (`#ff007f`), electric neon cyan (`#00f0ff`), and vivid acid yellow leader indicator (`#ffe600`).
+  - **`gruvbox` / `gruvbox-dark`**: Warm retro earthy palette (`#282828`), rust orange active tabs (`#fe8019`), warm cream text (`#ebdbb2`), forest green selections (`#b8bb26`), and bright yellow leader mode (`#fabd2f`).
+  - **`monochrome` / `slate`**: Minimalist zinc/slate dark tones (`#18181b` / `#27272a`), ice blue accents, crisp white active text and borders (`#f4f4f5`).
+  - **`ansi` / `default`**: Standard 16-color ANSI terminal fallback palette using native terminal cyan, yellow, green, red, dark gray, and white without 24-bit TrueColor RGB definitions.
+- **Complete TUI Element Coverage**:
+  - **Status Bar**: Background, default text, active session tab, inactive tabs, tab index numbers (1..9), leader mode indicator badge and hints.
+  - **Agent Status Indicators**: Distinct contextual colors for Thinking / Busy (⏳), Waiting for Input (💬), Done / Idle (✅), and Error / Interrupted (⚠️).
+  - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, and footer help hints.
+  - **Modals (Creation Modal & Quick Launcher)**: Dialog borders, active/inactive tab bars, focused input borders/prompts, placeholder text, field labels, and button/key hints.
+  - **Exit & Crash Banners**: High-visibility error notification banners rendered across the bottom line upon non-zero process exits.
+
 

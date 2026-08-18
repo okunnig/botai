@@ -46,6 +46,8 @@ env = { REACT_APP_API_URL = "http://localhost:8080" }
 
     // 2. Validate parsed structures
     assert_eq!(config.default_agent, "claude");
+    assert_eq!(config.theme, "tokyo-night");
+    assert_eq!(config.theme(), botai::Theme::tokyo_night());
     assert_eq!(config.repos_dir, std::path::PathBuf::from("/var/repos"));
     assert_eq!(config.agents.len(), 2);
     assert_eq!(config.workspaces.len(), 2);
@@ -131,6 +133,8 @@ fn test_integration_init_template_lifecycle() {
     let config = Config::load_from_file(&config_path)
         .expect("Generated template must be immediately loadable");
     assert_eq!(config.default_agent, "claude");
+    assert_eq!(config.theme, "tokyo-night");
+    assert_eq!(config.theme(), botai::Theme::tokyo_night());
     assert!(config.get_agent("claude").is_some());
     assert!(config.get_agent("agy").is_some());
     assert!(config.get_agent("copilot").is_some());
@@ -150,4 +154,6 @@ fn test_integration_init_template_lifecycle() {
     Config::init_file(&config_path, true).expect("Re-init with force=true must succeed");
     let reloaded = Config::load_from_file(&config_path).expect("Reloading overwritten config");
     assert_eq!(reloaded.default_agent, "claude");
+    assert_eq!(reloaded.theme, "tokyo-night");
+    assert_eq!(reloaded.theme(), botai::Theme::tokyo_night());
 }

@@ -142,7 +142,8 @@ fn test_integration_session_exit_error_retention_and_banner_dismissal() {
             let (_, term_area) = compute_layout(f.area());
             let active = app.registry.active_session().unwrap();
             f.render_widget(TerminalView::new(active.vt()), term_area);
-            render_error_banner(active.project_session.exit_code, term_area, f.buffer_mut());
+            let theme = botai::Theme::default();
+            render_error_banner(active.project_session.exit_code, term_area, f.buffer_mut(), &theme);
         })
         .unwrap();
 
