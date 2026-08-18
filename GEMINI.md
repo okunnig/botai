@@ -2,6 +2,11 @@
 
 A cross-platform terminal session orchestrator and multiplexer for AI agent CLI tools (Claude Code, agy, Copilot CLI, etc.) written in idiomatic Rust.
 
+## AI Agent usage
+
+- main agent focuses on determining what to do, how to do it and user communication
+- main agent delegates implementation and TDD workflow to subagents
+
 ## Key Concepts
 - **Workspace**: A named collection of local git repositories defined in a declarative TOML configuration (`~/.config/botai/config.toml` or `%APPDATA%\botai\config.toml`).
 - **Project**: An isolated, multi-repo work environment created inside `CWD/<project_name>`. Each repository gets a git worktree checked out to a new branch `<project_name>`.

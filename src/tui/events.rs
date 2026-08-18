@@ -13,6 +13,8 @@ pub enum TuiAction {
     Detach,
     /// Closes / terminates the active session (`Alt + x` / `Alt + X`).
     CloseSession,
+    /// Opens the in-session Quick Project Launcher modal (`Alt + c` / `Alt + C`).
+    OpenLauncher,
     /// Quits the entire botai dashboard (`Alt + q` / `Alt + Q`).
     Quit,
     /// Raw byte sequence forwarded directly to the active session's PTY.
@@ -51,6 +53,7 @@ pub fn map_key_event(event: KeyEvent) -> TuiAction {
             }
             KeyCode::Char('n') | KeyCode::Char('N') => return TuiAction::NextSession,
             KeyCode::Char('p') | KeyCode::Char('P') => return TuiAction::PrevSession,
+            KeyCode::Char('c') | KeyCode::Char('C') => return TuiAction::OpenLauncher,
             KeyCode::Char('d') | KeyCode::Char('D') => return TuiAction::Detach,
             KeyCode::Char('x') | KeyCode::Char('X') => return TuiAction::CloseSession,
             KeyCode::Char('q') | KeyCode::Char('Q') => return TuiAction::Quit,
@@ -181,6 +184,14 @@ mod tests {
 
     #[test]
     fn test_map_key_event_alt_lifecycle_actions() {
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('c'), KeyModifiers::ALT)),
+            TuiAction::OpenLauncher
+        );
+        assert_eq!(
+            map_key_event(make_key(KeyCode::Char('C'), KeyModifiers::ALT)),
+            TuiAction::OpenLauncher
+        );
         assert_eq!(
             map_key_event(make_key(KeyCode::Char('d'), KeyModifiers::ALT)),
             TuiAction::Detach

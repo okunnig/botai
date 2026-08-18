@@ -143,6 +143,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Leader-Free Hotkeys**:
   - `Alt + 1` .. `Alt + 9`: Directly switch to project session 1 to 9.
   - `Alt + N` / `Alt + P`: Switch to Next / Previous active project session.
+  - `Alt + C`: Open the Quick Project Launcher & Creator modal to create a new project or attach an existing one while working in an active session.
   - `Alt + D`: Detach from active session (return to CLI / dashboard).
   - `Alt + X`: Close / Destroy active project session (with confirmation).
   - `Alt + Q`: Quit `botai`.
@@ -159,6 +160,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Launches the agent CLI (with initial prompt if provided) and drops user into the interactive TUI session.
 - **`botai sync [workspace]`**:
   - Pre-clones missing repositories and updates existing cached repositories across all or a specific workspace.
+  - Clones missing repositories to `repos_dir` if needed.
 - **`botai attach <project-name>`**: Re-attaches to an ongoing project session.
 - **`botai list`**: Lists configured workspaces, repositories with clone/cached status, active projects, worktrees, and running sessions.
 - **`botai init [--force] [--stdout]`**:
@@ -190,3 +192,27 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `n`: Trigger new project modal for the selected workspace.
   - `d`: Destroy selected project directory (with confirmation check).
   - `q` / `Esc`: Quit `botai`.
+
+---
+
+## 9. In-Session Quick Launcher & Project Creator Modal
+- **In-Session Trigger (`Alt + C`)**:
+  - Can be invoked at any time while working inside an active terminal session.
+  - Renders a floating modal centered over the active terminal view without interrupting background PTY reading or activity tracking.
+- **Tabbed Modal Views**:
+  - **Create New Project Tab**:
+    - **Workspace Selector**: Defaults to the active project's workspace (or the first configured workspace); cycled using `Left` / `Right`.
+    - **Project Name Input**: Text entry field with interactive editing.
+    - **Initial Prompt Input**: Optional text entry field for initial task instruction.
+    - **Inline Error Feedback**: If creation fails (e.g. branch or worktree collision, directory exists, clone failure), the modal remains open displaying an inline error banner so input is not lost.
+    - **Submission**: On `Enter`, creates worktrees, generates `AGENTS.md`, spawns the agent in a new PTY session, registers it in `SessionRegistry`, closes the modal, and switches immediately to the new session tab.
+  - **Attach Existing Project Tab**:
+    - Lists local project directories in CWD (directories with `AGENTS.md`).
+    - Navigated via `Up` / `Down` / `j` / `k`.
+    - **Submission**: If the project already has an active session tab, switches focus to it; otherwise spawns and attaches the project in a new session tab, adds it to the registry, closes the modal, and switches to it.
+- **Navigation & Controls**:
+  - `Tab` / `BackTab` (`Shift+Tab`): Move focus between modal tabs and form fields.
+  - `Left` / `Right`: Switch between 'Create New' and 'Attach Existing' tabs when tab bar is focused, or cycle workspaces when workspace field is focused.
+  - `Enter`: Submit create or attach action.
+  - `Esc`: Dismiss modal and return focus to active terminal PTY.
+

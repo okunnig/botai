@@ -88,7 +88,7 @@ impl<'a> StatusBar<'a> {
         buf.set_line(area.x, area.y, &line, area.width);
 
         // Keybinding hints on the right (only rendered if there is space without overlapping tabs)
-        let hints = "Alt+1..9:Switch | Alt+N/P:Next/Prev | Alt+D:Detach | Alt+X:Close | Alt+Q:Quit";
+        let hints = "Alt+C:New/Open | Alt+1..9:Switch | Alt+N/P:Next/Prev | Alt+D:Detach | Alt+X:Close | Alt+Q:Quit";
         let hints_len = hints.chars().count() as u16;
         if area.width >= tabs_width + hints_len + 2 {
             let start_x = area.right().saturating_sub(hints_len + 1);
@@ -97,7 +97,7 @@ impl<'a> StatusBar<'a> {
             buf.set_line(start_x, area.y, &hint_line, hints_len);
         } else {
             // Shortened hints fallback if space permits
-            let short_hints = "Alt+1..9 | Alt+N/P | Alt+D | Alt+Q";
+            let short_hints = "Alt+C:New | Alt+1..9 | Alt+N/P | Alt+D | Alt+Q";
             let short_len = short_hints.chars().count() as u16;
             if area.width >= tabs_width + short_len + 2 {
                 let start_x = area.right().saturating_sub(short_len + 1);
@@ -226,6 +226,7 @@ mod tests {
 
         assert!(rendered.contains("1: proj-backend ⏳"));
         assert!(rendered.contains("2: proj-frontend 💬"));
+        assert!(rendered.contains("Alt+C:New/Open"));
         assert!(rendered.contains("Alt+1..9:Switch"));
     }
 }

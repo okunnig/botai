@@ -141,7 +141,7 @@ pub fn derive_repo_name(entry: &str) -> String {
             && !path.starts_with('/')
             && !path.starts_with('\\')
             // Don't treat Windows drive letters like C:\path as scp
-            && !cleaned.chars().next().map_or(false, |c| c.is_alphabetic() && cleaned.chars().nth(1) == Some(':'))
+            && !cleaned.chars().next().is_some_and(|c| c.is_alphabetic() && cleaned.chars().nth(1) == Some(':'))
         {
             path
         } else {
@@ -154,8 +154,7 @@ pub fn derive_repo_name(entry: &str) -> String {
     // Take the last component separated by '/' or '\'
     let last_segment = path_part
         .split(['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .last()
+        .rfind(|s| !s.is_empty())
         .unwrap_or(entry);
 
     // Strip query parameters if any (e.g. ?foo=bar)

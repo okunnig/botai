@@ -19,6 +19,9 @@ use crate::notify::{ActivityTracker, NotificationService};
 use crate::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen};
 use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
 use crate::tui::events::{map_key_event, TuiAction};
+use crate::tui::quick_launcher::{
+    render_quick_launcher, QuickLauncherAction, QuickLauncherState,
+};
 use crate::tui::status_bar::StatusBar;
 use crate::tui::ui::{compute_layout, TerminalView};
 
@@ -30,6 +33,7 @@ pub struct TuiApp {
     pub should_quit: bool,
     pub tick_rate: Duration,
     pub dashboard: Option<DashboardState>,
+    pub quick_launcher: Option<QuickLauncherState>,
     pub config: Option<Config>,
     pub cwd: Option<PathBuf>,
 }
@@ -53,6 +57,7 @@ impl TuiApp {
             should_quit: false,
             tick_rate: Duration::from_millis(30),
             dashboard: None,
+            quick_launcher: None,
             config: None,
             cwd: None,
         }
@@ -61,6 +66,12 @@ impl TuiApp {
     /// Sets the dashboard state on `TuiApp`.
     pub fn with_dashboard(mut self, dashboard: DashboardState) -> Self {
         self.dashboard = Some(dashboard);
+        self
+    }
+
+    /// Sets the quick launcher state on `TuiApp`.
+    pub fn with_quick_launcher(mut self, quick_launcher: QuickLauncherState) -> Self {
+        self.quick_launcher = Some(quick_launcher);
         self
     }
 
@@ -119,6 +130,10 @@ impl TuiApp {
                         f.render_widget(TerminalView::new(active.vt()), term_area);
                     }
                 }
+
+                if let Some(launcher) = &self.quick_launcher {
+                    render_quick_launcher(launcher, f.area(), f.buffer_mut());
+                }
             })?;
 
             // 3. Handle user input with timeout up to tick_rate
@@ -127,7 +142,9 @@ impl TuiApp {
             if event::poll(timeout)? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
-                        if self.registry.is_empty() && self.dashboard.is_some() {
+                        if self.quick_launcher.is_some() {
+                            self.handle_launcher_key(key);
+                        } else if self.registry.is_empty() && self.dashboard.is_some() {
                             self.handle_dashboard_key(key);
                         } else {
                             self.handle_key_event(key);
@@ -189,6 +206,97 @@ impl TuiApp {
         }
     }
 
+    /// Opens the in-session Quick Project Launcher modal.
+    pub fn open_quick_launcher(&mut self) {
+        let cwd = self
+            .cwd
+            .clone()
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        let mut local_projects = Vec::new();
+        if let Ok(entries) = fs::read_dir(&cwd) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join("AGENTS.md").is_file() {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        local_projects.push(name.to_string());
+                    }
+                }
+            }
+        }
+        local_projects.sort();
+
+        let mut workspaces = Vec::new();
+        if let Some(cfg) = &self.config {
+            workspaces = cfg.workspaces.keys().cloned().collect();
+        }
+        workspaces.sort();
+
+        let active_ws = self
+            .registry
+            .active_session()
+            .map(|s| s.workspace_name().to_string());
+
+        let launcher = QuickLauncherState::new(workspaces, local_projects, active_ws.as_deref());
+        self.quick_launcher = Some(launcher);
+    }
+
+    /// Dispatches a key event to the quick launcher and handles any triggered action.
+    pub fn handle_launcher_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(mut launcher) = self.quick_launcher.take() {
+            let action = launcher.handle_key(key);
+            match action {
+                QuickLauncherAction::Cancel => {
+                    self.quick_launcher = None;
+                }
+                QuickLauncherAction::Create {
+                    workspace,
+                    project,
+                    prompt,
+                } => {
+                    match self.create_and_start_project(&workspace, &project, prompt.as_deref()) {
+                        Ok(()) => {
+                            let new_idx = self.registry.len().saturating_sub(1);
+                            let _ = self.registry.set_active_index(new_idx);
+                            self.quick_launcher = None;
+                        }
+                        Err(err) => {
+                            launcher.set_error(err.to_string());
+                            self.quick_launcher = Some(launcher);
+                        }
+                    }
+                }
+                QuickLauncherAction::Attach(project) => {
+                    if let Some(pos) = self
+                        .registry
+                        .list()
+                        .iter()
+                        .position(|s| s.project_name() == project)
+                    {
+                        let _ = self.registry.set_active_index(pos);
+                        self.quick_launcher = None;
+                    } else {
+                        match self.attach_project(&project) {
+                            Ok(()) => {
+                                let new_idx = self.registry.len().saturating_sub(1);
+                                let _ = self.registry.set_active_index(new_idx);
+                                self.quick_launcher = None;
+                            }
+                            Err(err) => {
+                                launcher.set_error(err.to_string());
+                                self.quick_launcher = Some(launcher);
+                            }
+                        }
+                    }
+                }
+                QuickLauncherAction::None => {
+                    self.quick_launcher = Some(launcher);
+                }
+            }
+        }
+    }
+
     /// Dispatches a key event to the dashboard and processes the resulting `DashboardAction`.
     pub fn handle_dashboard_key(&mut self, key: crossterm::event::KeyEvent) {
         if let Some(mut dashboard) = self.dashboard.take() {
@@ -223,6 +331,10 @@ impl TuiApp {
 
     /// Attaches to an existing project directory and adds its session to the registry.
     pub fn attach_project(&mut self, project_name: &str) -> anyhow::Result<()> {
+        if self.registry.get_by_project(project_name).is_some() {
+            anyhow::bail!("Project '{}' already has an active session in registry", project_name);
+        }
+
         let cwd = self
             .cwd
             .clone()
@@ -231,8 +343,9 @@ impl TuiApp {
         let project_dir = cwd.join(project_name);
 
         if !project_dir.exists() {
-            return Ok(());
+            anyhow::bail!("Project directory '{}' does not exist in CWD", project_name);
         }
+        let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
 
         let default_config =
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
@@ -281,12 +394,20 @@ impl TuiApp {
         project_name: &str,
         prompt: Option<&str>,
     ) -> anyhow::Result<()> {
+        if self.registry.get_by_project(project_name).is_some() {
+            anyhow::bail!("Project '{}' already has an active session in registry", project_name);
+        }
+
         let cwd = self
             .cwd
             .clone()
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let project_dir = cwd.join(project_name);
+
+        if project_dir.exists() {
+            anyhow::bail!("Project directory '{}' already exists in CWD", project_name);
+        }
 
         let default_config =
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
@@ -317,6 +438,7 @@ impl TuiApp {
         };
 
         fs::create_dir_all(&project_dir)?;
+        let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
 
         let mut repo_mappings = Vec::new();
         if let Some(cfg) = config {
@@ -442,6 +564,9 @@ impl TuiApp {
             TuiAction::PrevSession => {
                 self.registry.prev_session();
             }
+            TuiAction::OpenLauncher => {
+                self.open_quick_launcher();
+            }
             TuiAction::CloseSession => {
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
@@ -490,4 +615,213 @@ mod tests {
         app.handle_dashboard_action(DashboardAction::Quit);
         assert!(app.should_quit);
     }
+
+    #[test]
+    fn test_tui_app_open_launcher_on_alt_c() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let config_toml = r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[agents.mock]
+command = "sh"
+args = ["-c", "exit 0"]
+
+[workspaces.ecommerce]
+repos = []
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_config(config)
+            .with_cwd(cwd);
+
+        assert!(app.quick_launcher.is_none());
+
+        // Send Alt+C key
+        let alt_c = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::ALT,
+        );
+        app.handle_key_event(alt_c);
+
+        assert!(app.quick_launcher.is_some());
+        let launcher = app.quick_launcher.as_ref().unwrap();
+        assert_eq!(launcher.workspaces, vec!["ecommerce".to_string()]);
+    }
+
+    #[test]
+    fn test_tui_app_launcher_create_project_lifecycle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", r#"["/c", "exit 0"]"#);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", r#"["-c", "exit 0"]"#);
+
+        let config_toml = format!(
+            r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[agents.mock]
+command = "{}"
+args = {}
+
+[workspaces.backend]
+repos = []
+"#,
+            cmd, args
+        );
+        let config = Config::load_from_str(&config_toml).unwrap();
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_config(config)
+            .with_cwd(cwd.clone());
+
+        // 1. Open launcher
+        app.open_quick_launcher();
+        assert!(app.quick_launcher.is_some());
+
+        // 2. Type project name
+        let mut launcher = app.quick_launcher.take().unwrap();
+        launcher.focus = crate::tui::quick_launcher::LauncherFocus::ProjectName;
+        for c in "billing-service".chars() {
+            launcher.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        app.quick_launcher = Some(launcher);
+
+        // 3. Submit with Enter
+        let enter_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_launcher_key(enter_key);
+
+        // Modal should close on success and registry should contain 1 active session
+        assert!(app.quick_launcher.is_none());
+        assert_eq!(app.registry.len(), 1);
+        let active = app.registry.active_session().unwrap();
+        assert_eq!(active.project_name(), "billing-service");
+        assert!(active.pty().config().working_dir.is_absolute());
+        assert_eq!(
+            active.pty().config().working_dir,
+            cwd.join("billing-service").canonicalize().unwrap()
+        );
+        assert!(cwd.join("billing-service").join("AGENTS.md").is_file());
+
+        // 4. Try creating another project with the same name -> Collision should keep modal open with error
+        app.open_quick_launcher();
+        let mut launcher = app.quick_launcher.take().unwrap();
+        launcher.focus = crate::tui::quick_launcher::LauncherFocus::ProjectName;
+        for c in "billing-service".chars() {
+            launcher.handle_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        app.quick_launcher = Some(launcher);
+
+        app.handle_launcher_key(enter_key);
+        assert!(app.quick_launcher.is_some(), "Modal must remain open on error");
+        assert!(
+            app.quick_launcher
+                .as_ref()
+                .unwrap()
+                .error_message
+                .is_some(),
+            "Error message must be set on collision"
+        );
+    }
+
+    #[test]
+    fn test_tui_app_launcher_attach_and_switch_focus() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", r#"["/c", "exit 0"]"#);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", r#"["-c", "exit 0"]"#);
+
+        let config_toml = format!(
+            r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[agents.mock]
+command = "{}"
+args = {}
+
+[workspaces.ws1]
+repos = []
+"#,
+            cmd, args
+        );
+        let config = Config::load_from_str(&config_toml).unwrap();
+
+        // Create existing project directory with AGENTS.md
+        let proj_dir = cwd.join("existing-proj");
+        fs::create_dir(&proj_dir).unwrap();
+        fs::write(proj_dir.join("AGENTS.md"), "# Project").unwrap();
+
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_config(config)
+            .with_cwd(cwd.clone());
+
+        // 1. Open launcher, switch to Attach tab and attach "existing-proj"
+        app.open_quick_launcher();
+        let mut launcher = app.quick_launcher.take().unwrap();
+        launcher.switch_tab(crate::tui::quick_launcher::LauncherTab::Attach);
+        app.quick_launcher = Some(launcher);
+
+        let enter_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_launcher_key(enter_key);
+
+        assert!(app.quick_launcher.is_none());
+        assert_eq!(app.registry.len(), 1);
+        let active = app.registry.active_session().unwrap();
+        assert_eq!(active.project_name(), "existing-proj");
+        assert!(active.pty().config().working_dir.is_absolute());
+        assert_eq!(
+            active.pty().config().working_dir,
+            cwd.join("existing-proj").canonicalize().unwrap()
+        );
+
+        // 2. Open launcher again, attaching the already-running project should switch focus to it
+        app.open_quick_launcher();
+        let mut launcher = app.quick_launcher.take().unwrap();
+        launcher.switch_tab(crate::tui::quick_launcher::LauncherTab::Attach);
+        app.quick_launcher = Some(launcher);
+
+        app.handle_launcher_key(enter_key);
+        assert!(app.quick_launcher.is_none());
+        assert_eq!(app.registry.len(), 1);
+        assert_eq!(app.registry.active_index(), Some(0));
+    }
+
+    #[test]
+    fn test_tui_app_launcher_cancel_on_esc() {
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry);
+        app.quick_launcher = Some(QuickLauncherState::new(vec![], vec![], None));
+
+        let esc_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_launcher_key(esc_key);
+        assert!(app.quick_launcher.is_none());
+    }
 }
+

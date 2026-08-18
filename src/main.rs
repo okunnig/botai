@@ -210,6 +210,10 @@ fn cmd_start(
     fs::create_dir_all(&project_dir)
         .with_context(|| format!("Failed to create project directory {:?}", project_dir))?;
 
+    let project_dir = project_dir
+        .canonicalize()
+        .unwrap_or(project_dir);
+
     let mut repo_mappings = Vec::new();
 
     // Create worktree for each resolved repo in the workspace
@@ -291,6 +295,10 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
     if !project_dir.exists() {
         bail!("Project directory '{:?}' does not exist.", project_dir);
     }
+
+    let project_dir = project_dir
+        .canonicalize()
+        .unwrap_or(project_dir);
 
     let agent = config
         .get_agent(&config.default_agent)

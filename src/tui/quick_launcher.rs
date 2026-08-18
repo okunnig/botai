@@ -1,0 +1,1073 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{
+    buffer::Buffer,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
+};
+
+/// Active top-level tab in the Quick Launcher modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherTab {
+    Create,
+    Attach,
+}
+
+/// Active focused field or interactive area in the Quick Launcher modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherFocus {
+    TabBar,
+    Workspace,
+    ProjectName,
+    Prompt,
+    ProjectList,
+}
+
+/// Actions emitted by user interactions with the Quick Launcher modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickLauncherAction {
+    None,
+    Create {
+        workspace: String,
+        project: String,
+        prompt: Option<String>,
+    },
+    Attach(String),
+    Cancel,
+}
+
+/// State for the in-session floating Quick Launcher modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickLauncherState {
+    pub tab: LauncherTab,
+    pub focus: LauncherFocus,
+    pub workspaces: Vec<String>,
+    pub selected_workspace_idx: usize,
+    pub project_name_input: String,
+    pub prompt_input: String,
+    pub local_projects: Vec<String>,
+    pub selected_project_idx: usize,
+    pub error_message: Option<String>,
+}
+
+impl QuickLauncherState {
+    /// Creates a new `QuickLauncherState` with available workspaces and local projects.
+    /// Defaults selected workspace to `default_workspace` if provided and found.
+    pub fn new(
+        workspaces: Vec<String>,
+        local_projects: Vec<String>,
+        default_workspace: Option<&str>,
+    ) -> Self {
+        let selected_workspace_idx = default_workspace
+            .and_then(|target| workspaces.iter().position(|w| w == target))
+            .unwrap_or(0);
+
+        Self {
+            tab: LauncherTab::Create,
+            focus: LauncherFocus::Workspace,
+            workspaces,
+            selected_workspace_idx,
+            project_name_input: String::new(),
+            prompt_input: String::new(),
+            local_projects,
+            selected_project_idx: 0,
+            error_message: None,
+        }
+    }
+
+    /// Sets an error message to display in the modal's error banner.
+    pub fn set_error(&mut self, err: impl Into<String>) {
+        self.error_message = Some(err.into());
+    }
+
+    /// Clears any currently displayed error message.
+    pub fn clear_error(&mut self) {
+        self.error_message = None;
+    }
+
+    /// Returns the currently selected workspace name, if available.
+    pub fn selected_workspace(&self) -> Option<&str> {
+        if !self.workspaces.is_empty() && self.selected_workspace_idx < self.workspaces.len() {
+            Some(&self.workspaces[self.selected_workspace_idx])
+        } else {
+            None
+        }
+    }
+
+    /// Returns the currently selected local project name, if available.
+    pub fn selected_project(&self) -> Option<&str> {
+        if !self.local_projects.is_empty() && self.selected_project_idx < self.local_projects.len()
+        {
+            Some(&self.local_projects[self.selected_project_idx])
+        } else {
+            None
+        }
+    }
+
+    /// Cycles to the next workspace.
+    pub fn cycle_workspace_next(&mut self) {
+        if !self.workspaces.is_empty() {
+            self.selected_workspace_idx =
+                (self.selected_workspace_idx + 1) % self.workspaces.len();
+        }
+    }
+
+    /// Cycles to the previous workspace.
+    pub fn cycle_workspace_prev(&mut self) {
+        if !self.workspaces.is_empty() {
+            self.selected_workspace_idx = (self.selected_workspace_idx + self.workspaces.len() - 1)
+                % self.workspaces.len();
+        }
+    }
+
+    /// Switches the active modal tab.
+    pub fn switch_tab(&mut self, new_tab: LauncherTab) {
+        self.tab = new_tab;
+        match new_tab {
+            LauncherTab::Create => {
+                if self.focus == LauncherFocus::ProjectList {
+                    self.focus = LauncherFocus::Workspace;
+                }
+            }
+            LauncherTab::Attach => {
+                if self.focus != LauncherFocus::TabBar {
+                    self.focus = LauncherFocus::ProjectList;
+                }
+            }
+        }
+    }
+
+    /// Moves focus to the next field/tab.
+    pub fn next_focus(&mut self) {
+        match self.tab {
+            LauncherTab::Create => {
+                self.focus = match self.focus {
+                    LauncherFocus::TabBar => LauncherFocus::Workspace,
+                    LauncherFocus::Workspace => LauncherFocus::ProjectName,
+                    LauncherFocus::ProjectName => LauncherFocus::Prompt,
+                    LauncherFocus::Prompt => LauncherFocus::TabBar,
+                    LauncherFocus::ProjectList => LauncherFocus::Workspace,
+                };
+            }
+            LauncherTab::Attach => {
+                self.focus = match self.focus {
+                    LauncherFocus::TabBar => LauncherFocus::ProjectList,
+                    LauncherFocus::ProjectList => LauncherFocus::TabBar,
+                    _ => LauncherFocus::ProjectList,
+                };
+            }
+        }
+    }
+
+    /// Moves focus to the previous field/tab.
+    pub fn prev_focus(&mut self) {
+        match self.tab {
+            LauncherTab::Create => {
+                self.focus = match self.focus {
+                    LauncherFocus::TabBar => LauncherFocus::Prompt,
+                    LauncherFocus::Workspace => LauncherFocus::TabBar,
+                    LauncherFocus::ProjectName => LauncherFocus::Workspace,
+                    LauncherFocus::Prompt => LauncherFocus::ProjectName,
+                    LauncherFocus::ProjectList => LauncherFocus::TabBar,
+                };
+            }
+            LauncherTab::Attach => {
+                self.focus = match self.focus {
+                    LauncherFocus::TabBar => LauncherFocus::ProjectList,
+                    LauncherFocus::ProjectList => LauncherFocus::TabBar,
+                    _ => LauncherFocus::TabBar,
+                };
+            }
+        }
+    }
+
+    /// Handles a keyboard event and returns any triggered `QuickLauncherAction`.
+    pub fn handle_key(&mut self, key: KeyEvent) -> QuickLauncherAction {
+        let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+        let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Cancel / Dismiss modal via Esc or Alt+C toggle or Ctrl+C
+        if key.code == KeyCode::Esc
+            || (has_alt && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C')))
+            || (has_ctrl && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C')))
+        {
+            return QuickLauncherAction::Cancel;
+        }
+
+        match key.code {
+            KeyCode::Tab => {
+                self.next_focus();
+                QuickLauncherAction::None
+            }
+            KeyCode::BackTab => {
+                self.prev_focus();
+                QuickLauncherAction::None
+            }
+            KeyCode::Left => {
+                if self.focus == LauncherFocus::TabBar {
+                    let next_tab = match self.tab {
+                        LauncherTab::Create => LauncherTab::Attach,
+                        LauncherTab::Attach => LauncherTab::Create,
+                    };
+                    self.switch_tab(next_tab);
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Workspace
+                {
+                    self.cycle_workspace_prev();
+                }
+                QuickLauncherAction::None
+            }
+            KeyCode::Right => {
+                if self.focus == LauncherFocus::TabBar {
+                    let next_tab = match self.tab {
+                        LauncherTab::Create => LauncherTab::Attach,
+                        LauncherTab::Attach => LauncherTab::Create,
+                    };
+                    self.switch_tab(next_tab);
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Workspace
+                {
+                    self.cycle_workspace_next();
+                }
+                QuickLauncherAction::None
+            }
+            KeyCode::Up => {
+                match self.tab {
+                    LauncherTab::Create => {
+                        self.prev_focus();
+                    }
+                    LauncherTab::Attach => {
+                        if self.focus == LauncherFocus::ProjectList {
+                            self.selected_project_idx =
+                                self.selected_project_idx.saturating_sub(1);
+                        } else {
+                            self.focus = LauncherFocus::TabBar;
+                        }
+                    }
+                }
+                QuickLauncherAction::None
+            }
+            KeyCode::Down => {
+                match self.tab {
+                    LauncherTab::Create => {
+                        self.next_focus();
+                    }
+                    LauncherTab::Attach => {
+                        if self.focus == LauncherFocus::TabBar {
+                            self.focus = LauncherFocus::ProjectList;
+                        } else if self.focus == LauncherFocus::ProjectList
+                            && !self.local_projects.is_empty()
+                            && self.selected_project_idx + 1 < self.local_projects.len()
+                        {
+                            self.selected_project_idx += 1;
+                        }
+                    }
+                }
+                QuickLauncherAction::None
+            }
+            KeyCode::Char('k')
+                if self.tab == LauncherTab::Attach
+                    && self.focus == LauncherFocus::ProjectList
+                    && !has_ctrl
+                    && !has_alt =>
+            {
+                self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
+                QuickLauncherAction::None
+            }
+            KeyCode::Char('j')
+                if self.tab == LauncherTab::Attach
+                    && self.focus == LauncherFocus::ProjectList
+                    && !has_ctrl
+                    && !has_alt =>
+            {
+                if !self.local_projects.is_empty()
+                    && self.selected_project_idx + 1 < self.local_projects.len()
+                {
+                    self.selected_project_idx += 1;
+                }
+                QuickLauncherAction::None
+            }
+            KeyCode::Char('1')
+                if self.focus == LauncherFocus::TabBar && !has_ctrl && !has_alt =>
+            {
+                self.switch_tab(LauncherTab::Create);
+                QuickLauncherAction::None
+            }
+            KeyCode::Char('2')
+                if self.focus == LauncherFocus::TabBar && !has_ctrl && !has_alt =>
+            {
+                self.switch_tab(LauncherTab::Attach);
+                QuickLauncherAction::None
+            }
+            KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                if self.tab == LauncherTab::Create {
+                    if self.focus == LauncherFocus::ProjectName {
+                        self.project_name_input.push(c);
+                        self.clear_error();
+                    } else if self.focus == LauncherFocus::Prompt {
+                        self.prompt_input.push(c);
+                        self.clear_error();
+                    }
+                }
+                QuickLauncherAction::None
+            }
+            KeyCode::Backspace => {
+                if self.tab == LauncherTab::Create {
+                    if self.focus == LauncherFocus::ProjectName {
+                        self.project_name_input.pop();
+                        self.clear_error();
+                    } else if self.focus == LauncherFocus::Prompt {
+                        self.prompt_input.pop();
+                        self.clear_error();
+                    }
+                }
+                QuickLauncherAction::None
+            }
+            KeyCode::Enter => match self.tab {
+                LauncherTab::Create => {
+                    let trimmed_name = self.project_name_input.trim();
+                    if trimmed_name.is_empty() {
+                        self.set_error("Project name cannot be empty");
+                        QuickLauncherAction::None
+                    } else if let Some(ws) = self.selected_workspace() {
+                        let prompt = if self.prompt_input.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.prompt_input.trim().to_string())
+                        };
+                        QuickLauncherAction::Create {
+                            workspace: ws.to_string(),
+                            project: trimmed_name.to_string(),
+                            prompt,
+                        }
+                    } else {
+                        self.set_error("No workspace available");
+                        QuickLauncherAction::None
+                    }
+                }
+                LauncherTab::Attach => {
+                    if !self.local_projects.is_empty()
+                        && self.selected_project_idx < self.local_projects.len()
+                    {
+                        let proj = self.local_projects[self.selected_project_idx].clone();
+                        QuickLauncherAction::Attach(proj)
+                    } else {
+                        self.set_error("No local project available to attach");
+                        QuickLauncherAction::None
+                    }
+                }
+            },
+            _ => QuickLauncherAction::None,
+        }
+    }
+}
+
+/// Renders the floating Quick Launcher modal on top of the given area in the buffer.
+pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut Buffer) {
+    let width = 72.min(area.width.saturating_sub(4));
+    let height = 16.min(area.height.saturating_sub(2));
+
+    if width < 25 || height < 8 {
+        return;
+    }
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    // Clear background
+    Clear.render(modal_area, buf);
+
+    // Outer container block
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Quick Project Launcher (Alt+C) ")
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let inner = block.inner(modal_area);
+    block.render(modal_area, buf);
+
+    if inner.height < 5 || inner.width < 20 {
+        return;
+    }
+
+    // Split inner area into: TabBar, Spacing/Divider, Body, Error banner (if present), Footer hints
+    let has_error = state.error_message.is_some();
+    let constraints = if has_error {
+        vec![
+            Constraint::Length(1), // TabBar
+            Constraint::Length(1), // Divider
+            Constraint::Min(4),    // Body
+            Constraint::Length(1), // Error banner
+            Constraint::Length(1), // Footer hints
+        ]
+    } else {
+        vec![
+            Constraint::Length(1), // TabBar
+            Constraint::Length(1), // Divider
+            Constraint::Min(4),    // Body
+            Constraint::Length(1), // Footer hints
+        ]
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    let tab_area = chunks[0];
+    let divider_area = chunks[1];
+    let body_area = chunks[2];
+    let (error_area, footer_area) = if has_error {
+        (Some(chunks[3]), chunks[4])
+    } else {
+        (None, chunks[3])
+    };
+
+    // 1. Render Tab Bar
+    let is_tab_focused = state.focus == LauncherFocus::TabBar;
+    let is_create_tab = state.tab == LauncherTab::Create;
+
+    let create_style = if is_create_tab {
+        if is_tab_focused {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        }
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let attach_style = if !is_create_tab {
+        if is_tab_focused {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        }
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let tab_focus_indicator = if is_tab_focused { "▶ " } else { "  " };
+
+    let tab_line = Line::from(vec![
+        Span::styled(
+            tab_focus_indicator,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" 1. Create New Project ", create_style),
+        Span::raw("   "),
+        Span::styled(" 2. Attach Existing Project ", attach_style),
+    ]);
+    buf.set_line(tab_area.x, tab_area.y, &tab_line, tab_area.width);
+
+    // 2. Render Divider
+    let divider_char = "─";
+    let divider_text = divider_char.repeat(divider_area.width as usize);
+    let divider_line = Line::from(Span::styled(
+        divider_text,
+        Style::default().fg(Color::DarkGray),
+    ));
+    buf.set_line(
+        divider_area.x,
+        divider_area.y,
+        &divider_line,
+        divider_area.width,
+    );
+
+    // 3. Render Body
+    match state.tab {
+        LauncherTab::Create => {
+            let ws_focused = state.focus == LauncherFocus::Workspace;
+            let proj_focused = state.focus == LauncherFocus::ProjectName;
+            let prompt_focused = state.focus == LauncherFocus::Prompt;
+
+            let ws_style = if ws_focused {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let proj_style = if proj_focused {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let prompt_style = if prompt_focused {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let ws_prefix = if ws_focused { "▶ " } else { "  " };
+            let proj_prefix = if proj_focused { "▶ " } else { "  " };
+            let prompt_prefix = if prompt_focused { "▶ " } else { "  " };
+
+            let ws_display = if state.workspaces.is_empty() {
+                Span::styled(
+                    "(No workspaces found)",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                let ws_name = state.selected_workspace().unwrap_or("default");
+                let count_str = format!(
+                    " ◀ {} ▶  ({}/{})",
+                    ws_name,
+                    state.selected_workspace_idx + 1,
+                    state.workspaces.len()
+                );
+                Span::styled(
+                    count_str,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            };
+
+            let proj_display = if state.project_name_input.is_empty() && !proj_focused {
+                Span::styled(
+                    "<enter project name>",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                let cursor = if proj_focused { " " } else { "" };
+                Span::styled(
+                    format!("{}{}", state.project_name_input, cursor),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            };
+
+            let prompt_display = if state.prompt_input.is_empty() && !prompt_focused {
+                Span::styled(
+                    "<optional initial task prompt>",
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                let cursor = if prompt_focused { " " } else { "" };
+                Span::styled(
+                    format!("{}{}", state.prompt_input, cursor),
+                    Style::default().fg(Color::Yellow),
+                )
+            };
+
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(format!("{}Workspace: ", ws_prefix), ws_style),
+                    ws_display,
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(format!("{}Project Name: ", proj_prefix), proj_style),
+                    proj_display,
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(format!("{}Initial Prompt: ", prompt_prefix), prompt_style),
+                    prompt_display,
+                ]),
+            ];
+
+            let paragraph = Paragraph::new(lines);
+            paragraph.render(body_area, buf);
+        }
+        LauncherTab::Attach => {
+            let is_list_focused = state.focus == LauncherFocus::ProjectList;
+
+            if state.local_projects.is_empty() {
+                let empty_lines = vec![
+                    Line::from(Span::styled(
+                        " (No local project directories with AGENTS.md found in CWD)",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        " Switch to 'Create New Project' tab [Tab / ←] to initialize a new project.",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ];
+                let msg = Paragraph::new(empty_lines);
+                msg.render(body_area, buf);
+            } else {
+                let items: Vec<ListItem> = state
+                    .local_projects
+                    .iter()
+                    .enumerate()
+                    .map(|(i, proj)| {
+                        let is_selected = i == state.selected_project_idx;
+                        let (prefix, style) = if is_selected && is_list_focused {
+                            (
+                                " ▶ ",
+                                Style::default()
+                                    .fg(Color::Black)
+                                    .bg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                        } else if is_selected {
+                            (" ▶ ", Style::default().fg(Color::Cyan))
+                        } else {
+                            ("   ", Style::default().fg(Color::White))
+                        };
+                        ListItem::new(format!("{}{}", prefix, proj)).style(style)
+                    })
+                    .collect();
+
+                let list = List::new(items);
+                list.render(body_area, buf);
+            }
+        }
+    }
+
+    // 4. Render Error Banner (if present)
+    if let Some(err_area) = error_area {
+        if let Some(ref err) = state.error_message {
+            let err_line = Line::from(Span::styled(
+                format!(" ✖ Error: {}", err),
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            buf.set_line(err_area.x, err_area.y, &err_line, err_area.width);
+        }
+    }
+
+    // 5. Render Footer Hints
+    let footer_text = match state.tab {
+        LauncherTab::Create => {
+            " [Tab/Shift+Tab] Nav | [←/→] Tab/WS | [Enter] Create | [Esc] Cancel "
+        }
+        LauncherTab::Attach => {
+            " [Tab/Shift+Tab] Nav | [↑/↓/j/k] Select | [Enter] Attach | [Esc] Cancel "
+        }
+    };
+    let footer_line = Line::from(Span::styled(
+        footer_text,
+        Style::default().fg(Color::DarkGray),
+    ));
+    buf.set_line(
+        footer_area.x,
+        footer_area.y,
+        &footer_line,
+        footer_area.width,
+    );
+}
+
+impl Widget for &QuickLauncherState {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        render_quick_launcher(self, area, buf);
+    }
+}
+
+impl Widget for QuickLauncherState {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        render_quick_launcher(&self, area, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        make_key(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn test_quick_launcher_initialization() {
+        let workspaces = vec!["ecommerce".to_string(), "analytics".to_string()];
+        let projects = vec!["feature-cart".to_string(), "fix-auth".to_string()];
+
+        let launcher =
+            QuickLauncherState::new(workspaces.clone(), projects.clone(), Some("analytics"));
+
+        assert_eq!(launcher.tab, LauncherTab::Create);
+        assert_eq!(launcher.focus, LauncherFocus::Workspace);
+        assert_eq!(launcher.workspaces, workspaces);
+        assert_eq!(launcher.local_projects, projects);
+        assert_eq!(launcher.selected_workspace_idx, 1);
+        assert_eq!(launcher.selected_workspace(), Some("analytics"));
+        assert_eq!(launcher.selected_project(), Some("feature-cart"));
+        assert!(launcher.error_message.is_none());
+    }
+
+    #[test]
+    fn test_quick_launcher_initialization_default_fallback() {
+        let workspaces = vec!["backend".to_string()];
+        let launcher = QuickLauncherState::new(workspaces, vec![], Some("unknown"));
+        assert_eq!(launcher.selected_workspace_idx, 0);
+        assert_eq!(launcher.selected_workspace(), Some("backend"));
+    }
+
+    #[test]
+    fn test_workspace_cycling() {
+        let workspaces = vec!["ws1".to_string(), "ws2".to_string(), "ws3".to_string()];
+        let mut launcher = QuickLauncherState::new(workspaces, vec![], None);
+        assert_eq!(launcher.selected_workspace_idx, 0);
+
+        launcher.cycle_workspace_next();
+        assert_eq!(launcher.selected_workspace_idx, 1);
+        launcher.cycle_workspace_next();
+        assert_eq!(launcher.selected_workspace_idx, 2);
+        launcher.cycle_workspace_next();
+        assert_eq!(launcher.selected_workspace_idx, 0);
+
+        launcher.cycle_workspace_prev();
+        assert_eq!(launcher.selected_workspace_idx, 2);
+        launcher.cycle_workspace_prev();
+        assert_eq!(launcher.selected_workspace_idx, 1);
+    }
+
+    #[test]
+    fn test_workspace_cycling_empty() {
+        let mut launcher = QuickLauncherState::new(vec![], vec![], None);
+        assert_eq!(launcher.selected_workspace(), None);
+        launcher.cycle_workspace_next();
+        assert_eq!(launcher.selected_workspace_idx, 0);
+        launcher.cycle_workspace_prev();
+        assert_eq!(launcher.selected_workspace_idx, 0);
+    }
+
+    #[test]
+    fn test_tab_switching_and_focus_transitions() {
+        let mut launcher = QuickLauncherState::new(vec!["ws".into()], vec!["proj".into()], None);
+        assert_eq!(launcher.tab, LauncherTab::Create);
+
+        // Switch to TabBar focus
+        launcher.focus = LauncherFocus::TabBar;
+
+        // Left/Right switches tab
+        let action = launcher.handle_key(key(KeyCode::Right));
+        assert_eq!(action, QuickLauncherAction::None);
+        assert_eq!(launcher.tab, LauncherTab::Attach);
+        assert_eq!(launcher.focus, LauncherFocus::TabBar);
+
+        let action = launcher.handle_key(key(KeyCode::Left));
+        assert_eq!(action, QuickLauncherAction::None);
+        assert_eq!(launcher.tab, LauncherTab::Create);
+        assert_eq!(launcher.focus, LauncherFocus::TabBar);
+
+        // Press '2' on TabBar switches to Attach
+        let action = launcher.handle_key(key(KeyCode::Char('2')));
+        assert_eq!(action, QuickLauncherAction::None);
+        assert_eq!(launcher.tab, LauncherTab::Attach);
+
+        // Press '1' on TabBar switches to Create
+        let action = launcher.handle_key(key(KeyCode::Char('1')));
+        assert_eq!(action, QuickLauncherAction::None);
+        assert_eq!(launcher.tab, LauncherTab::Create);
+    }
+
+    #[test]
+    fn test_focus_navigation_in_create_tab() {
+        let mut launcher = QuickLauncherState::new(vec!["ws".into()], vec![], None);
+        launcher.focus = LauncherFocus::TabBar;
+
+        // Tab moves forward: TabBar -> Workspace -> ProjectName -> Prompt -> TabBar
+        launcher.handle_key(key(KeyCode::Tab));
+        assert_eq!(launcher.focus, LauncherFocus::Workspace);
+
+        launcher.handle_key(key(KeyCode::Tab));
+        assert_eq!(launcher.focus, LauncherFocus::ProjectName);
+
+        launcher.handle_key(key(KeyCode::Tab));
+        assert_eq!(launcher.focus, LauncherFocus::Prompt);
+
+        launcher.handle_key(key(KeyCode::Tab));
+        assert_eq!(launcher.focus, LauncherFocus::TabBar);
+
+        // BackTab moves backward: TabBar -> Prompt -> ProjectName -> Workspace -> TabBar
+        launcher.handle_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(launcher.focus, LauncherFocus::Prompt);
+
+        launcher.handle_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(launcher.focus, LauncherFocus::ProjectName);
+
+        launcher.handle_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(launcher.focus, LauncherFocus::Workspace);
+
+        launcher.handle_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(launcher.focus, LauncherFocus::TabBar);
+
+        // Up/Down navigation
+        launcher.handle_key(key(KeyCode::Down));
+        assert_eq!(launcher.focus, LauncherFocus::Workspace);
+
+        launcher.handle_key(key(KeyCode::Up));
+        assert_eq!(launcher.focus, LauncherFocus::TabBar);
+    }
+
+    #[test]
+    fn test_text_input_and_backspace_editing() {
+        let mut launcher = QuickLauncherState::new(vec!["ws".into()], vec![], None);
+        launcher.focus = LauncherFocus::ProjectName;
+
+        // Type project name
+        for c in "billing-service".chars() {
+            launcher.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(launcher.project_name_input, "billing-service");
+
+        // Backspace
+        launcher.handle_key(key(KeyCode::Backspace));
+        assert_eq!(launcher.project_name_input, "billing-servic");
+        launcher.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(launcher.project_name_input, "billing-service");
+
+        // Switch to Prompt
+        launcher.handle_key(key(KeyCode::Tab));
+        assert_eq!(launcher.focus, LauncherFocus::Prompt);
+
+        for c in "Implement stripe checkout".chars() {
+            launcher.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(launcher.prompt_input, "Implement stripe checkout");
+
+        launcher.handle_key(key(KeyCode::Backspace));
+        assert_eq!(launcher.prompt_input, "Implement stripe checkou");
+    }
+
+    #[test]
+    fn test_submission_create_project() {
+        let mut launcher = QuickLauncherState::new(
+            vec!["ecommerce".into(), "analytics".into()],
+            vec![],
+            Some("analytics"),
+        );
+        launcher.focus = LauncherFocus::ProjectName;
+
+        // 1. Submit with empty name sets error
+        let action = launcher.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, QuickLauncherAction::None);
+        assert_eq!(
+            launcher.error_message,
+            Some("Project name cannot be empty".to_string())
+        );
+
+        // 2. Typing clears error
+        launcher.handle_key(key(KeyCode::Char('m')));
+        assert!(launcher.error_message.is_none());
+
+        for c in "y-feature".chars() {
+            launcher.handle_key(key(KeyCode::Char(c)));
+        }
+        launcher.handle_key(key(KeyCode::Tab)); // focus Prompt
+        for c in "Initial task prompt".chars() {
+            launcher.handle_key(key(KeyCode::Char(c)));
+        }
+
+        // 3. Submit with valid name and prompt
+        let action = launcher.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            action,
+            QuickLauncherAction::Create {
+                workspace: "analytics".to_string(),
+                project: "my-feature".to_string(),
+                prompt: Some("Initial task prompt".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_submission_create_project_empty_prompt_is_none() {
+        let mut launcher = QuickLauncherState::new(vec!["ws1".into()], vec![], None);
+        launcher.focus = LauncherFocus::ProjectName;
+        for c in "proj-without-prompt".chars() {
+            launcher.handle_key(key(KeyCode::Char(c)));
+        }
+
+        let action = launcher.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            action,
+            QuickLauncherAction::Create {
+                workspace: "ws1".to_string(),
+                project: "proj-without-prompt".to_string(),
+                prompt: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_submission_create_project_empty_workspaces() {
+        let mut launcher = QuickLauncherState::new(vec![], vec![], None);
+        launcher.focus = LauncherFocus::ProjectName;
+        for c in "my-proj".chars() {
+            launcher.handle_key(key(KeyCode::Char(c)));
+        }
+
+        let action = launcher.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, QuickLauncherAction::None);
+        assert_eq!(
+            launcher.error_message,
+            Some("No workspace available".to_string())
+        );
+    }
+
+    #[test]
+    fn test_attach_tab_navigation_and_submission() {
+        let projects = vec![
+            "proj-alpha".to_string(),
+            "proj-beta".to_string(),
+            "proj-gamma".to_string(),
+        ];
+        let mut launcher = QuickLauncherState::new(vec!["ws".into()], projects, None);
+        launcher.switch_tab(LauncherTab::Attach);
+        assert_eq!(launcher.focus, LauncherFocus::ProjectList);
+        assert_eq!(launcher.selected_project_idx, 0);
+
+        // Down / j moves down
+        launcher.handle_key(key(KeyCode::Down));
+        assert_eq!(launcher.selected_project_idx, 1);
+
+        launcher.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(launcher.selected_project_idx, 2);
+
+        // Boundary down
+        launcher.handle_key(key(KeyCode::Down));
+        assert_eq!(launcher.selected_project_idx, 2);
+
+        // Up / k moves up
+        launcher.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(launcher.selected_project_idx, 1);
+
+        launcher.handle_key(key(KeyCode::Up));
+        assert_eq!(launcher.selected_project_idx, 0);
+
+        // Submit attach
+        let action = launcher.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            action,
+            QuickLauncherAction::Attach("proj-alpha".to_string())
+        );
+    }
+
+    #[test]
+    fn test_attach_tab_empty_projects_submission() {
+        let mut launcher = QuickLauncherState::new(vec!["ws".into()], vec![], None);
+        launcher.switch_tab(LauncherTab::Attach);
+
+        let action = launcher.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, QuickLauncherAction::None);
+        assert_eq!(
+            launcher.error_message,
+            Some("No local project available to attach".to_string())
+        );
+    }
+
+    #[test]
+    fn test_esc_and_alt_c_cancels() {
+        let mut launcher = QuickLauncherState::new(vec!["ws".into()], vec![], None);
+
+        let action = launcher.handle_key(key(KeyCode::Esc));
+        assert_eq!(action, QuickLauncherAction::Cancel);
+
+        let action = launcher.handle_key(make_key(KeyCode::Char('c'), KeyModifiers::ALT));
+        assert_eq!(action, QuickLauncherAction::Cancel);
+
+        let action = launcher.handle_key(make_key(KeyCode::Char('C'), KeyModifiers::ALT));
+        assert_eq!(action, QuickLauncherAction::Cancel);
+
+        let action = launcher.handle_key(make_key(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(action, QuickLauncherAction::Cancel);
+    }
+
+    #[test]
+    fn test_render_quick_launcher_create_tab() {
+        let launcher = QuickLauncherState::new(
+            vec!["ecommerce".into(), "backend".into()],
+            vec!["local-app".into()],
+            Some("ecommerce"),
+        );
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
+        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer);
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("Quick Project Launcher (Alt+C)"));
+        assert!(rendered.contains("1. Create New Project"));
+        assert!(rendered.contains("2. Attach Existing Project"));
+        assert!(rendered.contains("Workspace:"));
+        assert!(rendered.contains("ecommerce"));
+        assert!(rendered.contains("Project Name:"));
+        assert!(rendered.contains("Initial Prompt:"));
+    }
+
+    #[test]
+    fn test_render_quick_launcher_with_error_banner() {
+        let mut launcher = QuickLauncherState::new(vec!["ws1".into()], vec![], None);
+        launcher.set_error("Branch collision: 'test' already exists");
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
+        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer);
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("✖ Error: Branch collision: 'test' already exists"));
+    }
+
+    #[test]
+    fn test_render_quick_launcher_attach_tab() {
+        let mut launcher = QuickLauncherState::new(
+            vec!["ws1".into()],
+            vec!["my-backend".into(), "my-frontend".into()],
+            None,
+        );
+        launcher.switch_tab(LauncherTab::Attach);
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 20));
+        render_quick_launcher(&launcher, Rect::new(0, 0, 80, 20), &mut buffer);
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("my-backend"));
+        assert!(rendered.contains("my-frontend"));
+        assert!(rendered.contains("Attach"));
+    }
+}
