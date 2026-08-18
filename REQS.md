@@ -139,6 +139,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 6. Session Management & Navigation (TUI Multiplexer)
 - **Multi-Project Concurrency**: Maintains concurrent active project sessions in the background.
+- **Dynamic Viewport & Responsive Resizing**:
+  - Automatically synchronizes PTY dimensions and VT virtual screen buffers to the host terminal viewport on initial startup, on window resize events (`Event::Resize`), and when creating or switching active project sessions.
+  - Propagates window size changes (`SIGWINCH` / `ResizePseudoConsole`) so full-screen interactive agent CLIs (`agy`, `claude`, `aider`, etc.) dynamically re-render to the exact available terminal dimensions.
+- **Hardware Cursor Positioning & Visibility**:
+  - Accurately tracks cursor coordinates and visibility state (`\x1b[?25h` / `\x1b[?25l`) from the active session's VT parser.
+  - Positions the terminal hardware cursor directly at the active input position during interactive sessions, rendering the native block cursor where user input is focused.
+  - Automatically positions cursor in active text fields within dialogs/modals and hides the cursor when appropriate.
 - **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, workspace, and key hints.
 - **Leader-Free Hotkeys**:
   - `Alt + 1` .. `Alt + 9`: Directly switch to project session 1 to 9.

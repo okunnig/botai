@@ -36,6 +36,7 @@ pub struct TuiApp {
     pub quick_launcher: Option<QuickLauncherState>,
     pub config: Option<Config>,
     pub cwd: Option<PathBuf>,
+    pub viewport_size: Option<(u16, u16)>,
 }
 
 struct TerminalCleanupGuard;
@@ -60,6 +61,7 @@ impl TuiApp {
             quick_launcher: None,
             config: None,
             cwd: None,
+            viewport_size: None,
         }
     }
 
@@ -87,10 +89,15 @@ impl TuiApp {
         self
     }
 
+    /// Resizes all registered sessions to the specified viewport column and row dimensions.
+    pub fn resize_all_sessions(&mut self, cols: u16, rows: u16) {
+        self.registry.resize_all(cols, rows);
+    }
+
     /// Runs the interactive TUI application event loop.
     pub fn run(&mut self, stdout: &mut Stdout) -> io::Result<()> {
         enable_raw_mode()?;
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, crossterm::cursor::Show)?;
         let _guard = TerminalCleanupGuard;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
@@ -99,7 +106,7 @@ impl TuiApp {
 
         // Always restore terminal state even on error
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?;
         terminal.show_cursor()?;
 
         res
@@ -112,27 +119,65 @@ impl TuiApp {
     ) -> io::Result<()> {
         let mut last_tick = Instant::now();
 
+        // Query initial terminal viewport size and synchronize sessions
+        let initial_size = terminal.size()?;
+        let (_, initial_term_area) = compute_layout(ratatui::layout::Rect::new(
+            0,
+            0,
+            initial_size.width,
+            initial_size.height,
+        ));
+        self.viewport_size = Some((initial_term_area.width, initial_term_area.height));
+        self.resize_all_sessions(initial_term_area.width, initial_term_area.height);
+
         while !self.should_quit {
             // 1. Process PTY outputs for all sessions
             self.process_pty_streams();
 
             // 2. Draw active frame
             terminal.draw(|f| {
+                let (status_area, term_area) = compute_layout(f.area());
+
+                // Ensure session sizes match term_area
+                if self.viewport_size != Some((term_area.width, term_area.height)) {
+                    self.viewport_size = Some((term_area.width, term_area.height));
+                    self.resize_all_sessions(term_area.width, term_area.height);
+                } else if let Some(active) = self.registry.active_session() {
+                    if active.vt().size() != (term_area.width, term_area.height) {
+                        self.resize_all_sessions(term_area.width, term_area.height);
+                    }
+                }
+
                 if self.registry.is_empty() && self.dashboard.is_some() {
                     if let Some(dashboard) = &self.dashboard {
                         render_dashboard(dashboard, f.area(), f.buffer_mut());
+                        if let Some(pos) = dashboard.cursor_position(f.area()) {
+                            f.set_cursor_position(pos);
+                        }
                     }
                 } else {
-                    let (status_area, term_area) = compute_layout(f.area());
                     f.render_widget(StatusBar::new(&self.registry), status_area);
 
                     if let Some(active) = self.registry.active_session() {
                         f.render_widget(TerminalView::new(active.vt()), term_area);
+
+                        if !active.vt().hide_cursor() {
+                            let (col, row) = active.vt().cursor_position();
+                            if col < term_area.width && row < term_area.height {
+                                f.set_cursor_position(ratatui::layout::Position::new(
+                                    term_area.x + col,
+                                    term_area.y + row,
+                                ));
+                            }
+                        }
                     }
                 }
 
                 if let Some(launcher) = &self.quick_launcher {
                     render_quick_launcher(launcher, f.area(), f.buffer_mut());
+                    if let Some(pos) = launcher.cursor_position(f.area()) {
+                        f.set_cursor_position(pos);
+                    }
                 }
             })?;
 
@@ -153,10 +198,8 @@ impl TuiApp {
                 } else if let Event::Resize(cols, rows) = event::read()? {
                     let (_, term_area) =
                         compute_layout(ratatui::layout::Rect::new(0, 0, cols, rows));
-                    if let Some(active) = self.registry.active_session_mut() {
-                        let _ = active.pty_mut().resize(term_area.width, term_area.height);
-                        active.vt_mut().resize(term_area.width, term_area.height);
-                    }
+                    self.viewport_size = Some((term_area.width, term_area.height));
+                    self.resize_all_sessions(term_area.width, term_area.height);
                 }
             }
 
@@ -371,16 +414,18 @@ impl TuiApp {
             (default_shell, Vec::new(), HashMap::new())
         };
 
+        let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
+
         let mut pty_config = PtyConfig::new(&cmd, &project_dir)
             .with_args(args)
-            .with_dimensions(100, 30);
+            .with_dimensions(cols, rows);
 
         for (k, v) in &env_map {
             pty_config = pty_config.with_env(k, v);
         }
 
         let pty = PtySession::spawn(pty_config)?;
-        let vt = VtScreen::new(100, 30);
+        let vt = VtScreen::new(cols, rows);
         let ps = ProjectSession::new(project_name, "attached", agent_name);
 
         self.registry.add(ps, pty, vt)?;
@@ -473,9 +518,11 @@ impl TuiApp {
 
         let _ = generate_agents_md(&project_dir, &project_context);
 
+        let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
+
         let mut pty_config = PtyConfig::new(&agent_cmd, &project_dir)
             .with_args(agent_args)
-            .with_dimensions(100, 30);
+            .with_dimensions(cols, rows);
 
         for (k, v) in &agent_env {
             pty_config = pty_config.with_env(k, v);
@@ -488,7 +535,7 @@ impl TuiApp {
         }
 
         let pty = PtySession::spawn(pty_config)?;
-        let vt = VtScreen::new(100, 30);
+        let vt = VtScreen::new(cols, rows);
         let mut ps = ProjectSession::new(project_name, workspace_name, agent_name);
         if let Some(p) = prompt {
             ps = ps.with_prompt(p);
@@ -822,6 +869,83 @@ repos = []
         );
         app.handle_launcher_key(esc_key);
         assert!(app.quick_launcher.is_none());
+    }
+
+    #[test]
+    fn test_tui_app_resize_all_sessions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 0"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "true"]);
+
+        let mut registry = SessionRegistry::new();
+        let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone()).with_dimensions(80, 24);
+        let pty1 = PtySession::spawn(config1).unwrap();
+        let vt1 = VtScreen::new(80, 24);
+        let ps1 = ProjectSession::new("proj1", "ws1", "mock");
+        registry.add(ps1, pty1, vt1).unwrap();
+
+        let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args).with_dimensions(80, 24);
+        let pty2 = PtySession::spawn(config2).unwrap();
+        let vt2 = VtScreen::new(80, 24);
+        let ps2 = ProjectSession::new("proj2", "ws1", "mock");
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert_eq!(app.registry.list()[0].vt().size(), (80, 24));
+        assert_eq!(app.registry.list()[1].vt().size(), (80, 24));
+
+        app.resize_all_sessions(130, 45);
+        assert_eq!(app.registry.list()[0].vt().size(), (130, 45));
+        assert_eq!(app.registry.list()[1].vt().size(), (130, 45));
+    }
+
+    #[test]
+    fn test_tui_app_viewport_size_applied_to_new_project_sessions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", r#"["/c", "exit 0"]"#);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", r#"["-c", "exit 0"]"#);
+
+        let config_toml = format!(
+            r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[agents.mock]
+command = "{}"
+args = {}
+
+[workspaces.backend]
+repos = []
+"#,
+            cmd, args
+        );
+        let config = Config::load_from_str(&config_toml).unwrap();
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_config(config)
+            .with_cwd(cwd.clone());
+
+        // Set custom viewport size
+        app.viewport_size = Some((115, 38));
+
+        app.create_and_start_project("backend", "resized-project", None).unwrap();
+        let active = app.registry.active_session().unwrap();
+        assert_eq!(active.vt().size(), (115, 38));
+
+        // Create existing project dir and attach
+        let attach_dir = cwd.join("attached-resized");
+        fs::create_dir(&attach_dir).unwrap();
+        fs::write(attach_dir.join("AGENTS.md"), "# Project").unwrap();
+
+        app.attach_project("attached-resized").unwrap();
+        let attached = app.registry.get_by_project("attached-resized").unwrap();
+        assert_eq!(attached.vt().size(), (115, 38));
     }
 }
 

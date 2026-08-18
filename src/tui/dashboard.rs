@@ -3,7 +3,7 @@ use std::path::Path;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
@@ -49,6 +49,53 @@ impl CreationModalState {
             project_name_input: String::new(),
             prompt_input: String::new(),
             active_field: 0,
+        }
+    }
+
+    /// Calculates the hardware cursor position within the given screen area, if visible.
+    pub fn cursor_position(&self, area: Rect) -> Option<Position> {
+        let width = 64.min(area.width.saturating_sub(4));
+        let height = 9.min(area.height.saturating_sub(2));
+
+        if width < 20 || height < 6 {
+            return None;
+        }
+
+        let x = area.x + (area.width.saturating_sub(width)) / 2;
+        let y = area.y + (area.height.saturating_sub(height)) / 2;
+        let modal_area = Rect::new(x, y, width, height);
+
+        let block = Block::default().borders(Borders::ALL);
+        let inner = block.inner(modal_area);
+
+        if self.active_field == 0 {
+            // Label is "▶ Project Name: " (width 16)
+            let prefix_len = 16u16;
+            let cursor_x = inner.x + prefix_len + self.project_name_input.chars().count() as u16;
+            let cursor_y = inner.y;
+            if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
+                Some(Position::new(cursor_x, cursor_y))
+            } else {
+                Some(Position::new(
+                    cursor_x.min(inner.x + inner.width.saturating_sub(1)),
+                    cursor_y,
+                ))
+            }
+        } else if self.active_field == 1 {
+            // Label is "▶ Initial Prompt: " (width 18)
+            let prefix_len = 18u16;
+            let cursor_x = inner.x + prefix_len + self.prompt_input.chars().count() as u16;
+            let cursor_y = inner.y + 2;
+            if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
+                Some(Position::new(cursor_x, cursor_y))
+            } else {
+                Some(Position::new(
+                    cursor_x.min(inner.x + inner.width.saturating_sub(1)),
+                    cursor_y,
+                ))
+            }
+        } else {
+            None
         }
     }
 
@@ -200,6 +247,13 @@ impl DashboardState {
     /// Closes the project creation modal.
     pub fn close_creation_modal(&mut self) {
         self.creation_modal = None;
+    }
+
+    /// Returns the hardware cursor position if a modal or input field is actively focused.
+    pub fn cursor_position(&self, area: Rect) -> Option<Position> {
+        self.creation_modal
+            .as_ref()
+            .and_then(|modal| modal.cursor_position(area))
     }
 
     /// Handles a keyboard event and returns any triggered `DashboardAction`.
@@ -980,6 +1034,41 @@ command = "claude"
                 project: "проект-юникод".to_string(),
                 prompt: None,
             }
+        );
+    }
+
+    #[test]
+    fn test_creation_modal_and_dashboard_cursor_position() {
+        let area = Rect::new(0, 0, 100, 30);
+        let mut modal = CreationModalState::new("ecommerce");
+
+        // 1. Field 0 (Project Name) empty
+        assert_eq!(modal.cursor_position(area), Some(Position::new(35, 11)));
+
+        // Field 0 with text "alpha"
+        modal.project_name_input = "alpha".to_string();
+        assert_eq!(modal.cursor_position(area), Some(Position::new(40, 11)));
+
+        // 2. Switch to Field 1 (Prompt) empty
+        modal.active_field = 1;
+        assert_eq!(modal.cursor_position(area), Some(Position::new(37, 13)));
+
+        // Field 1 with text "do something"
+        modal.prompt_input = "do something".to_string();
+        assert_eq!(modal.cursor_position(area), Some(Position::new(49, 13)));
+
+        // 3. Small area returns None
+        let small_area = Rect::new(0, 0, 15, 5);
+        assert_eq!(modal.cursor_position(small_area), None);
+
+        // 4. DashboardState delegation
+        let mut dashboard = DashboardState::new(vec!["ecommerce".into()], vec![]);
+        assert_eq!(dashboard.cursor_position(area), None);
+
+        dashboard.open_creation_modal();
+        assert_eq!(
+            dashboard.cursor_position(area),
+            Some(Position::new(35, 11))
         );
     }
 }

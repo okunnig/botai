@@ -107,3 +107,68 @@ fn test_integration_tui_multiplexer_navigation_and_rendering() {
     assert!(rendered_text.contains("2: frontend-ui 💬"));
     assert!(rendered_text.contains("API server running on port 8080"));
 }
+
+#[test]
+fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
+    let mut registry = SessionRegistry::new();
+    let (mut ps, pty, mut vt) = create_mock_session("interactive-cli", "workspace", "agy");
+    ps.set_status(SessionStatus::WaitingForInput);
+    // Write prompt and move cursor
+    vt.process(b"agy-prompt> user input\x1b[1;23H");
+
+    registry.add(ps, pty, vt).unwrap();
+
+    // 1. Initial 120x40 viewport
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal
+        .draw(|f| {
+            let (status_area, term_area) = compute_layout(f.area());
+            f.render_widget(StatusBar::new(&registry), status_area);
+            let active = registry.active_session().unwrap();
+            f.render_widget(TerminalView::new(active.vt()), term_area);
+
+            if !active.vt().hide_cursor() {
+                let (col, row) = active.vt().cursor_position();
+                if col < term_area.width && row < term_area.height {
+                    f.set_cursor_position(ratatui::layout::Position::new(
+                        term_area.x + col,
+                        term_area.y + row,
+                    ));
+                }
+            }
+        })
+        .unwrap();
+
+    let buf = terminal.backend().buffer();
+    let text = buf.content().iter().map(|c| c.symbol()).collect::<String>();
+    assert!(text.contains("interactive-cli"));
+    assert!(text.contains("agy-prompt> user input"));
+
+    // 2. Resize all sessions to new terminal size 160x50
+    registry.resize_all(160, 49);
+    assert_eq!(registry.active_session().unwrap().vt().size(), (160, 49));
+
+    let backend2 = TestBackend::new(160, 50);
+    let mut terminal2 = Terminal::new(backend2).unwrap();
+
+    terminal2
+        .draw(|f| {
+            let (status_area, term_area) = compute_layout(f.area());
+            f.render_widget(StatusBar::new(&registry), status_area);
+            let active = registry.active_session().unwrap();
+            f.render_widget(TerminalView::new(active.vt()), term_area);
+        })
+        .unwrap();
+
+    let text2 = terminal2
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text2.contains("interactive-cli"));
+    assert!(text2.contains("Alt+C:New/Open"));
+}

@@ -244,6 +244,14 @@ impl SessionRegistry {
     pub fn is_empty(&self) -> bool {
         self.sessions.is_empty()
     }
+
+    /// Resizes both the PTY and virtual terminal grid for all registered sessions.
+    pub fn resize_all(&mut self, cols: u16, rows: u16) {
+        for session in &mut self.sessions {
+            let _ = session.pty_mut().resize(cols, rows);
+            session.vt_mut().resize(cols, rows);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -490,5 +498,23 @@ mod tests {
             active.project_session.mark_done(Some(0));
         }
         assert_eq!(registry.get(&id).unwrap().status(), SessionStatus::Done);
+    }
+
+    #[test]
+    fn test_session_registry_resize_all() {
+        let mut registry = SessionRegistry::new();
+        let (ps1, pty1, vt1) = create_test_session("p1", "ws", "claude");
+        let (ps2, pty2, vt2) = create_test_session("p2", "ws", "agy");
+
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        assert_eq!(registry.sessions[0].vt().size(), (80, 24));
+        assert_eq!(registry.sessions[1].vt().size(), (80, 24));
+
+        registry.resize_all(140, 50);
+
+        assert_eq!(registry.sessions[0].vt().size(), (140, 50));
+        assert_eq!(registry.sessions[1].vt().size(), (140, 50));
     }
 }

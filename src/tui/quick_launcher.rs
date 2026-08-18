@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
@@ -73,6 +73,86 @@ impl QuickLauncherState {
             local_projects,
             selected_project_idx: 0,
             error_message: None,
+        }
+    }
+
+    /// Calculates the hardware cursor position when an editable input field is focused.
+    pub fn cursor_position(&self, area: Rect) -> Option<Position> {
+        let width = 72.min(area.width.saturating_sub(4));
+        let height = 16.min(area.height.saturating_sub(2));
+
+        if width < 25 || height < 8 {
+            return None;
+        }
+
+        let x = area.x + (area.width.saturating_sub(width)) / 2;
+        let y = area.y + (area.height.saturating_sub(height)) / 2;
+        let modal_area = Rect::new(x, y, width, height);
+
+        let block = Block::default().borders(Borders::ALL);
+        let inner = block.inner(modal_area);
+
+        if inner.height < 5 || inner.width < 20 {
+            return None;
+        }
+
+        let has_error = self.error_message.is_some();
+        let constraints = if has_error {
+            vec![
+                Constraint::Length(1), // TabBar
+                Constraint::Length(1), // Divider
+                Constraint::Min(4),    // Body
+                Constraint::Length(1), // Error banner
+                Constraint::Length(1), // Footer hints
+            ]
+        } else {
+            vec![
+                Constraint::Length(1), // TabBar
+                Constraint::Length(1), // Divider
+                Constraint::Min(4),    // Body
+                Constraint::Length(1), // Footer hints
+            ]
+        };
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(inner);
+
+        let body_area = chunks[2];
+
+        if self.tab == LauncherTab::Create {
+            match self.focus {
+                LauncherFocus::ProjectName => {
+                    let prefix_len = 16u16;
+                    let cursor_x = body_area.x + prefix_len + self.project_name_input.chars().count() as u16;
+                    let cursor_y = body_area.y + 2;
+                    if cursor_x < body_area.x + body_area.width && cursor_y < body_area.y + body_area.height {
+                        Some(Position::new(cursor_x, cursor_y))
+                    } else {
+                        Some(Position::new(
+                            cursor_x.min(body_area.x + body_area.width.saturating_sub(1)),
+                            cursor_y,
+                        ))
+                    }
+                }
+                LauncherFocus::Prompt => {
+                    let prefix_len = 18u16;
+                    let cursor_x = body_area.x + prefix_len + self.prompt_input.chars().count() as u16;
+                    let cursor_y = body_area.y + 4;
+                    if cursor_x < body_area.x + body_area.width && cursor_y < body_area.y + body_area.height {
+                        Some(Position::new(cursor_x, cursor_y))
+                    } else {
+                        Some(Position::new(
+                            cursor_x.min(body_area.x + body_area.width.saturating_sub(1)),
+                            cursor_y,
+                        ))
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
         }
     }
 
@@ -1069,5 +1149,45 @@ mod tests {
         assert!(rendered.contains("my-backend"));
         assert!(rendered.contains("my-frontend"));
         assert!(rendered.contains("Attach"));
+    }
+
+    #[test]
+    fn test_quick_launcher_cursor_position() {
+        let area = Rect::new(0, 0, 100, 30);
+        let mut launcher = QuickLauncherState::new(vec!["ws1".into()], vec!["proj1".into()], None);
+
+        // 1. Initial focus is Workspace -> None
+        assert_eq!(launcher.focus, LauncherFocus::Workspace);
+        assert_eq!(launcher.cursor_position(area), None);
+
+        // 2. Focus on ProjectName, empty input
+        launcher.focus = LauncherFocus::ProjectName;
+        assert_eq!(launcher.cursor_position(area), Some(Position::new(31, 12)));
+
+        // Focus on ProjectName, with input "demo-api"
+        launcher.project_name_input = "demo-api".to_string();
+        assert_eq!(launcher.cursor_position(area), Some(Position::new(39, 12)));
+
+        // 3. Focus on Prompt, empty input
+        launcher.focus = LauncherFocus::Prompt;
+        assert_eq!(launcher.cursor_position(area), Some(Position::new(33, 14)));
+
+        // Focus on Prompt, with input "hello"
+        launcher.prompt_input = "hello".to_string();
+        assert_eq!(launcher.cursor_position(area), Some(Position::new(38, 14)));
+
+        // 4. Focus on TabBar -> None
+        launcher.focus = LauncherFocus::TabBar;
+        assert_eq!(launcher.cursor_position(area), None);
+
+        // 5. Attach tab -> None
+        launcher.switch_tab(LauncherTab::Attach);
+        assert_eq!(launcher.cursor_position(area), None);
+        launcher.focus = LauncherFocus::ProjectList;
+        assert_eq!(launcher.cursor_position(area), None);
+
+        // 6. Too small area -> None
+        let small_area = Rect::new(0, 0, 20, 5);
+        assert_eq!(launcher.cursor_position(small_area), None);
     }
 }

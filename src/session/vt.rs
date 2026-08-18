@@ -68,6 +68,11 @@ impl VtScreen {
         (col, row)
     }
 
+    /// Returns whether the cursor is hidden.
+    pub fn hide_cursor(&self) -> bool {
+        self.parser.screen().hide_cursor()
+    }
+
     /// Returns the screen dimensions as `(cols, rows)`.
     pub fn size(&self) -> (u16, u16) {
         let (rows, cols) = self.parser.screen().size();
@@ -181,5 +186,24 @@ mod tests {
         assert!(cell.bold);
         assert!(!cell.italic);
         assert_eq!(cell.fg, Some(vt100::Color::Idx(1)));
+    }
+
+    #[test]
+    fn test_vt_screen_cursor_position_and_hide_cursor() {
+        let mut screen = VtScreen::new(80, 24);
+        assert_eq!(screen.cursor_position(), (0, 0));
+        assert!(!screen.hide_cursor(), "Default cursor should be visible (hide_cursor = false)");
+
+        // Hide cursor ANSI escape: \x1b[?25l
+        screen.process(b"\x1b[?25l");
+        assert!(screen.hide_cursor(), "Cursor should now be hidden (hide_cursor = true)");
+
+        // Show cursor ANSI escape: \x1b[?25h
+        screen.process(b"\x1b[?25h");
+        assert!(!screen.hide_cursor(), "Cursor should now be visible (hide_cursor = false)");
+
+        // Move cursor: \x1b[10;15H (1-indexed row 10, col 15 -> 0-indexed col 14, row 9)
+        screen.process(b"\x1b[10;15H");
+        assert_eq!(screen.cursor_position(), (14, 9));
     }
 }
