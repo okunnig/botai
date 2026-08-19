@@ -209,8 +209,16 @@ env = { PORT = "8080", NODE_ENV = "development" }
 ---
 
 ## 8. Interactive TUI Project Picker & Launcher Dashboard
+- **Top Header Status Bar**:
+  - Full-width top header bar (`Constraint::Length(1)`) matching the rest of the application's header styling.
+  - Filled with `theme.status_bar_bg` and `theme.status_bar_fg`.
+  - Displays a clean brand title ` botai ` on the left styled with `theme.modal_title` and bold formatting.
+  - Displays right-aligned key navigation hints styled with `theme.key_hint`:
+    - Full hints: `"Tab: Switch | ↑/↓: Navigate | Enter: Select | n: New | d: Destroy | q: Quit"`
+    - Responsive compact fallback for narrower screens: `"Tab: Switch | Enter: Select | n: New | d: Destroy | q: Quit"`
+    - Minimal fallback: `"q: Quit"`
 - **Unified Two-Panel Dashboard**:
-  - Displayed when launching `botai` with no active sessions.
+  - Displayed when launching `botai` with no active sessions, positioned below the top header status bar.
   - **Left Panel (Existing Projects)**: Lists existing local project directories found in the current working directory. Running project sessions are distinguished with a leading colored status dot indicator (`●` U+25CF) reflecting the session's live state (e.g. Busy, Waiting, Done, Error) while inactive projects display blank spacing (`  `). Press `Enter` to attach or switch focus to the selected project.
   - **Right Panel (Configured Workspaces)**: Lists all available workspaces from `config.toml`. Press `n` or `Enter` to create and launch a new project.
 - **Interactive Project Creation Modal**:
@@ -278,7 +286,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Complete TUI Element Coverage**:
   - **Status Bar**: Background, default text, active session tab, inactive tabs, tab index numbers (1..9), leader mode indicator badge and hints.
   - **Agent Status Indicators**: Distinct contextual theme colors applied to the leading round status dot (`●`) for Thinking / Busy (`status_busy`), Waiting for Input (`status_waiting`), Done / Idle (`status_done`), and Error / Interrupted (`status_error`), with Initializing and Terminated states rendered in `status_bar_fg`.
-  - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, and footer help hints.
+  - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, and top header status bar key hints.
   - **Modals (Creation Modal & Quick Launcher)**: Dialog borders, active/inactive tab bars, focused input borders/prompts, placeholder text, field labels, and button/key hints.
   - **Exit & Crash Banners**: High-visibility error notification banners rendered across the bottom line upon non-zero process exits.
 

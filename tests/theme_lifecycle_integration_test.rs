@@ -71,13 +71,13 @@ repos = ["/tmp/repos/shop"]
     let mut buf = Buffer::empty(area);
     render_dashboard(&dashboard_state, area, &mut buf, &theme);
 
-    // Verify left panel focused border matches cyberpunk border_focused
-    let border_cell = buf.cell((0, 0)).unwrap();
-    assert_eq!(border_cell.fg, theme.border_focused);
+    // Verify top header status bar background matches cyberpunk status_bar_bg
+    let header_cell = buf.cell((0, 0)).unwrap();
+    assert_eq!(header_cell.bg, theme.status_bar_bg);
 
-    // Verify footer bar background matches cyberpunk status_bar_bg
-    let footer_cell = buf.cell((0, 19)).unwrap();
-    assert_eq!(footer_cell.bg, theme.status_bar_bg);
+    // Verify left panel focused border matches cyberpunk border_focused (at y = 1)
+    let border_cell = buf.cell((0, 1)).unwrap();
+    assert_eq!(border_cell.fg, theme.border_focused);
 
     // 3. Test Quick Launcher rendering with Cyberpunk theme
     let launcher_state = QuickLauncherState::new(

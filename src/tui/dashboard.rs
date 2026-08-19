@@ -378,20 +378,70 @@ impl DashboardState {
 }
 
 
-/// Renders the full two-panel dashboard, status footer, and optional floating creation modal into the given `Buffer`.
+/// Renders the full two-panel dashboard, top header status bar, and optional floating creation modal into the given `Buffer`.
 pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, theme: &Theme) {
     if area.height < 3 || area.width < 10 {
         return;
     }
 
-    // Split area into Main area and Status Bar footer
+    // Split area into Header status bar and Main area
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([Constraint::Length(1), Constraint::Min(3)])
         .split(area);
 
-    let main_area = chunks[0];
-    let footer_area = chunks[1];
+    let header_area = chunks[0];
+    let main_area = chunks[1];
+
+    // 1. Render Top Header Status Bar
+    let bg_style = Style::default()
+        .bg(theme.status_bar_bg)
+        .fg(theme.status_bar_fg);
+    for x in header_area.left()..header_area.right() {
+        for y in header_area.top()..header_area.bottom() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_style(bg_style).set_char(' ');
+            }
+        }
+    }
+
+    let brand_text = " botai ";
+    let brand_len = brand_text.chars().count() as u16;
+    let brand_line = Line::from(Span::styled(
+        brand_text,
+        Style::default()
+            .fg(theme.modal_title)
+            .bg(theme.status_bar_bg)
+            .add_modifier(Modifier::BOLD),
+    ));
+    buf.set_line(header_area.x, header_area.y, &brand_line, header_area.width);
+
+    let full_hints = "Tab: Switch | ↑/↓: Navigate | Enter: Select | n: New | d: Destroy | q: Quit";
+    let compact_hints = "Tab: Switch | Enter: Select | n: New | d: Destroy | q: Quit";
+    let minimal_hints = "q: Quit";
+
+    let full_len = full_hints.chars().count() as u16;
+    let compact_len = compact_hints.chars().count() as u16;
+    let minimal_len = minimal_hints.chars().count() as u16;
+
+    let hint_to_render = if header_area.width >= brand_len + full_len + 2 {
+        Some((full_hints, full_len))
+    } else if header_area.width >= brand_len + compact_len + 2 {
+        Some((compact_hints, compact_len))
+    } else if header_area.width >= brand_len + minimal_len + 2 {
+        Some((minimal_hints, minimal_len))
+    } else {
+        None
+    };
+
+    if let Some((hint_str, hint_len)) = hint_to_render {
+        let start_x = header_area.right().saturating_sub(hint_len + 1);
+        let hint_style = Style::default()
+            .fg(theme.key_hint)
+            .bg(theme.status_bar_bg);
+        let hint_line = Line::from(Span::styled(hint_str, hint_style));
+        buf.set_line(start_x, header_area.y, &hint_line, hint_len);
+    }
 
     // Split main area into Left (Projects) and Right (Workspaces)
     let panel_chunks = Layout::default()
@@ -402,7 +452,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     let left_area = panel_chunks[0];
     let right_area = panel_chunks[1];
 
-    // 1. Render Left Panel (Local Projects)
+    // 2. Render Left Panel (Local Projects)
     let is_left_active = state.active_panel == ActivePanel::Projects;
     let left_border_style = if is_left_active {
         Style::default()
@@ -470,7 +520,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
         list.render(left_inner, buf);
     }
 
-    // 2. Render Right Panel (Configured Workspaces)
+    // 3. Render Right Panel (Configured Workspaces)
     let is_right_active = state.active_panel == ActivePanel::Workspaces;
     let right_border_style = if is_right_active {
         Style::default()
@@ -519,13 +569,6 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
         let list = List::new(items);
         list.render(right_inner, buf);
     }
-
-    // 3. Render Status Footer
-    let footer_style = Style::default().bg(theme.status_bar_bg).fg(theme.status_bar_fg);
-    let footer_text =
-        " Tab: Switch | ↑/↓: Navigate | Enter: Select | n: New | d: Destroy | q: Quit ";
-    let footer = Paragraph::new(footer_text).style(footer_style);
-    footer.render(footer_area, buf);
 
     // 4. Render Floating Destroy Modal or Creation Modal if active
     if let Some(ref modal) = state.destroy_modal {
@@ -696,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_dashboard_panels_and_footer() {
+    fn test_render_dashboard_panels_and_header() {
         let state = DashboardState::new(
             vec!["payments".to_string(), "analytics".to_string()],
             vec!["cart-service".to_string(), "billing-api".to_string()],
@@ -714,6 +757,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
+        assert!(rendered.contains("botai"));
         assert!(rendered.contains("Local Projects (Existing)"));
         assert!(rendered.contains("Configured Workspaces"));
         assert!(rendered.contains("cart-service"));
@@ -722,6 +766,49 @@ mod tests {
         assert!(rendered.contains("analytics"));
         assert!(rendered.contains("Tab: Switch"));
         assert!(rendered.contains("q: Quit"));
+    }
+
+    #[test]
+    fn test_render_dashboard_responsive_header_hints() {
+        let state = DashboardState::new(vec!["ws".into()], vec!["proj".into()]);
+        let theme = Theme::default();
+
+        // 1. Wide screen (100 cols) -> Full hints
+        let area_wide = Rect::new(0, 0, 100, 20);
+        let mut buf_wide = Buffer::empty(area_wide);
+        render_dashboard(&state, area_wide, &mut buf_wide, &theme);
+        let text_wide = buf_wide
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text_wide.contains("botai"));
+        assert!(text_wide.contains("Tab: Switch | ↑/↓: Navigate | Enter: Select | n: New | d: Destroy | q: Quit"));
+
+        // 2. Medium screen (75 cols) -> Compact hints
+        let area_med = Rect::new(0, 0, 75, 20);
+        let mut buf_med = Buffer::empty(area_med);
+        render_dashboard(&state, area_med, &mut buf_med, &theme);
+        let text_med = buf_med
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text_med.contains("botai"));
+        assert!(text_med.contains("Tab: Switch | Enter: Select | n: New | d: Destroy | q: Quit"));
+        assert!(!text_med.contains("↑/↓: Navigate"));
+
+        // 3. Narrow screen (20 cols) -> Minimal hints
+        let area_narrow = Rect::new(0, 0, 20, 20);
+        let mut buf_narrow = Buffer::empty(area_narrow);
+        render_dashboard(&state, area_narrow, &mut buf_narrow, &theme);
+        let text_narrow = buf_narrow
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text_narrow.contains("botai"));
+        assert!(text_narrow.contains("q: Quit"));
     }
 
     #[test]
@@ -825,10 +912,9 @@ mod tests {
 
         render_dashboard(&state, area, &mut buf, &theme);
 
-        // Check footer cell background matches theme.status_bar_bg
-        let footer_cell = buf.cell((0, 19)).unwrap();
-        assert_eq!(footer_cell.bg, theme.status_bar_bg);
-        assert_eq!(footer_cell.fg, theme.status_bar_fg);
+        // Check top header status bar cell background matches theme.status_bar_bg
+        let header_cell = buf.cell((0, 0)).unwrap();
+        assert_eq!(header_cell.bg, theme.status_bar_bg);
     }
 
     #[test]
@@ -1362,32 +1448,32 @@ command = "claude"
         assert!(rendered.contains("proj-inactive"));
 
         // Verify the status dot colors on specific rows in the left panel
-        // Left inner area starts at x = 1, y = 1 (inside borders)
-        // Row 1 (y = 1): proj-busy (selected, active panel) -> prefix is " > ", dot is at x = 4 (index 3 inside inner: 1 + 3 = 4)
+        // Left inner area starts at x = 1, y = 2 (inside borders, since header is at y = 0, panel at y = 1..20)
+        // Row 1 (y = 2): proj-busy (selected, active panel) -> prefix is " > ", dot is at x = 4 (index 3 inside inner: 1 + 3 = 4)
         // Let's verify line content and cell colors:
-        let cell_busy_dot = buf.cell((4, 1)).unwrap();
+        let cell_busy_dot = buf.cell((4, 2)).unwrap();
         assert_eq!(cell_busy_dot.symbol(), "●");
         assert_eq!(cell_busy_dot.fg, theme.status_busy);
 
-        // Row 2 (y = 2): proj-wait (unselected) -> prefix "   ", dot at x = 4
-        let cell_wait_dot = buf.cell((4, 2)).unwrap();
+        // Row 2 (y = 3): proj-wait (unselected) -> prefix "   ", dot at x = 4
+        let cell_wait_dot = buf.cell((4, 3)).unwrap();
         assert_eq!(cell_wait_dot.symbol(), "●");
         assert_eq!(cell_wait_dot.fg, theme.status_waiting);
 
-        // Row 3 (y = 3): proj-done -> dot at x = 4
-        let cell_done_dot = buf.cell((4, 3)).unwrap();
+        // Row 3 (y = 4): proj-done -> dot at x = 4
+        let cell_done_dot = buf.cell((4, 4)).unwrap();
         assert_eq!(cell_done_dot.symbol(), "●");
         assert_eq!(cell_done_dot.fg, theme.status_done);
 
-        // Row 4 (y = 4): proj-err -> dot at x = 4
-        let cell_err_dot = buf.cell((4, 4)).unwrap();
+        // Row 4 (y = 5): proj-err -> dot at x = 4
+        let cell_err_dot = buf.cell((4, 5)).unwrap();
         assert_eq!(cell_err_dot.symbol(), "●");
         assert_eq!(cell_err_dot.fg, theme.status_error);
 
-        // Row 5 (y = 5): proj-inactive -> no dot, spaces at x = 4 and x = 5, project name starts at x = 6
-        let cell_inactive_space1 = buf.cell((4, 5)).unwrap();
-        let cell_inactive_space2 = buf.cell((5, 5)).unwrap();
-        let cell_inactive_p = buf.cell((6, 5)).unwrap();
+        // Row 5 (y = 6): proj-inactive -> no dot, spaces at x = 4 and x = 5, project name starts at x = 6
+        let cell_inactive_space1 = buf.cell((4, 6)).unwrap();
+        let cell_inactive_space2 = buf.cell((5, 6)).unwrap();
+        let cell_inactive_p = buf.cell((6, 6)).unwrap();
         assert_eq!(cell_inactive_space1.symbol(), " ");
         assert_eq!(cell_inactive_space2.symbol(), " ");
         assert_eq!(cell_inactive_p.symbol(), "p");
@@ -1408,7 +1494,7 @@ command = "claude"
 
         render_dashboard(&state, area, &mut buf, &theme);
 
-        let cell_busy_dot = buf.cell((4, 1)).unwrap();
+        let cell_busy_dot = buf.cell((4, 2)).unwrap();
         assert_eq!(cell_busy_dot.symbol(), "●");
         assert_eq!(cell_busy_dot.fg, theme.status_busy);
     }
