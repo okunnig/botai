@@ -82,13 +82,23 @@ log_info "Targets: ${TARGETS[*]}"
 
 cd "$PROJECT_ROOT"
 
+SUCCESS_COUNT=0
+FAIL_COUNT=0
+
 for target in "${TARGETS[@]}"; do
     log_step "Compiling target: $target..."
     
+    BUILD_SUCCESS=true
     if [[ "$ENGINE" == "cross" ]]; then
-        cross build --target "$target" --release --config 'build.rustflags=[]'
+        cross build --target "$target" --release --config 'build.rustflags=[]' || BUILD_SUCCESS=false
     else
-        cargo build --target "$target" --release --config 'build.rustflags=[]'
+        cargo build --target "$target" --release --config 'build.rustflags=[]' || BUILD_SUCCESS=false
+    fi
+
+    if [[ "$BUILD_SUCCESS" == false ]]; then
+        log_warn "Failed to compile for target '$target'. If using cargo, ensure target is installed via 'rustup target add $target' and mingw-w64 is present, or use '--engine cross'."
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        continue
     fi
 
     log_step "Locating built Windows binary for $target..."
@@ -102,10 +112,16 @@ for target in "${TARGETS[@]}"; do
     if [[ "$target" != "x86_64-pc-windows-gnu" ]]; then
         package_zip "botai-v${VERSION}-${target}" "$BINARY_PATH" "${APP_NAME}.exe"
     fi
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
 done
 
-if [[ "$GENERATE_CHECKSUM" == true ]]; then
+if [[ "$GENERATE_CHECKSUM" == true && $SUCCESS_COUNT -gt 0 ]]; then
     generate_checksums "$DIST_DIR"
 fi
 
-log_success "Windows artifacts build completed successfully."
+if [[ $SUCCESS_COUNT -gt 0 ]]; then
+    log_success "Windows artifacts build completed ($SUCCESS_COUNT succeeded, $FAIL_COUNT failed)."
+else
+    log_warn "Windows target builds were not completed."
+fi
+

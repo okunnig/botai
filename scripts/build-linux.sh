@@ -122,13 +122,23 @@ get_archive_name() {
 
 cd "$PROJECT_ROOT"
 
+SUCCESS_COUNT=0
+FAIL_COUNT=0
+
 for target in "${TARGETS[@]}"; do
     log_step "Compiling target: $target..."
     
+    BUILD_SUCCESS=true
     if [[ "$ENGINE" == "cross" ]]; then
-        cross build --target "$target" --release --config 'build.rustflags=[]'
+        cross build --target "$target" --release --config 'build.rustflags=[]' || BUILD_SUCCESS=false
     else
-        cargo build --target "$target" --release --config 'build.rustflags=[]'
+        cargo build --target "$target" --release --config 'build.rustflags=[]' || BUILD_SUCCESS=false
+    fi
+
+    if [[ "$BUILD_SUCCESS" == false ]]; then
+        log_warn "Failed to compile for target '$target'. If using cargo, ensure target is installed via 'rustup target add $target' or use '--engine cross'."
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        continue
     fi
 
     log_step "Locating built binary for $target..."
@@ -145,10 +155,18 @@ for target in "${TARGETS[@]}"; do
     elif [[ "$target" == "aarch64-unknown-linux-gnu" ]]; then
         package_tar_gz "botai-v${VERSION}-linux-aarch64" "$BINARY_PATH" "$APP_NAME"
     fi
+
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
 done
 
-if [[ "$GENERATE_CHECKSUM" == true ]]; then
+if [[ "$GENERATE_CHECKSUM" == true && $SUCCESS_COUNT -gt 0 ]]; then
     generate_checksums "$DIST_DIR"
 fi
 
-log_success "Linux artifacts build completed successfully."
+if [[ $SUCCESS_COUNT -gt 0 ]]; then
+    log_success "Linux artifacts build completed ($SUCCESS_COUNT succeeded, $FAIL_COUNT failed)."
+else
+    log_error "All Linux target builds failed."
+    exit 1
+fi
+

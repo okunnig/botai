@@ -110,14 +110,23 @@ get_archive_name() {
 cd "$PROJECT_ROOT"
 
 declare -A BUILT_BINARIES=()
+SUCCESS_COUNT=0
+FAIL_COUNT=0
 
 for target in "${TARGETS[@]}"; do
     log_step "Compiling target: $target..."
     
+    BUILD_SUCCESS=true
     if [[ "$ENGINE" == "cross" ]]; then
-        cross build --target "$target" --release --config 'build.rustflags=[]'
+        cross build --target "$target" --release --config 'build.rustflags=[]' || BUILD_SUCCESS=false
     else
-        cargo build --target "$target" --release --config 'build.rustflags=[]'
+        cargo build --target "$target" --release --config 'build.rustflags=[]' || BUILD_SUCCESS=false
+    fi
+
+    if [[ "$BUILD_SUCCESS" == false ]]; then
+        log_warn "Failed to compile for target '$target'. Note: macOS cross-compilation requires cross or an osxcross/zig toolchain."
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        continue
     fi
 
     log_step "Locating built macOS binary for $target..."
@@ -128,6 +137,7 @@ for target in "${TARGETS[@]}"; do
     ARCHIVE_NAME=$(get_archive_name "$target" "$VERSION")
     log_step "Packaging $ARCHIVE_NAME.tar.gz..."
     package_tar_gz "$ARCHIVE_NAME" "$BINARY_PATH" "$APP_NAME"
+    SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
 done
 
 # Check if we can create a universal binary
@@ -151,8 +161,13 @@ if [[ -n "${BUILT_BINARIES["x86_64-apple-darwin"]:-}" ]] && [[ -n "${BUILT_BINAR
     fi
 fi
 
-if [[ "$GENERATE_CHECKSUM" == true ]]; then
+if [[ "$GENERATE_CHECKSUM" == true && $SUCCESS_COUNT -gt 0 ]]; then
     generate_checksums "$DIST_DIR"
 fi
 
-log_success "macOS artifacts build completed successfully."
+if [[ $SUCCESS_COUNT -gt 0 ]]; then
+    log_success "macOS artifacts build completed ($SUCCESS_COUNT succeeded, $FAIL_COUNT failed)."
+else
+    log_warn "macOS target builds were not completed."
+fi
+
