@@ -290,4 +290,60 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Modals (Creation Modal & Quick Launcher)**: Dialog borders, active/inactive tab bars, focused input borders/prompts, placeholder text, field labels, and button/key hints.
   - **Exit & Crash Banners**: High-visibility error notification banners rendered across the bottom line upon non-zero process exits.
 
+---
+
+## 11. Cross-Platform Compilation & Distributable Artifacts
+- **Target Matrix & Architectural Support**:
+  - **Linux (glibc & musl static)**:
+    - `x86_64-unknown-linux-gnu` (standard glibc Linux x86_64)
+    - `x86_64-unknown-linux-musl` (standalone static musl Linux x86_64)
+    - `aarch64-unknown-linux-gnu` (glibc Linux ARM64 / aarch64)
+    - `aarch64-unknown-linux-musl` (standalone static musl Linux ARM64)
+  - **Windows (x86_64)**:
+    - `x86_64-pc-windows-gnu` (Windows 64-bit executable `botai.exe`)
+  - **macOS (Intel, Apple Silicon, Universal)**:
+    - `x86_64-apple-darwin` (Intel 64-bit macOS)
+    - `aarch64-apple-darwin` (Apple Silicon M1/M2/M3 macOS)
+    - Universal Mach-O Binary created via `lipo` combining `x86_64` and `aarch64` architectures into a single portable binary.
+- **Containerized Cross-Compilation (`cross` + Podman / Docker)**:
+  - Compiles all target architectures from a Linux host environment without polluting the host system with cross-compilers or foreign sysroots.
+  - **`Cross.toml`**: Configures target architectures with container image definitions and environment passthroughs.
+  - **Engine Auto-Detection**: Prioritizes `cross` paired with Podman (`CROSS_CONTAINER_ENGINE=podman`) or Docker, with fallback to host `cargo` when target toolchains are natively available.
+- **Modular Shell Build Scripts (`scripts/`)**:
+  - **`scripts/common.sh`**:
+    - Common shell variables (`PROJECT_ROOT`, `DIST_DIR`, `APP_NAME`, `CARGO_TOML`, `README_MD`, `REQS_MD`).
+    - Formatted terminal colors and structured log helpers (`log_info`, `log_step`, `log_success`, `log_warn`, `log_error`, `log_header`).
+    - Semantic version parsing directly from `Cargo.toml`.
+    - Build engine detection (`cross` or `cargo`) with container engine resolution (`podman` or `docker`).
+    - Build directory resolver handling custom `CARGO_TARGET_DIR`, `.cargo/config.toml` (`/tmp/botai-build`), and workspace `target/`.
+    - Automated archive packagers (`package_tar_gz` and `package_zip`) with temporary staging and documentation file bundling.
+    - Checksum generator (`generate_checksums`) and formatted CLI summary table output (`print_artifact_table`).
+  - **`scripts/build-linux.sh`**:
+    - Compiles release binaries for Linux targets (`x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`).
+    - Bundles executable and documentation files (`README.md`, `REQS.md`) into `dist/botai-<version>-linux-<arch>.tar.gz`.
+    - Flags: `--target <triple>`, `--engine <cross|cargo>`, `--dist-dir <dir>`, `--no-checksum`, `--help`.
+  - **`scripts/build-windows.sh`**:
+    - Compiles Windows release binary (`x86_64-pc-windows-gnu`).
+    - Bundles `botai.exe`, `README.md`, and `REQS.md` into `dist/botai-<version>-windows-x86_64.zip`.
+    - Flags: `--target <triple>`, `--engine <cross|cargo>`, `--dist-dir <dir>`, `--no-checksum`, `--help`.
+  - **`scripts/build-macos.sh`**:
+    - Compiles macOS release binaries (`x86_64-apple-darwin`, `aarch64-apple-darwin`).
+    - Automatically produces a Universal binary via `lipo` if available on the build host.
+    - Bundles executable, `README.md`, and `REQS.md` into `dist/botai-<version>-macos-<arch>.tar.gz` and `dist/botai-<version>-macos-universal.tar.gz`.
+    - Flags: `--target <triple>`, `--engine <cross|cargo>`, `--dist-dir <dir>`, `--no-checksum`, `--help`.
+  - **`scripts/build-all.sh`**:
+    - Master build orchestrator supporting selective or complete builds.
+    - Flags: `--linux` (`-l`), `--windows` (`-w`), `--macos` (`-m`), `--all` (`-a`), `--engine <engine>` (`-e`), `--dist-dir <dir>` (`-d`), `--help` (`-h`).
+    - Executes the corresponding platform build scripts, generates `dist/SHA256SUMS`, and renders a formatted terminal summary table detailing artifact names, sizes, and SHA-256 hashes.
+- **Packaging Format & Artifact Naming**:
+  - `dist/botai-<version>-linux-x86_64-gnu.tar.gz`
+  - `dist/botai-<version>-linux-x86_64-musl.tar.gz`
+  - `dist/botai-<version>-linux-aarch64-gnu.tar.gz`
+  - `dist/botai-<version>-linux-aarch64-musl.tar.gz`
+  - `dist/botai-<version>-windows-x86_64.zip`
+  - `dist/botai-<version>-macos-x86_64.tar.gz`
+  - `dist/botai-<version>-macos-aarch64.tar.gz`
+  - `dist/botai-<version>-macos-universal.tar.gz`
+  - `dist/SHA256SUMS` (cryptographic SHA-256 verification manifest).
+
 

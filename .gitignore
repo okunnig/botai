@@ -5,3 +5,4 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 filestorage-fixup
+/dist

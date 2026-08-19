@@ -1,2 +1,23 @@
 [build]
 target-dir = "/tmp/botai-build"
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = []
+
+[target.x86_64-unknown-linux-musl]
+rustflags = []
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = []
+
+[target.aarch64-unknown-linux-musl]
+rustflags = []
+
+[target.x86_64-pc-windows-gnu]
+rustflags = []
+
+[target.x86_64-apple-darwin]
+rustflags = []
+
+[target.aarch64-apple-darwin]
+rustflags = []
