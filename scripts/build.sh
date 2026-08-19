@@ -49,7 +49,15 @@ FAILED=0
 for target in "${TARGETS[@]}"; do
     echo ""
     echo "==> Building $target (v$VERSION)..."
-    if ! cross build --target "$target" --release; then
+    
+    # If building the native host Linux target, use native cargo (which leverages host linkers like mold)
+    if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
+        BUILD_CMD="cargo build --target $target --release"
+    else
+        BUILD_CMD="cross build --target $target --release"
+    fi
+
+    if ! $BUILD_CMD; then
         echo "Warning: Failed to compile for '$target'." >&2
         if [[ "$target" == *"apple-darwin"* ]]; then
             echo "Note: macOS cross-compilation from Linux requires an Apple SDK (e.g. via cargo-zigbuild or osxcross) due to Apple SDK licensing restrictions." >&2
@@ -57,6 +65,7 @@ for target in "${TARGETS[@]}"; do
         FAILED=$((FAILED + 1))
         continue
     fi
+
 
     bin="botai"
     [[ "$target" == *"windows"* ]] && bin="botai.exe"
