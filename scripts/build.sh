@@ -43,15 +43,27 @@ find_binary() {
     return 1
 }
 
+SUCCESSFUL=0
+FAILED=0
+
 for target in "${TARGETS[@]}"; do
+    echo ""
     echo "==> Building $target (v$VERSION)..."
-    cross build --target "$target" --release
+    if ! cross build --target "$target" --release; then
+        echo "Warning: Failed to compile for '$target'." >&2
+        if [[ "$target" == *"apple-darwin"* ]]; then
+            echo "Note: macOS cross-compilation from Linux requires an Apple SDK (e.g. via cargo-zigbuild or osxcross) due to Apple SDK licensing restrictions." >&2
+        fi
+        FAILED=$((FAILED + 1))
+        continue
+    fi
 
     bin="botai"
     [[ "$target" == *"windows"* ]] && bin="botai.exe"
     bin_path=$(find_binary "$target" "$bin") || {
         echo "Error: Binary '$bin' not found for '$target'" >&2
-        exit 1
+        FAILED=$((FAILED + 1))
+        continue
     }
 
     case "$target" in
@@ -80,9 +92,11 @@ for target in "${TARGETS[@]}"; do
         tar -czf "$archive" -C "$stage" .
     fi
     rm -rf "$stage"
+    SUCCESSFUL=$((SUCCESSFUL + 1))
     echo "==> Packaged: $archive"
 done
 
+echo ""
 echo "==> Generating SHA256SUMS..."
 (
     cd "$DIST_DIR"
@@ -93,4 +107,12 @@ echo "==> Generating SHA256SUMS..."
     fi
 )
 
-echo "==> Build and packaging completed successfully."
+echo ""
+if [[ $SUCCESSFUL -gt 0 ]]; then
+    echo "==> Build and packaging completed ($SUCCESSFUL succeeded, $FAILED failed)."
+    echo "==> Distributable artifacts available in: $DIST_DIR"
+else
+    echo "==> Error: All requested builds failed." >&2
+    exit 1
+fi
+

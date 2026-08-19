@@ -1,62 +1,9 @@
-# Cross.toml
-# Configuration for `cross` containerized cross-compilation with Podman / Docker
-
-[build]
-env.passthrough = [
-    "RUSTFLAGS",
-    "CARGO_BUILD_RUSTFLAGS",
-    "CARGO_TARGET_DIR",
-]
-
-[build.env]
-RUSTFLAGS = ""
-CARGO_BUILD_RUSTFLAGS = ""
-
 [target.x86_64-unknown-linux-gnu]
 image = "docker.io/rustembedded/cross:x86_64-unknown-linux-gnu-0.2.1"
-
-[target.x86_64-unknown-linux-gnu.env]
-RUSTFLAGS = ""
-CARGO_BUILD_RUSTFLAGS = ""
-
-[target.x86_64-unknown-linux-musl]
-image = "docker.io/rustembedded/cross:x86_64-unknown-linux-musl-0.2.1"
-
-[target.x86_64-unknown-linux-musl.env]
-RUSTFLAGS = ""
-CARGO_BUILD_RUSTFLAGS = ""
 
 [target.aarch64-unknown-linux-gnu]
 image = "docker.io/rustembedded/cross:aarch64-unknown-linux-gnu-0.2.1"
 
-[target.aarch64-unknown-linux-gnu.env]
-RUSTFLAGS = ""
-CARGO_BUILD_RUSTFLAGS = ""
-
-[target.aarch64-unknown-linux-musl]
-image = "docker.io/rustembedded/cross:aarch64-unknown-linux-musl-0.2.1"
-
-[target.aarch64-unknown-linux-musl.env]
-RUSTFLAGS = ""
-CARGO_BUILD_RUSTFLAGS = ""
-
 [target.x86_64-pc-windows-gnu]
 image = "docker.io/rustembedded/cross:x86_64-pc-windows-gnu-0.2.1"
 
-[target.x86_64-pc-windows-gnu.env]
-RUSTFLAGS = ""
-CARGO_BUILD_RUSTFLAGS = ""
-
-[target.x86_64-apple-darwin]
-image = "docker.io/rustembedded/cross:x86_64-apple-darwin-0.2.1"
-
-[target.x86_64-apple-darwin.env]
-RUSTFLAGS = ""
-CARGO_BUILD_RUSTFLAGS = ""
-
-[target.aarch64-apple-darwin]
-image = "docker.io/rustembedded/cross:aarch64-apple-darwin-0.2.1"
-
-[target.aarch64-apple-darwin.env]
-RUSTFLAGS = ""
-CARGO_BUILD_RUSTFLAGS = ""
