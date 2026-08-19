@@ -43,21 +43,19 @@ find_binary() {
     return 1
 }
 
+# Prepare an isolated CARGO_HOME for cross to prevent host ~/.cargo/config.toml (e.g. mold) from interfering inside containers
+CROSS_CARGO_DIR="/tmp/botai-cross-home"
+mkdir -p "$CROSS_CARGO_DIR"
+
 SUCCESSFUL=0
 FAILED=0
+
 
 for target in "${TARGETS[@]}"; do
     echo ""
     echo "==> Building $target (v$VERSION)..."
     
-    # If building the native host Linux target, use native cargo (which leverages host linkers like mold)
-    if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
-        BUILD_CMD="cargo build --target $target --release"
-    else
-        BUILD_CMD="cross build --target $target --release"
-    fi
-
-    if ! $BUILD_CMD; then
+    if ! CARGO_HOME="$CROSS_CARGO_DIR" cross build --target "$target" --release; then
         echo "Warning: Failed to compile for '$target'." >&2
         if [[ "$target" == *"apple-darwin"* ]]; then
             echo "Note: macOS cross-compilation from Linux requires an Apple SDK (e.g. via cargo-zigbuild or osxcross) due to Apple SDK licensing restrictions." >&2
