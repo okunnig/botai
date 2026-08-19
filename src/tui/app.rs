@@ -118,13 +118,15 @@ impl TuiApp {
     }
 
     /// Sets the dashboard state on `TuiApp`.
-    pub fn with_dashboard(mut self, dashboard: DashboardState) -> Self {
+    pub fn with_dashboard(mut self, mut dashboard: DashboardState) -> Self {
+        dashboard.set_running_sessions(self.running_sessions_map());
         self.dashboard = Some(dashboard);
         self
     }
 
     /// Sets the quick launcher state on `TuiApp`.
-    pub fn with_quick_launcher(mut self, quick_launcher: QuickLauncherState) -> Self {
+    pub fn with_quick_launcher(mut self, mut quick_launcher: QuickLauncherState) -> Self {
+        quick_launcher.set_running_sessions(self.running_sessions_map());
         self.quick_launcher = Some(quick_launcher);
         self
     }
@@ -184,6 +186,15 @@ impl TuiApp {
         res
     }
 
+    /// Extracts a map of project names to their current session status from the registry.
+    pub fn running_sessions_map(&self) -> HashMap<String, SessionStatus> {
+        self.registry
+            .list()
+            .iter()
+            .map(|s| (s.project_name().to_string(), s.status()))
+            .collect()
+    }
+
     /// Internal event loop.
     pub fn run_loop<B: ratatui::backend::Backend>(
         &mut self,
@@ -221,6 +232,15 @@ impl TuiApp {
 
             // 2. Process PTY outputs for all sessions
             self.process_pty_streams();
+
+            // Synchronize running sessions on dashboard and quick_launcher
+            let running = self.running_sessions_map();
+            if let Some(dashboard) = &mut self.dashboard {
+                dashboard.set_running_sessions(running.clone());
+            }
+            if let Some(launcher) = &mut self.quick_launcher {
+                launcher.set_running_sessions(running);
+            }
 
             // 3. Draw active frame
             let theme = self.config.as_ref().map(|c| c.theme()).unwrap_or_default();
@@ -403,7 +423,9 @@ impl TuiApp {
             .active_session()
             .map(|s| s.workspace_name().to_string());
 
-        let launcher = QuickLauncherState::new(workspaces, local_projects, active_ws.as_deref());
+        let running = self.running_sessions_map();
+        let launcher = QuickLauncherState::new(workspaces, local_projects, active_ws.as_deref())
+            .with_running_sessions(running);
         self.quick_launcher = Some(launcher);
     }
 
@@ -787,14 +809,15 @@ impl TuiApp {
 
     /// Refreshes the local projects and workspaces list within the dashboard.
     pub fn refresh_dashboard(&mut self) {
-        if let Some(dashboard) = &mut self.dashboard {
+        if self.dashboard.is_some() {
             let cwd = self
                 .cwd
                 .clone()
                 .or_else(|| env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
-            if let Some(cfg) = &self.config {
-                *dashboard = DashboardState::from_env(cfg, &cwd);
+            let running = self.running_sessions_map();
+            let new_dashboard = if let Some(cfg) = &self.config {
+                DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
             } else {
                 let default_cfg =
                     Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
@@ -805,8 +828,9 @@ impl TuiApp {
                             agents: HashMap::new(),
                             workspaces: HashMap::new(),
                         });
-                *dashboard = DashboardState::from_env(&default_cfg, &cwd);
-            }
+                DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
+            };
+            self.dashboard = Some(new_dashboard);
         }
     }
 

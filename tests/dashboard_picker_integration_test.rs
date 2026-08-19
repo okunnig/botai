@@ -343,3 +343,75 @@ repos = []
     assert_eq!(app.registry.len(), 1);
 }
 
+#[test]
+fn test_integration_dashboard_running_session_indicator_lifecycle() {
+    let tmp = tempdir().expect("tempdir");
+    let cwd = tmp.path();
+
+    let proj1 = cwd.join("svc-running");
+    fs::create_dir(&proj1).expect("create proj1");
+    fs::write(proj1.join("AGENTS.md"), "# Running Service").expect("write agents md");
+
+    let proj2 = cwd.join("svc-stopped");
+    fs::create_dir(&proj2).expect("create proj2");
+    fs::write(proj2.join("AGENTS.md"), "# Stopped Service").expect("write agents md");
+
+    let config_toml = r#"
+default_agent = "mock_shell"
+repos_dir = "/tmp/repos"
+
+[agents.mock_shell]
+command = "sh"
+args = ["-c", "sleep 10"]
+
+[workspaces.test_ws]
+repos = []
+"#;
+    let config = Config::load_from_str(config_toml).expect("load config");
+    let dashboard = DashboardState::from_env(&config, cwd);
+
+    let registry = botai::session::SessionRegistry::new();
+    let mut app = botai::tui::TuiApp::new(registry)
+        .with_dashboard(dashboard)
+        .with_config(config)
+        .with_cwd(cwd.to_path_buf());
+
+    // 1. Attach to svc-running
+    app.handle_dashboard_action(DashboardAction::Attach("svc-running".to_string()));
+    assert_eq!(app.registry.len(), 1);
+
+    // 2. Detach back to dashboard
+    let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+    app.handle_key_event(ctrl_space);
+    let d_key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+    app.handle_key_event(d_key);
+
+    assert!(app.is_showing_dashboard());
+
+    // 3. Render dashboard with app's synchronized running sessions
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert_eq!(
+        dashboard.running_sessions.get("svc-running"),
+        Some(&botai::session::SessionStatus::Initializing)
+    );
+    assert_eq!(dashboard.running_sessions.get("svc-stopped"), None);
+
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = botai::tui::Theme::tokyo_night();
+
+    terminal
+        .draw(|f| {
+            render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let rendered = buffer.content().iter().map(|c| c.symbol()).collect::<String>();
+
+    assert!(rendered.contains("svc-running"));
+    assert!(rendered.contains("svc-stopped"));
+    assert!(rendered.contains("●"));
+}
+
+

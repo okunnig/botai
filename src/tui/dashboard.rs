@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -10,6 +11,7 @@ use ratatui::{
 };
 
 use crate::config::Config;
+use crate::session::SessionStatus;
 use crate::tui::theme::Theme;
 
 /// Active panel in the two-panel dashboard.
@@ -182,6 +184,7 @@ impl DestroyModalState {
 pub struct DashboardState {
     pub workspaces: Vec<String>,
     pub local_projects: Vec<String>,
+    pub running_sessions: HashMap<String, SessionStatus>,
     pub active_panel: ActivePanel,
     pub selected_project_idx: usize,
     pub selected_workspace_idx: usize,
@@ -195,12 +198,24 @@ impl DashboardState {
         Self {
             workspaces,
             local_projects,
+            running_sessions: HashMap::new(),
             active_panel: ActivePanel::Projects,
             selected_project_idx: 0,
             selected_workspace_idx: 0,
             creation_modal: None,
             destroy_modal: None,
         }
+    }
+
+    /// Sets the map of currently running sessions.
+    pub fn with_running_sessions(mut self, running: HashMap<String, SessionStatus>) -> Self {
+        self.running_sessions = running;
+        self
+    }
+
+    /// Updates the map of currently running sessions in-place.
+    pub fn set_running_sessions(&mut self, running: HashMap<String, SessionStatus>) {
+        self.running_sessions = running;
     }
 
     /// Scans the CWD for existing project directories containing `AGENTS.md` and loads workspaces from `Config`.
@@ -416,7 +431,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
             .enumerate()
             .map(|(i, proj)| {
                 let is_selected = i == state.selected_project_idx;
-                let (prefix, style) = if is_selected && is_left_active {
+                let (prefix, base_style) = if is_selected && is_left_active {
                     (
                         " > ",
                         Style::default()
@@ -429,7 +444,25 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
                 } else {
                     ("   ", Style::default().fg(theme.status_bar_fg))
                 };
-                ListItem::new(format!("{}{}", prefix, proj)).style(style)
+
+                let mut spans = vec![Span::styled(prefix, base_style)];
+
+                if let Some(status) = state.running_sessions.get(proj) {
+                    let dot_color = status.status_color(theme);
+                    let mut dot_style = Style::default().fg(dot_color);
+                    if is_selected && is_left_active {
+                        dot_style = dot_style
+                            .bg(theme.selection_bg)
+                            .add_modifier(Modifier::BOLD);
+                    }
+                    spans.push(Span::styled("● ", dot_style));
+                } else {
+                    spans.push(Span::styled("  ", base_style));
+                }
+
+                spans.push(Span::styled(proj.clone(), base_style));
+
+                ListItem::new(Line::from(spans)).style(base_style)
             })
             .collect();
 
@@ -1262,5 +1295,121 @@ command = "claude"
             dashboard.cursor_position(area),
             Some(Position::new(35, 11))
         );
+    }
+
+    #[test]
+    fn test_dashboard_running_sessions_state_methods() {
+        let mut running = HashMap::new();
+        running.insert("proj-1".to_string(), SessionStatus::Busy);
+        running.insert("proj-2".to_string(), SessionStatus::WaitingForInput);
+
+        let state = DashboardState::new(vec!["ws".to_string()], vec!["proj-1".to_string()])
+            .with_running_sessions(running.clone());
+
+        assert_eq!(state.running_sessions.len(), 2);
+        assert_eq!(
+            state.running_sessions.get("proj-1"),
+            Some(&SessionStatus::Busy)
+        );
+        assert_eq!(
+            state.running_sessions.get("proj-2"),
+            Some(&SessionStatus::WaitingForInput)
+        );
+
+        let mut state2 = DashboardState::new(vec![], vec![]);
+        state2.set_running_sessions(running);
+        assert_eq!(state2.running_sessions.len(), 2);
+    }
+
+    #[test]
+    fn test_render_dashboard_running_session_indicators_and_colors() {
+        let mut running = HashMap::new();
+        running.insert("proj-busy".to_string(), SessionStatus::Busy);
+        running.insert("proj-wait".to_string(), SessionStatus::WaitingForInput);
+        running.insert("proj-done".to_string(), SessionStatus::Done);
+        running.insert("proj-err".to_string(), SessionStatus::Error);
+        // "proj-inactive" is not in running_sessions
+
+        let projects = vec![
+            "proj-busy".to_string(),
+            "proj-wait".to_string(),
+            "proj-done".to_string(),
+            "proj-err".to_string(),
+            "proj-inactive".to_string(),
+        ];
+
+        let state = DashboardState::new(vec!["workspace-a".to_string()], projects)
+            .with_running_sessions(running);
+
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::tokyo_night();
+
+        render_dashboard(&state, area, &mut buf, &theme);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        // Check that project names and status dot indicators are rendered
+        assert!(rendered.contains("●"));
+        assert!(rendered.contains("proj-busy"));
+        assert!(rendered.contains("proj-wait"));
+        assert!(rendered.contains("proj-done"));
+        assert!(rendered.contains("proj-err"));
+        assert!(rendered.contains("proj-inactive"));
+
+        // Verify the status dot colors on specific rows in the left panel
+        // Left inner area starts at x = 1, y = 1 (inside borders)
+        // Row 1 (y = 1): proj-busy (selected, active panel) -> prefix is " > ", dot is at x = 4 (index 3 inside inner: 1 + 3 = 4)
+        // Let's verify line content and cell colors:
+        let cell_busy_dot = buf.cell((4, 1)).unwrap();
+        assert_eq!(cell_busy_dot.symbol(), "●");
+        assert_eq!(cell_busy_dot.fg, theme.status_busy);
+
+        // Row 2 (y = 2): proj-wait (unselected) -> prefix "   ", dot at x = 4
+        let cell_wait_dot = buf.cell((4, 2)).unwrap();
+        assert_eq!(cell_wait_dot.symbol(), "●");
+        assert_eq!(cell_wait_dot.fg, theme.status_waiting);
+
+        // Row 3 (y = 3): proj-done -> dot at x = 4
+        let cell_done_dot = buf.cell((4, 3)).unwrap();
+        assert_eq!(cell_done_dot.symbol(), "●");
+        assert_eq!(cell_done_dot.fg, theme.status_done);
+
+        // Row 4 (y = 4): proj-err -> dot at x = 4
+        let cell_err_dot = buf.cell((4, 4)).unwrap();
+        assert_eq!(cell_err_dot.symbol(), "●");
+        assert_eq!(cell_err_dot.fg, theme.status_error);
+
+        // Row 5 (y = 5): proj-inactive -> no dot, spaces at x = 4 and x = 5, project name starts at x = 6
+        let cell_inactive_space1 = buf.cell((4, 5)).unwrap();
+        let cell_inactive_space2 = buf.cell((5, 5)).unwrap();
+        let cell_inactive_p = buf.cell((6, 5)).unwrap();
+        assert_eq!(cell_inactive_space1.symbol(), " ");
+        assert_eq!(cell_inactive_space2.symbol(), " ");
+        assert_eq!(cell_inactive_p.symbol(), "p");
+    }
+
+    #[test]
+    fn test_render_dashboard_running_session_colors_with_gruvbox_theme() {
+        let mut running = HashMap::new();
+        running.insert("proj-busy".to_string(), SessionStatus::Busy);
+
+        let projects = vec!["proj-busy".to_string()];
+        let state = DashboardState::new(vec!["ws".to_string()], projects)
+            .with_running_sessions(running);
+
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::gruvbox();
+
+        render_dashboard(&state, area, &mut buf, &theme);
+
+        let cell_busy_dot = buf.cell((4, 1)).unwrap();
+        assert_eq!(cell_busy_dot.symbol(), "●");
+        assert_eq!(cell_busy_dot.fg, theme.status_busy);
     }
 }

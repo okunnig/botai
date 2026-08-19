@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
@@ -7,6 +9,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
 
+use crate::session::SessionStatus;
 use crate::tui::theme::Theme;
 
 /// Active top-level tab in the Quick Launcher modal.
@@ -49,6 +52,7 @@ pub struct QuickLauncherState {
     pub project_name_input: String,
     pub prompt_input: String,
     pub local_projects: Vec<String>,
+    pub running_sessions: HashMap<String, SessionStatus>,
     pub selected_project_idx: usize,
     pub error_message: Option<String>,
 }
@@ -73,9 +77,27 @@ impl QuickLauncherState {
             project_name_input: String::new(),
             prompt_input: String::new(),
             local_projects,
+            running_sessions: HashMap::new(),
             selected_project_idx: 0,
             error_message: None,
         }
+    }
+
+    /// Sets the map of currently running sessions.
+    pub fn with_running_sessions(
+        mut self,
+        running: HashMap<String, SessionStatus>,
+    ) -> Self {
+        self.running_sessions = running;
+        self
+    }
+
+    /// Updates the map of currently running sessions in-place.
+    pub fn set_running_sessions(
+        &mut self,
+        running: HashMap<String, SessionStatus>,
+    ) {
+        self.running_sessions = running;
     }
 
     /// Calculates the hardware cursor position when an editable input field is focused.
@@ -701,7 +723,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                     .enumerate()
                     .map(|(i, proj)| {
                         let is_selected = i == state.selected_project_idx;
-                        let (prefix, style) = if is_selected && is_list_focused {
+                        let (prefix, base_style) = if is_selected && is_list_focused {
                             (
                                 " ▶ ",
                                 Style::default()
@@ -714,7 +736,25 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                         } else {
                             ("   ", Style::default().fg(theme.status_bar_fg))
                         };
-                        ListItem::new(format!("{}{}", prefix, proj)).style(style)
+
+                        let mut spans = vec![Span::styled(prefix, base_style)];
+
+                        if let Some(status) = state.running_sessions.get(proj) {
+                            let dot_color = status.status_color(theme);
+                            let mut dot_style = Style::default().fg(dot_color);
+                            if is_selected && is_list_focused {
+                                dot_style = dot_style
+                                    .bg(theme.selection_bg)
+                                    .add_modifier(Modifier::BOLD);
+                            }
+                            spans.push(Span::styled("● ", dot_style));
+                        } else {
+                            spans.push(Span::styled("  ", base_style));
+                        }
+
+                        spans.push(Span::styled(proj.clone(), base_style));
+
+                        ListItem::new(Line::from(spans)).style(base_style)
                     })
                     .collect();
 
@@ -1209,5 +1249,99 @@ mod tests {
         // 6. Too small area -> None
         let small_area = Rect::new(0, 0, 20, 5);
         assert_eq!(launcher.cursor_position(small_area), None);
+    }
+
+    #[test]
+    fn test_quick_launcher_running_sessions_methods() {
+        let mut running = HashMap::new();
+        running.insert("proj-a".to_string(), SessionStatus::Busy);
+        running.insert("proj-b".to_string(), SessionStatus::Done);
+
+        let launcher = QuickLauncherState::new(vec!["ws".to_string()], vec!["proj-a".to_string()], None)
+            .with_running_sessions(running.clone());
+
+        assert_eq!(launcher.running_sessions.len(), 2);
+        assert_eq!(
+            launcher.running_sessions.get("proj-a"),
+            Some(&SessionStatus::Busy)
+        );
+
+        let mut launcher2 = QuickLauncherState::new(vec![], vec![], None);
+        launcher2.set_running_sessions(running);
+        assert_eq!(launcher2.running_sessions.len(), 2);
+    }
+
+    #[test]
+    fn test_render_quick_launcher_attach_tab_running_session_indicators_and_colors() {
+        let mut running = HashMap::new();
+        running.insert("proj-busy".to_string(), SessionStatus::Busy);
+        running.insert("proj-wait".to_string(), SessionStatus::WaitingForInput);
+        running.insert("proj-done".to_string(), SessionStatus::Done);
+        running.insert("proj-err".to_string(), SessionStatus::Error);
+        // "proj-inactive" is not in running_sessions
+
+        let projects = vec![
+            "proj-busy".to_string(),
+            "proj-wait".to_string(),
+            "proj-done".to_string(),
+            "proj-err".to_string(),
+            "proj-inactive".to_string(),
+        ];
+
+        let mut launcher = QuickLauncherState::new(vec!["ws".to_string()], projects, None)
+            .with_running_sessions(running);
+        launcher.switch_tab(LauncherTab::Attach);
+
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buffer = Buffer::empty(area);
+        let theme = Theme::tokyo_night();
+
+        render_quick_launcher(&launcher, area, &mut buffer, &theme);
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(rendered.contains("●"));
+        assert!(rendered.contains("proj-busy"));
+        assert!(rendered.contains("proj-wait"));
+        assert!(rendered.contains("proj-done"));
+        assert!(rendered.contains("proj-err"));
+        assert!(rendered.contains("proj-inactive"));
+
+        // In 80x20 area: width = 72, height = 16.
+        // x = (80 - 72)/2 = 4, y = (20 - 16)/2 = 2.
+        // Outer block inner: x = 5, y = 3, width = 70, height = 14.
+        // Chunks: TabBar (y=3, h=1), Divider (y=4, h=1), Body (y=5, h=10), Footer (y=15, h=1).
+        // Body starts at y = 5, x = 5.
+        // Row 1 (y = 5): proj-busy -> prefix is " ▶ " (len 3: x=5,6,7), dot is at x = 8 (symbol "●"), space at x = 9, project name starts at x = 10.
+        let cell_busy_dot = buffer.cell((8, 5)).unwrap();
+        assert_eq!(cell_busy_dot.symbol(), "●");
+        assert_eq!(cell_busy_dot.fg, theme.status_busy);
+
+        // Row 2 (y = 6): proj-wait -> dot at x = 8
+        let cell_wait_dot = buffer.cell((8, 6)).unwrap();
+        assert_eq!(cell_wait_dot.symbol(), "●");
+        assert_eq!(cell_wait_dot.fg, theme.status_waiting);
+
+        // Row 3 (y = 7): proj-done -> dot at x = 8
+        let cell_done_dot = buffer.cell((8, 7)).unwrap();
+        assert_eq!(cell_done_dot.symbol(), "●");
+        assert_eq!(cell_done_dot.fg, theme.status_done);
+
+        // Row 4 (y = 8): proj-err -> dot at x = 8
+        let cell_err_dot = buffer.cell((8, 8)).unwrap();
+        assert_eq!(cell_err_dot.symbol(), "●");
+        assert_eq!(cell_err_dot.fg, theme.status_error);
+
+        // Row 5 (y = 9): proj-inactive -> spaces at x = 8 and x = 9, project name 'p' at x = 10
+        let cell_inactive_space1 = buffer.cell((8, 9)).unwrap();
+        let cell_inactive_space2 = buffer.cell((9, 9)).unwrap();
+        let cell_inactive_p = buffer.cell((10, 9)).unwrap();
+        assert_eq!(cell_inactive_space1.symbol(), " ");
+        assert_eq!(cell_inactive_space2.symbol(), " ");
+        assert_eq!(cell_inactive_p.symbol(), "p");
     }
 }

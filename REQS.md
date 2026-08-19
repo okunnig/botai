@@ -203,7 +203,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 ## 8. Interactive TUI Project Picker & Launcher Dashboard
 - **Unified Two-Panel Dashboard**:
   - Displayed when launching `botai` with no active sessions.
-  - **Left Panel (Existing Projects)**: Lists existing local project directories found in the current working directory. Press `Enter` to attach to the selected project.
+  - **Left Panel (Existing Projects)**: Lists existing local project directories found in the current working directory. Running project sessions are distinguished with a leading colored status dot indicator (`●` U+25CF) reflecting the session's live state (e.g. Busy, Waiting, Done, Error) while inactive projects display blank spacing (`  `). Press `Enter` to attach or switch focus to the selected project.
   - **Right Panel (Configured Workspaces)**: Lists all available workspaces from `config.toml`. Press `n` or `Enter` to create and launch a new project.
 - **Interactive Project Creation Modal**:
   - Floating centered modal triggered by `n` or workspace selection.
@@ -223,7 +223,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Dashboard Keybindings**:
   - `Tab` / `Left` / `Right`: Switch active panel focus.
   - `Up` / `Down`: Navigate list items within the active panel.
-  - `Enter`: Attach to selected project (Left Panel) or open creation modal (Right Panel).
+  - `Enter`: Attach/switch to selected project (Left Panel) or open creation modal (Right Panel).
   - `n`: Trigger new project modal for the selected workspace.
   - `d`: Open destroy confirmation modal for the selected project.
   - `q` / `Esc`: Quit `botai`.
@@ -243,6 +243,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - **Inline & Modal Error Feedback**: If creation fails, full diagnostic logs and error banners are retained until dismissed via `[Esc]` or `[Enter]`.
   - **Attach Existing Project Tab**:
     - Lists local project directories in CWD (directories with `AGENTS.md`).
+    - Running sessions are visually indicated with a leading colored status dot indicator (`●` U+25CF) reflecting their real-time state (`Busy`, `Waiting`, `Done`, `Error`).
     - Navigated via `Up` / `Down` / `j` / `k`.
     - **Submission**: If the project already has an active session tab, switches focus to it; otherwise spawns and attaches the project in a new session tab, adds it to the registry, closes the modal, and switches to it.
 - **Navigation & Controls**:
