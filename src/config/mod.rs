@@ -86,12 +86,17 @@ args = ["--no-auto-commits"]
 # Define named multi-repo workspaces. Each workspace specifies:
 # - description: (Optional) Human-readable summary of the workspace purpose.
 # - default_agent: (Optional) Specific agent override for this workspace.
+# - agents_md_append: (Optional) Custom instructions appended to AGENTS.md.
 # - repos: (Required) List of Git URLs, relative names in repos_dir, or absolute local paths.
 # - env: (Optional) Per-workspace environment variables injected into the agent.
 
 [workspaces.ecommerce]
 description = "E-commerce platform services"
 default_agent = "agy"
+agents_md_append = """
+- Run integration tests with `cargo test --workspace`.
+- Follow coding standards documented in the workspace.
+"""
 repos = [
     "https://github.com/example/ecommerce-api.git",
     "https://github.com/example/ecommerce-web.git",
@@ -217,6 +222,9 @@ pub struct WorkspaceConfig {
     /// Optional workspace-specific default agent override.
     #[serde(default)]
     pub default_agent: Option<String>,
+    /// Optional custom workspace instructions appended to AGENTS.md.
+    #[serde(default)]
+    pub agents_md_append: Option<String>,
     /// List of Git URLs, relative repo names, or local repository paths.
     pub repos: Vec<String>,
     /// Per-workspace environment variables injected into the agent environment.
@@ -1127,6 +1135,12 @@ env = { GREETING = "こんにちは" }
             .get_workspace("ecommerce")
             .expect("ecommerce workspace must exist in template");
         assert_eq!(ws.default_agent.as_deref(), Some("agy"));
+        assert!(ws.agents_md_append.is_some());
+        assert!(ws
+            .agents_md_append
+            .as_deref()
+            .unwrap()
+            .contains("cargo test --workspace"));
         assert_eq!(ws.repos.len(), 3);
         assert_eq!(ws.env.get("PORT"), Some(&"8080".to_string()));
     }
@@ -1242,5 +1256,49 @@ repos_dir = "/tmp/repos"
 
         let content = std::fs::read_to_string(&config_path).expect("Failed to read file");
         assert!(content.contains("default_agent = \"claude\""));
+    }
+
+    #[test]
+    fn test_parse_workspace_agents_md_append_present() {
+        let toml = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[workspaces.custom_instructions]
+description = "Workspace with instructions"
+agents_md_append = """
+### Important Rules
+- Never push directly to main.
+- Run `cargo fmt` before submitting PRs.
+"""
+repos = ["/path/to/repo"]
+"#;
+        let config = Config::load_from_str(toml).expect("Config with agents_md_append should parse");
+        let ws = config
+            .get_workspace("custom_instructions")
+            .expect("Workspace should exist");
+
+        assert!(ws.agents_md_append.is_some());
+        let instructions = ws.agents_md_append.as_deref().unwrap();
+        assert!(instructions.contains("### Important Rules"));
+        assert!(instructions.contains("Never push directly to main."));
+        assert!(instructions.contains("Run `cargo fmt` before submitting PRs."));
+    }
+
+    #[test]
+    fn test_parse_workspace_agents_md_append_omitted() {
+        let toml = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[workspaces.no_instructions]
+repos = ["/path/to/repo"]
+"#;
+        let config = Config::load_from_str(toml).expect("Config should parse");
+        let ws = config
+            .get_workspace("no_instructions")
+            .expect("Workspace should exist");
+
+        assert_eq!(ws.agents_md_append, None);
     }
 }

@@ -248,6 +248,7 @@ fn cmd_start(
         project_name: project_name.to_string(),
         workspace_name: workspace_name.to_string(),
         description: ws.description.clone(),
+        agents_md_append: ws.agents_md_append.clone(),
         repos: repo_mappings,
         env: ws.env.clone(),
         initial_prompt: prompt.map(|s| s.to_string()),

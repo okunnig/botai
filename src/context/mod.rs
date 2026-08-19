@@ -46,6 +46,8 @@ pub struct ProjectContext {
     pub workspace_name: String,
     /// Optional workspace description.
     pub description: Option<String>,
+    /// Optional custom workspace instructions appended to AGENTS.md.
+    pub agents_md_append: Option<String>,
     /// Mappings of all repositories included in this workspace/project.
     pub repos: Vec<RepoMapping>,
     /// Environment variables injected for the workspace.
@@ -60,6 +62,7 @@ impl ProjectContext {
             project_name: project_name.into(),
             workspace_name: workspace_name.into(),
             description: None,
+            agents_md_append: None,
             repos: Vec::new(),
             env: HashMap::new(),
             initial_prompt: None,
@@ -68,6 +71,11 @@ impl ProjectContext {
 
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_agents_md_append(mut self, text: impl Into<String>) -> Self {
+        self.agents_md_append = Some(text.into());
         self
     }
 
@@ -145,6 +153,16 @@ impl ContextSynthesizer {
         md.push_str("- **Multi-Repo Project**: Each subfolder corresponds to an independent Git worktree repository.\n");
         md.push_str("- **Atomic Commits**: Commit changes within each individual repository worktree as appropriate.\n");
         md.push_str("- **Execution Context**: Run build/test commands within the respective repository subdirectories.\n");
+
+        if let Some(text) = &context.agents_md_append {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                md.push('\n');
+                md.push_str("## Workspace Instructions\n\n");
+                md.push_str(trimmed);
+                md.push('\n');
+            }
+        }
 
         md
     }
@@ -321,5 +339,42 @@ mod tests {
         assert!(markdown.contains("CONFIG_PIPE"));
         assert!(markdown.contains("foo|bar|baz"));
         assert!(markdown.contains("Prompt with `code` and *markdown* syntax."));
+    }
+
+    #[test]
+    fn test_synthesize_with_agents_md_append() {
+        let context = ProjectContext::new("checkout-fix", "payments")
+            .with_description("Payments microservices")
+            .with_agents_md_append(
+                "### Guidelines\n- Always run `cargo test --all`\n- Follow conventional commits",
+            );
+
+        let markdown = ContextSynthesizer::synthesize(&context);
+
+        assert!(markdown.contains("## Multi-Repository Guidelines"));
+        assert!(markdown.contains("## Workspace Instructions\n\n### Guidelines\n- Always run `cargo test --all`\n- Follow conventional commits\n"));
+    }
+
+    #[test]
+    fn test_synthesize_without_agents_md_append() {
+        let context = ProjectContext::new("checkout-fix", "payments")
+            .with_description("Payments microservices");
+
+        let markdown = ContextSynthesizer::synthesize(&context);
+
+        assert!(markdown.contains("## Multi-Repository Guidelines"));
+        assert!(!markdown.contains("## Workspace Instructions"));
+    }
+
+    #[test]
+    fn test_synthesize_with_empty_or_whitespace_agents_md_append() {
+        let context_empty = ProjectContext::new("p1", "ws1").with_agents_md_append("");
+        let md_empty = ContextSynthesizer::synthesize(&context_empty);
+        assert!(!md_empty.contains("## Workspace Instructions"));
+
+        let context_whitespace =
+            ProjectContext::new("p2", "ws2").with_agents_md_append("   \n\t  \n  ");
+        let md_whitespace = ContextSynthesizer::synthesize(&context_whitespace);
+        assert!(!md_whitespace.contains("## Workspace Instructions"));
     }
 }

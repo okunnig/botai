@@ -297,6 +297,7 @@ pub fn run_setup_worker(
             project_name: project_name.clone(),
             workspace_name: workspace_name.clone(),
             description: ws.and_then(|w| w.description.clone()),
+            agents_md_append: ws.and_then(|w| w.agents_md_append.clone()),
             repos: repo_mappings,
             env: ws.map(|w| w.env.clone()).unwrap_or_default(),
             initial_prompt: prompt.clone(),

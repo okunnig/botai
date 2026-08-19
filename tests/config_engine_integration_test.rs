@@ -139,7 +139,10 @@ fn test_integration_init_template_lifecycle() {
     assert!(config.get_agent("agy").is_some());
     assert!(config.get_agent("copilot").is_some());
     assert!(config.get_agent("aider").is_some());
-    assert!(config.get_workspace("ecommerce").is_some());
+    let ecommerce = config
+        .get_workspace("ecommerce")
+        .expect("ecommerce workspace must exist");
+    assert!(ecommerce.agents_md_append.is_some());
 
     // 3. Re-init without force fails with AlreadyExists
     let err = Config::init_file(&config_path, false)

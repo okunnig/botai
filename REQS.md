@@ -26,7 +26,7 @@
     - **Absolute local paths** (e.g., `/home/user/code/my-repo`): Direct reference to existing local repository.
   - Sanitized flat naming inside `repos_dir` based on the repository basename.
   - Conflict detection: Errors if two different remote URLs resolve to the same folder name.
-- **Workspaces**: Define named sets of local or remote repositories.
+- **Workspaces**: Define named sets of local or remote repositories. Each workspace can specify `description`, `default_agent`, `agents_md_append` (custom workspace instructions appended to `AGENTS.md`), `repos`, and `env`.
 - **Agent Definitions**: Configurable agent launch commands, arguments, and environment variables.
 - **Configuration Template Generation (`botai init`)**:
   - Built-in generator for a fully documented, self-describing configuration file with extensive explanatory comments.
@@ -81,12 +81,17 @@ args = ["--no-auto-commits"]
 # Define named multi-repo workspaces. Each workspace specifies:
 # - description: Optional summary of the workspace.
 # - default_agent: Optional agent override specific to this workspace.
+# - agents_md_append: (Optional) Custom markdown instructions appended to AGENTS.md.
 # - repos: List of Git URLs, relative repo names in repos_dir, or absolute local paths.
 # - env: Environment variables injected into the agent session.
 
 [workspaces.ecommerce]
 description = "E-commerce platform services"
 default_agent = "agy"
+agents_md_append = """
+- Run integration tests with `cargo test --workspace`.
+- Follow coding standards documented in the workspace.
+"""
 repos = [
   "https://github.com/example/ecommerce-api.git",
   "https://github.com/example/ecommerce-web.git",
@@ -120,6 +125,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - The multi-repo structure and mapping of child worktree directories.
     - Each repository's purpose and inter-dependencies.
     - Guidance for the AI agent on navigating, building, and modifying multiple repos simultaneously.
+- **Custom Workspace Instructions (`agents_md_append`)**:
+  - Optional custom markdown instructions configured per workspace in `config.toml` via `agents_md_append`.
+  - When configured and non-empty after trimming, automatically appended to `AGENTS.md` under a dedicated `## Workspace Instructions` section.
 - **Initial Task / Prompt Seeding**:
   - `botai start <workspace> <project-name> --prompt "..."` (or `-m "..."`):
   - Injects or passes an initial task description directly to the AI agent on launch.

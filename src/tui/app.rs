@@ -748,6 +748,7 @@ impl TuiApp {
             project_name: project_name.to_string(),
             workspace_name: workspace_name.to_string(),
             description: ws.and_then(|w| w.description.clone()),
+            agents_md_append: ws.and_then(|w| w.agents_md_append.clone()),
             repos: repo_mappings,
             env: ws.map(|w| w.env.clone()).unwrap_or_default(),
             initial_prompt: prompt.map(|s| s.to_string()),
