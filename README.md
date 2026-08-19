@@ -39,24 +39,16 @@ botai init
 botai destroy my-feature-branch
 ```
 
-## Cross-Platform Compilation & Packaging
+## Release Build & Packaging
 
-Cross-compilation uses containerized compilation via `cross` in `scripts/build.sh`:
+Native release compilation and packaging is handled via `scripts/build.sh`:
 
 ```bash
-# Build all distributable artifacts (Linux, Windows, macOS)
-./scripts/build.sh all
-
-# Build platform-specific artifacts
-./scripts/build.sh linux
-./scripts/build.sh windows
-./scripts/build.sh macos
-
-# Or build a specific target triple
-./scripts/build.sh x86_64-unknown-linux-gnu
+# Build and package release binary for the current host machine
+./scripts/build.sh
 ```
 
-All distributable archives (`.tar.gz` and `.zip`) and checksum manifests (`SHA256SUMS`) are placed in the `dist/` directory.
+The script automatically detects the host operating system and architecture (`linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`, `windows-x86_64`), invokes `cargo build --release`, and packages the binary with `README.md` and `REQS.md` into `dist/botai-v<version>-<platform>.<tar.gz|zip>`. It also generates and updates SHA-256 checksums in `dist/SHA256SUMS`.
 
 ## Documentation & Requirements
 

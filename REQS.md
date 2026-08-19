@@ -292,37 +292,25 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ---
 
-## 11. Cross-Platform Compilation & Distributable Artifacts
-- **Target Matrix & Architectural Support**:
-  - **Linux (glibc)**:
-    - `x86_64-unknown-linux-gnu` (standard glibc Linux x86_64)
-    - `aarch64-unknown-linux-gnu` (glibc Linux ARM64 / aarch64)
-  - **Windows (x86_64)**:
-    - `x86_64-pc-windows-gnu` (Windows 64-bit executable `botai.exe`)
-  - **macOS (Intel & Apple Silicon)**:
-    - `x86_64-apple-darwin` (Intel 64-bit macOS)
-    - `aarch64-apple-darwin` (Apple Silicon M1/M2/M3 macOS)
-- **Containerized Cross-Compilation (`cross`)**:
-  - Strictly uses `cross` containerized builds for multi-platform compilation without polluting the host environment.
-  - Verifies `cross` is installed in `PATH` before executing builds.
-  - **`Cross.toml`**: Configures target architectures with container image definitions and environment passthroughs.
-- **Unified Build Script (`scripts/build.sh`)**:
-  - Clean, concise (~80 lines), fully self-contained bash script.
-  - **Usage Modes**:
-    - `./scripts/build.sh` or `./scripts/build.sh all`: Builds all supported targets (Linux, Windows, macOS).
-    - `./scripts/build.sh linux`: Builds Linux targets (`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`).
-    - `./scripts/build.sh windows`: Builds Windows target (`x86_64-pc-windows-gnu`).
-    - `./scripts/build.sh macos`: Builds macOS targets (`x86_64-apple-darwin`, `aarch64-apple-darwin`).
-    - `./scripts/build.sh <target-triple>`: Builds a specific target triple (e.g., `./scripts/build.sh x86_64-unknown-linux-gnu`).
+## 11. Native Compilation & Distributable Artifacts
+- **Host Platform Support**:
+  - **Linux**: `linux-x86_64`, `linux-aarch64`
+  - **Windows**: `windows-x86_64`, `windows-aarch64`
+  - **macOS**: `macos-x86_64` (Intel), `macos-aarch64` (Apple Silicon)
+- **Native Host Compilation**:
+  - Native release compilation using standard Cargo (`cargo build --release`) without requiring containers or cross-compilation tooling.
+  - Automatically identifies host operating system (`uname -s`) and architecture (`uname -m`).
+- **Build & Packaging Script (`scripts/build.sh`)**:
+  - Clean, concise, fully self-contained executable bash script (`chmod +x scripts/build.sh`).
+  - Automatically detects host OS (`linux`, `macos`, `windows`) and CPU architecture (`x86_64`, `aarch64`).
+  - Executes `cargo build --release` and discovers the compiled release binary (`botai` or `botai.exe`).
+  - Stages and packages the release binary, `README.md`, and `REQS.md` into the distribution directory (`dist/`).
 - **Packaging Format & Distributable Artifacts**:
   - Linux / macOS: `.tar.gz` archive containing binary (`botai`), `README.md`, and `REQS.md`.
   - Windows: `.zip` archive containing `botai.exe`, `README.md`, and `REQS.md`.
-  - `dist/botai-v<version>-linux-x86_64.tar.gz`
-  - `dist/botai-v<version>-linux-aarch64.tar.gz`
-  - `dist/botai-v<version>-windows-x86_64.zip`
-  - `dist/botai-v<version>-macos-x86_64.tar.gz`
-  - `dist/botai-v<version>-macos-aarch64.tar.gz`
-  - `dist/SHA256SUMS`: Cryptographic SHA-256 verification manifest automatically generated in `dist/`.
+  - Naming schema: `dist/botai-v<version>-<platform>.<tar.gz|zip>` (e.g., `dist/botai-v0.1.0-linux-x86_64.tar.gz`).
+  - `dist/SHA256SUMS`: Cryptographic SHA-256 verification manifest automatically generated/updated in `dist/`.
+
 
 
 
