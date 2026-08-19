@@ -41,16 +41,19 @@ botai destroy my-feature-branch
 
 ## Cross-Platform Compilation & Packaging
 
-Cross-compilation scripts are located in `scripts/` and use containerized compilation via `cross` and Podman/Docker:
+Cross-compilation uses containerized compilation via `cross` in `scripts/build.sh`:
 
 ```bash
 # Build all distributable artifacts (Linux, Windows, macOS)
-./scripts/build-all.sh --all
+./scripts/build.sh all
 
-# Build specific platform artifacts
-./scripts/build-linux.sh
-./scripts/build-windows.sh
-./scripts/build-macos.sh
+# Build platform-specific artifacts
+./scripts/build.sh linux
+./scripts/build.sh windows
+./scripts/build.sh macos
+
+# Or build a specific target triple
+./scripts/build.sh x86_64-unknown-linux-gnu
 ```
 
 All distributable archives (`.tar.gz` and `.zip`) and checksum manifests (`SHA256SUMS`) are placed in the `dist/` directory.
