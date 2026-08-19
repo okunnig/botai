@@ -412,19 +412,19 @@ impl TuiApp {
         }
         local_projects.sort();
 
-        let mut workspaces = Vec::new();
+        let mut templates = Vec::new();
         if let Some(cfg) = &self.config {
-            workspaces = cfg.workspaces.keys().cloned().collect();
+            templates = cfg.templates.keys().cloned().collect();
         }
-        workspaces.sort();
+        templates.sort();
 
-        let active_ws = self
+        let active_tpl = self
             .registry
             .active_session()
-            .map(|s| s.workspace_name().to_string());
+            .map(|s| s.template_name().to_string());
 
         let running = self.running_sessions_map();
-        let launcher = QuickLauncherState::new(workspaces, local_projects, active_ws.as_deref())
+        let launcher = QuickLauncherState::new(templates, local_projects, active_tpl.as_deref())
             .with_running_sessions(running);
         self.quick_launcher = Some(launcher);
     }
@@ -438,12 +438,12 @@ impl TuiApp {
                     self.quick_launcher = None;
                 }
                 QuickLauncherAction::Create {
-                    workspace,
+                    template,
                     project,
                     prompt,
                 } => {
                     self.quick_launcher = None;
-                    self.start_project_creation(&workspace, &project, prompt.as_deref());
+                    self.start_project_creation(&template, &project, prompt.as_deref());
                 }
                 QuickLauncherAction::Attach(project) => {
                     if let Some(pos) = self
@@ -454,20 +454,10 @@ impl TuiApp {
                     {
                         let _ = self.registry.set_active_index(pos);
                         self.showing_dashboard = false;
-                        self.quick_launcher = None;
-                    } else {
-                        match self.attach_project(&project) {
-                            Ok(()) => {
-                                let new_idx = self.registry.len().saturating_sub(1);
-                                let _ = self.registry.set_active_index(new_idx);
-                                self.showing_dashboard = false;
-                                self.quick_launcher = None;
-                            }
-                            Err(err) => {
-                                launcher.set_error(err.to_string());
-                                self.quick_launcher = Some(launcher);
-                            }
-                        }
+                    } else if self.attach_project(&project).is_ok() {
+                        let new_idx = self.registry.len().saturating_sub(1);
+                        let _ = self.registry.set_active_index(new_idx);
+                        self.showing_dashboard = false;
                     }
                 }
                 QuickLauncherAction::None => {
@@ -508,11 +498,11 @@ impl TuiApp {
                 }
             }
             DashboardAction::CreateProject {
-                workspace,
+                template,
                 project,
                 prompt,
             } => {
-                self.start_project_creation(&workspace, &project, prompt.as_deref());
+                self.start_project_creation(&template, &project, prompt.as_deref());
             }
             DashboardAction::Destroy(project) => {
                 if let Some(session) = self.registry.get_by_project(&project) {
@@ -554,14 +544,14 @@ impl TuiApp {
     /// Starts asynchronous project creation on a background worker thread and activates `setup_modal`.
     pub fn start_project_creation(
         &mut self,
-        workspace_name: &str,
+        template_name: &str,
         project_name: &str,
         prompt: Option<&str>,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
         let modal = SetupModalState::new(
             project_name,
-            workspace_name,
+            template_name,
             prompt.map(String::from),
             rx,
         );
@@ -585,13 +575,13 @@ impl TuiApp {
             .unwrap_or_else(|| PathBuf::from("."));
         let config = self.config.clone();
         let viewport_size = self.viewport_size.unwrap_or((100, 30));
-        let ws_name = workspace_name.to_string();
+        let tpl_name = template_name.to_string();
         let proj_name = project_name.to_string();
         let prompt_owned = prompt.map(String::from);
 
         std::thread::spawn(move || {
             crate::tui::setup_modal::run_setup_worker(
-                ws_name,
+                tpl_name,
                 proj_name,
                 prompt_owned,
                 config,
@@ -672,7 +662,7 @@ impl TuiApp {
     /// Creates worktrees, synthesizes `AGENTS.md`, launches the agent PTY session, and registers it.
     pub fn create_and_start_project(
         &mut self,
-        workspace_name: &str,
+        template_name: &str,
         project_name: &str,
         prompt: Option<&str>,
     ) -> anyhow::Result<()> {
@@ -695,8 +685,8 @@ impl TuiApp {
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
         let config = self.config.as_ref().or(default_config.as_ref());
 
-        let ws = config.and_then(|c| c.get_workspace(workspace_name));
-        let agent_name = ws
+        let tpl = config.and_then(|c| c.get_template(template_name));
+        let agent_name = tpl
             .and_then(|w| w.default_agent.as_deref())
             .or_else(|| config.map(|c| c.default_agent.as_str()))
             .unwrap_or("claude");
@@ -724,7 +714,7 @@ impl TuiApp {
 
         let mut repo_mappings = Vec::new();
         if let Some(cfg) = config {
-            if let Ok(resolved_repos) = cfg.resolve_workspace_repos(workspace_name) {
+            if let Ok(resolved_repos) = cfg.resolve_template_repos(template_name) {
                 for repo in resolved_repos {
                     if !repo.exists_locally() {
                         if let Some(url) = &repo.clone_url {
@@ -746,11 +736,11 @@ impl TuiApp {
 
         let project_context = ProjectContext {
             project_name: project_name.to_string(),
-            workspace_name: workspace_name.to_string(),
-            description: ws.and_then(|w| w.description.clone()),
-            agents_md_append: ws.and_then(|w| w.agents_md_append.clone()),
+            template_name: template_name.to_string(),
+            description: tpl.and_then(|w| w.description.clone()),
+            agents_md_append: tpl.and_then(|w| w.agents_md_append.clone()),
             repos: repo_mappings,
-            env: ws.map(|w| w.env.clone()).unwrap_or_default(),
+            env: tpl.map(|w| w.env.clone()).unwrap_or_default(),
             initial_prompt: prompt.map(|s| s.to_string()),
         };
 
@@ -766,15 +756,15 @@ impl TuiApp {
             pty_config = pty_config.with_env(k, v);
         }
 
-        if let Some(ws) = ws {
-            for (k, v) in &ws.env {
+        if let Some(tpl) = tpl {
+            for (k, v) in &tpl.env {
                 pty_config = pty_config.with_env(k, v);
             }
         }
 
         let pty = PtySession::spawn(pty_config)?;
         let vt = VtScreen::new(cols, rows);
-        let mut ps = ProjectSession::new(project_name, workspace_name, agent_name);
+        let mut ps = ProjectSession::new(project_name, template_name, agent_name);
         if let Some(p) = prompt {
             ps = ps.with_prompt(p);
         }
@@ -808,7 +798,7 @@ impl TuiApp {
         Ok(())
     }
 
-    /// Refreshes the local projects and workspaces list within the dashboard.
+    /// Refreshes the local projects and templates list within the dashboard.
     pub fn refresh_dashboard(&mut self) {
         if self.dashboard.is_some() {
             let cwd = self
@@ -827,7 +817,7 @@ impl TuiApp {
                             theme: "tokyo-night".to_string(),
                             repos_dir: PathBuf::from(".botai_repos"),
                             agents: HashMap::new(),
-                            workspaces: HashMap::new(),
+                            templates: HashMap::new(),
                         });
                 DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
             };
@@ -1007,7 +997,7 @@ repos_dir = "/tmp/repos"
 command = "sh"
 args = ["-c", "exit 0"]
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 repos = []
 "#;
         let config = Config::load_from_str(config_toml).unwrap();
@@ -1036,7 +1026,7 @@ repos = []
         assert!(!app.leader_active);
         assert!(app.quick_launcher.is_some());
         let launcher = app.quick_launcher.as_ref().unwrap();
-        assert_eq!(launcher.workspaces, vec!["ecommerce".to_string()]);
+        assert_eq!(launcher.templates, vec!["ecommerce".to_string()]);
     }
 
     #[test]
@@ -1058,7 +1048,7 @@ repos_dir = "/tmp/repos"
 command = "{}"
 args = {}
 
-[workspaces.backend]
+[templates.backend]
 repos = []
 "#,
             cmd, args
@@ -1158,7 +1148,7 @@ repos_dir = "/tmp/repos"
 command = "{}"
 args = {}
 
-[workspaces.ws1]
+[templates.ws1]
 repos = []
 "#,
             cmd, args
@@ -1272,7 +1262,7 @@ repos_dir = "/tmp/repos"
 command = "{}"
 args = {}
 
-[workspaces.backend]
+[templates.backend]
 repos = []
 "#,
             cmd, args
@@ -1739,7 +1729,7 @@ repos_dir = "{}/repos"
 command = "{}"
 args = []
 
-[workspaces.test_ws]
+[templates.test_ws]
 repos = []
 "#,
             cwd.display().to_string().replace('\\', "/"),
@@ -1769,7 +1759,7 @@ repos = []
         assert_eq!(app.registry.len(), 1);
         let active = app.registry.active_session().unwrap();
         assert_eq!(active.project_name(), "async-proj");
-        assert_eq!(active.workspace_name(), "test_ws");
+        assert_eq!(active.template_name(), "test_ws");
         assert!(cwd.join("async-proj").join("AGENTS.md").exists());
     }
 

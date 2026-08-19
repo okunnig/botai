@@ -31,7 +31,7 @@ fn test_integration_destroy_confirmation_modal_lifecycle() {
     fs::write(proj_del.join("AGENTS.md"), "# Delete").unwrap();
 
     let mut state = DashboardState::new(
-        vec!["workspace-a".into()],
+        vec!["template-a".into()],
         vec!["service-del".into(), "service-keep".into()],
     );
     state.active_panel = ActivePanel::Projects;
@@ -112,7 +112,7 @@ repos_dir = "{}/repos"
 command = "{}"
 args = []
 
-[workspaces.cloud_ws]
+[templates.cloud_ws]
 repos = []
 "#,
         cwd.display().to_string().replace('\\', "/"),
@@ -129,7 +129,7 @@ repos = []
 
     // Trigger project creation from dashboard action
     app.handle_dashboard_action(DashboardAction::CreateProject {
-        workspace: "cloud_ws".to_string(),
+        template: "cloud_ws".to_string(),
         project: "microservice-alpha".to_string(),
         prompt: Some("Initialize API endpoints".to_string()),
     });
@@ -137,7 +137,7 @@ repos = []
     assert!(app.setup_modal.is_some());
     let initial_modal = app.setup_modal.as_ref().unwrap();
     assert_eq!(initial_modal.project_name, "microservice-alpha");
-    assert_eq!(initial_modal.workspace_name, "cloud_ws");
+    assert_eq!(initial_modal.template_name, "cloud_ws");
     assert_eq!(initial_modal.prompt.as_deref(), Some("Initialize API endpoints"));
 
     // Poll until completion
@@ -151,7 +151,7 @@ repos = []
     assert_eq!(app.registry.len(), 1);
     let active = app.registry.active_session().unwrap();
     assert_eq!(active.project_name(), "microservice-alpha");
-    assert_eq!(active.workspace_name(), "cloud_ws");
+    assert_eq!(active.template_name(), "cloud_ws");
     assert_eq!(
         active.project_session.prompt.as_deref(),
         Some("Initialize API endpoints")
@@ -178,7 +178,7 @@ repos_dir = "{}/repos"
 command = "sh"
 args = []
 
-[workspaces.bad_ws]
+[templates.bad_ws]
 repos = ["nonexistent-repo-that-does-not-exist"]
 "#,
         cwd.display().to_string().replace('\\', "/"),

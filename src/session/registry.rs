@@ -30,9 +30,14 @@ impl SessionEntry {
         &self.project_session.project_name
     }
 
-    /// Returns the workspace name.
+    /// Returns the template name.
+    pub fn template_name(&self) -> &str {
+        &self.project_session.template_name
+    }
+
+    /// Backward compatibility alias for template_name.
     pub fn workspace_name(&self) -> &str {
-        &self.project_session.workspace_name
+        self.template_name()
     }
 
     /// Returns the agent CLI tool name.
@@ -305,7 +310,7 @@ mod tests {
 
         let session = registry.get(&id).expect("Session not found by ID");
         assert_eq!(session.project_name(), "frontend-ui");
-        assert_eq!(session.workspace_name(), "web-app");
+        assert_eq!(session.template_name(), "web-app");
         assert_eq!(session.agent_name(), "claude");
         assert_eq!(session.id(), id);
 

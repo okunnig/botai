@@ -51,7 +51,7 @@ repos_dir = "/tmp/repos"
 [agents.claude]
 command = "claude"
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 repos = ["/tmp/repos/shop"]
 "#;
     fs::write(&config_path, toml).expect("write config");

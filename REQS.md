@@ -11,8 +11,8 @@
 
 ---
 
-## 2. Configuration & Workspace Management
-- **Declarative TOML Configuration**: Workspaces and agent tool definitions are configured via a user configuration file:
+## 2. Configuration & Template Management
+- **Declarative TOML Configuration**: Project templates and agent tool definitions are configured via a user configuration file:
   - Linux / macOS: `~/.config/botai/config.toml` (or `$XDG_CONFIG_HOME/botai/config.toml`)
   - Windows: `%APPDATA%\botai\config.toml`
 - **Central Repositories Directory (`repos_dir`)**:
@@ -20,17 +20,17 @@
   - Does not assume any implicit default directory; must be explicitly configured in `config.toml` (e.g. `repos_dir = "~/.local/share/botai/repos"` or `repos_dir = "~/code/repos"`).
   - Can be overridden at runtime via the `BOTAI_REPOS_DIR` environment variable.
 - **Hybrid Repository Declarations**:
-  - Repositories in `workspaces.<name>.repos` support:
+  - Repositories in `templates.<name>.repos` support:
     - **Remote Git URLs** (`https://...`, `git@...`, `ssh://...`): Automatically cloned into `<repos_dir>/<repo_name>`.
     - **Relative repo names** (e.g., `"ecommerce-api"`): Resolved relative to `repos_dir` (`<repos_dir>/ecommerce-api`).
     - **Absolute local paths** (e.g., `/home/user/code/my-repo`): Direct reference to existing local repository.
   - Sanitized flat naming inside `repos_dir` based on the repository basename.
   - Conflict detection: Errors if two different remote URLs resolve to the same folder name.
-- **Workspaces**: Define named sets of local or remote repositories. Each workspace can specify `description`, `default_agent`, `agents_md_append` (custom workspace instructions appended to `AGENTS.md`), `repos`, and `env`.
+- **Templates / Project Templates**: Define named sets of local or remote repositories. Each template can specify `description`, `default_agent`, `agents_md_append` (custom template instructions appended to `AGENTS.md`), `repos`, and `env`.
 - **Agent Definitions**: Configurable agent launch commands, arguments, and environment variables.
 - **Configuration Template Generation (`botai init`)**:
   - Built-in generator for a fully documented, self-describing configuration file with extensive explanatory comments.
-  - Serves as an interactive starting template and inline documentation for all supported agents, workspaces, repos, and environment variable configurations.
+  - Serves as an interactive starting template and inline documentation for all supported agents, project templates, repos, and environment variable configurations.
   - Automatically targets the standard platform configuration location with safe directory creation and overwrite guards.
 
 ### Annotated `config.toml` Template
@@ -43,7 +43,7 @@
 #   - Windows:     %APPDATA%\botai\config.toml
 # ==============================================================================
 
-# Global default AI agent tool to use when a workspace does not specify an override.
+# Global default AI agent tool to use when a template does not specify an override.
 default_agent = "claude"
 
 # Color theme for the TUI interface ("tokyo-night", "catppuccin", "cyberpunk", "gruvbox", "monochrome", "ansi").
@@ -76,21 +76,21 @@ command = "aider"
 args = ["--no-auto-commits"]
 
 # ------------------------------------------------------------------------------
-# Workspaces
+# Project Templates
 # ------------------------------------------------------------------------------
-# Define named multi-repo workspaces. Each workspace specifies:
-# - description: Optional summary of the workspace.
-# - default_agent: Optional agent override specific to this workspace.
+# Define named multi-repo project templates. Each template specifies:
+# - description: Optional summary of the template.
+# - default_agent: Optional agent override specific to this template.
 # - agents_md_append: (Optional) Custom markdown instructions appended to AGENTS.md.
 # - repos: List of Git URLs, relative repo names in repos_dir, or absolute local paths.
 # - env: Environment variables injected into the agent session.
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 description = "E-commerce platform services"
 default_agent = "agy"
 agents_md_append = """
 - Run integration tests with `cargo test --workspace`.
-- Follow coding standards documented in the workspace.
+- Follow coding standards documented in the template.
 """
 repos = [
   "https://github.com/example/ecommerce-api.git",
@@ -103,18 +103,18 @@ env = { PORT = "8080", NODE_ENV = "development" }
 ---
 
 ## 3. Project Creation & Git Worktree Lifecycle
-- **Project Structure**: When starting a project for a workspace, `botai` creates a project root directory in the current working directory (`CWD/<project_name>`).
+- **Project Structure**: When starting a project for a template, `botai` creates a project root directory in the current working directory (`CWD/<project_name>`).
 - **Automatic On-Demand Cloning**:
   - Missing repositories in `repos_dir` are automatically cloned on-demand before worktree creation.
   - If a clone fails (e.g. invalid URL, authentication failure), project initialization cleanly rolls back partially created directories.
 - **Best-Effort Upstream Fetching**:
   - Performs a best-effort `git fetch origin` for cached repositories to discover upstream default branch changes.
   - Branches worktrees off `origin/<default_branch>` when available, or falls back to local default branch if offline.
-- **Worktrees**: For every repository defined in the workspace:
+- **Worktrees**: For every repository defined in the template:
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
   - Checks out a new branch named `<project_name>`.
   - **Strict Branching Strategy**: Branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
-  - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the workspace repositories or if `<project_name>` directory exists.
+  - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the template repositories or if `<project_name>` directory exists.
 - **Agent Execution**: Spawns a single agent CLI instance at the project root (`CWD/<project_name>`), providing access to all worktree subdirectories.
 
 ---
@@ -125,11 +125,11 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - The multi-repo structure and mapping of child worktree directories.
     - Each repository's purpose and inter-dependencies.
     - Guidance for the AI agent on navigating, building, and modifying multiple repos simultaneously.
-- **Custom Workspace Instructions (`agents_md_append`)**:
-  - Optional custom markdown instructions configured per workspace in `config.toml` via `agents_md_append`.
-  - When configured and non-empty after trimming, automatically appended to `AGENTS.md` under a dedicated `## Workspace Instructions` section.
+- **Custom Template Instructions (`agents_md_append`)**:
+  - Optional custom markdown instructions configured per template in `config.toml` via `agents_md_append`.
+  - When configured and non-empty after trimming, automatically appended to `AGENTS.md` under a dedicated `## Template Instructions` section.
 - **Initial Task / Prompt Seeding**:
-  - `botai start <workspace> <project-name> --prompt "..."` (or `-m "..."`):
+  - `botai start <template> <project-name> --prompt "..."` (or `-m "..."`):
   - Injects or passes an initial task description directly to the AI agent on launch.
 
 ---
@@ -168,7 +168,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Detaching from an active session (`Ctrl + Space` then `d`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
     - When launched directly from CLI (`botai start` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
-- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, workspace, key hints, and a visible `[LEADER]` mode indicator when active.
+- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, template, key hints, and a visible `[LEADER]` mode indicator when active.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
     - `Ctrl + Space` then `1` .. `9`: Directly switch to project session 1 to 9.
@@ -184,17 +184,17 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 7. CLI Commands & Lifecycle Operations
 - **Default (No Arguments)**: Launching `botai` without arguments opens the interactive TUI project switcher / dashboard.
-- **`botai start <workspace> <project-name> [--agent <agent>] [--prompt <prompt>]`**:
+- **`botai start <template> <project-name> [--agent <agent>] [--prompt <prompt>]`**:
   - Validates repository states and branch names.
   - Clones missing remote repositories to `repos_dir` and performs best-effort upstream fetch.
   - Creates project directory and git worktrees.
   - Generates multi-repo `AGENTS.md` context file.
   - Launches the agent CLI (with initial prompt if provided) and drops user into the interactive TUI session.
-- **`botai sync [workspace]`**:
-  - Pre-clones missing repositories and updates existing cached repositories across all or a specific workspace.
+- **`botai sync [template]`**:
+  - Pre-clones missing repositories and updates existing cached repositories across all or a specific template.
   - Clones missing repositories to `repos_dir` if needed.
 - **`botai attach <project-name>`**: Re-attaches to an ongoing project session.
-- **`botai list`**: Lists configured workspaces, repositories with clone/cached status, active projects, worktrees, and running sessions.
+- **`botai list`**: Lists configured templates, repositories with clone/cached status, active projects, worktrees, and running sessions.
 - **`botai init [--force] [--stdout]`**:
   - Generates an annotated configuration template serving as both documentation and an editable starter configuration.
   - Defaults to writing to standard platform configuration path (`~/.config/botai/config.toml` or `%APPDATA%\botai\config.toml`), or the custom file passed via global `--config <FILE>`.
@@ -220,9 +220,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Unified Two-Panel Dashboard**:
   - Displayed when launching `botai` with no active sessions, positioned below the top header status bar.
   - **Left Panel (Existing Projects)**: Lists existing local project directories found in the current working directory. Running project sessions are distinguished with a leading colored status dot indicator (`●` U+25CF) reflecting the session's live state (e.g. Busy, Waiting, Done, Error) while inactive projects display blank spacing (`  `). Press `Enter` to attach or switch focus to the selected project.
-  - **Right Panel (Configured Workspaces)**: Lists all available workspaces from `config.toml`. Press `n` or `Enter` to create and launch a new project.
+  - **Right Panel (Project Templates)**: Lists all available project templates from `config.toml`. Press `n` or `Enter` to create and launch a new project.
 - **Interactive Project Creation Modal**:
-  - Floating centered modal triggered by `n` or workspace selection.
+  - Floating centered modal triggered by `n` or template selection.
   - Input fields for `Project Name:` and optional `Initial Prompt:`.
   - On submission (`Enter`), transitions smoothly into the **Asynchronous Live Setup Progress & Log Modal**.
 - **Asynchronous Live Setup Progress & Log Modal**:
@@ -240,7 +240,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `Tab` / `Left` / `Right`: Switch active panel focus.
   - `Up` / `Down`: Navigate list items within the active panel.
   - `Enter`: Attach/switch to selected project (Left Panel) or open creation modal (Right Panel).
-  - `n`: Trigger new project modal for the selected workspace.
+  - `n`: Trigger new project modal for the selected template.
   - `d`: Open destroy confirmation modal for the selected project.
   - `q` / `Esc`: Quit `botai`.
 
@@ -252,7 +252,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Renders a floating modal centered over the active terminal view without interrupting background PTY reading or activity tracking.
 - **Tabbed Modal Views**:
   - **Create New Project Tab**:
-    - **Workspace Selector**: Defaults to the active project's workspace (or the first configured workspace); cycled using `Left` / `Right`.
+    - **Template Selector**: Defaults to the active project's template (or the first configured template); cycled using `Left` / `Right`.
     - **Project Name Input**: Text entry field with interactive editing.
     - **Initial Prompt Input**: Optional text entry field for initial task instruction.
     - **Submission**: On `Enter`, closes the quick launcher and transitions immediately into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker to execute repository cloning, worktree creation, `AGENTS.md` context synthesis, and agent PTY launching without freezing the active session.
@@ -264,7 +264,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - **Submission**: If the project already has an active session tab, switches focus to it; otherwise spawns and attaches the project in a new session tab, adds it to the registry, closes the modal, and switches to it.
 - **Navigation & Controls**:
   - `Tab` / `BackTab` (`Shift+Tab`): Move focus between modal tabs and form fields.
-  - `Left` / `Right`: Switch between 'Create New' and 'Attach Existing' tabs when tab bar is focused, or cycle workspaces when workspace field is focused.
+  - `Left` / `Right`: Switch between 'Create New' and 'Attach Existing' tabs when tab bar is focused, or cycle templates when template field is focused.
   - `Enter`: Submit create or attach action.
   - `Esc`: Dismiss modal and return focus to active terminal PTY.
 

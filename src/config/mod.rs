@@ -20,8 +20,8 @@ pub enum ConfigError {
     #[error("Configuration file already exists at '{0}'. Use --force to overwrite.")]
     AlreadyExists(PathBuf),
 
-    #[error("Workspace '{0}' not found in configuration")]
-    WorkspaceNotFound(String),
+    #[error("Template '{0}' not found in configuration")]
+    TemplateNotFound(String),
 
     #[error("Agent '{0}' not found in configuration")]
     AgentNotFound(String),
@@ -29,14 +29,18 @@ pub enum ConfigError {
     #[error("Could not determine config directory")]
     ConfigDirNotFound,
 
-    #[error("Repository collision in workspace '{workspace}': repository '{name}' is defined multiple times with conflicting sources '{source1}' and '{source2}'")]
+    #[error("Repository collision in template '{template}': repository '{name}' is defined multiple times with conflicting sources '{source1}' and '{source2}'")]
     RepoCollision {
-        workspace: String,
+        template: String,
         name: String,
         source1: String,
         source2: String,
     },
 }
+
+/// Backward compatibility alias for ConfigError::TemplateNotFound.
+#[allow(non_upper_case_globals)]
+pub type WorkspaceNotFound = ConfigError;
 
 /// Default template content for `config.toml` with rich explanatory comments.
 pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# ==============================================================================
@@ -47,7 +51,7 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# =================================
 #   - Windows:     %APPDATA%\botai\config.toml
 # ==============================================================================
 
-# Global default AI agent tool to use when a workspace does not specify an override.
+# Global default AI agent tool to use when a template does not specify an override.
 default_agent = "claude"
 
 # Color theme for the TUI interface ("tokyo-night", "catppuccin", "cyberpunk", "gruvbox", "monochrome", "ansi").
@@ -81,21 +85,21 @@ command = "aider"
 args = ["--no-auto-commits"]
 
 # ------------------------------------------------------------------------------
-# Workspaces
+# Project Templates
 # ------------------------------------------------------------------------------
-# Define named multi-repo workspaces. Each workspace specifies:
-# - description: (Optional) Human-readable summary of the workspace purpose.
-# - default_agent: (Optional) Specific agent override for this workspace.
+# Define named multi-repo templates. Each template specifies:
+# - description: (Optional) Human-readable summary of the template purpose.
+# - default_agent: (Optional) Specific agent override for this template.
 # - agents_md_append: (Optional) Custom instructions appended to AGENTS.md.
 # - repos: (Required) List of Git URLs, relative names in repos_dir, or absolute local paths.
-# - env: (Optional) Per-workspace environment variables injected into the agent.
+# - env: (Optional) Per-template environment variables injected into the agent.
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 description = "E-commerce platform services"
 default_agent = "agy"
 agents_md_append = """
 - Run integration tests with `cargo test --workspace`.
-- Follow coding standards documented in the workspace.
+- Follow coding standards documented in the template.
 """
 repos = [
     "https://github.com/example/ecommerce-api.git",
@@ -180,7 +184,7 @@ pub fn derive_repo_name(entry: &str) -> String {
     }
 }
 
-/// Information about a resolved repository within a workspace.
+/// Information about a resolved repository within a template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedRepo {
     /// Directory / repository name (e.g. "ecommerce-api").
@@ -213,24 +217,27 @@ pub struct AgentConfig {
     pub env: HashMap<String, String>,
 }
 
-/// Configuration for a workspace containing multiple repositories.
+/// Configuration for a project template containing multiple repositories.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceConfig {
-    /// Optional human-readable description of the workspace.
+pub struct TemplateConfig {
+    /// Optional human-readable description of the template.
     #[serde(default)]
     pub description: Option<String>,
-    /// Optional workspace-specific default agent override.
+    /// Optional template-specific default agent override.
     #[serde(default)]
     pub default_agent: Option<String>,
-    /// Optional custom workspace instructions appended to AGENTS.md.
+    /// Optional custom template instructions appended to AGENTS.md.
     #[serde(default)]
     pub agents_md_append: Option<String>,
     /// List of Git URLs, relative repo names, or local repository paths.
     pub repos: Vec<String>,
-    /// Per-workspace environment variables injected into the agent environment.
+    /// Per-template environment variables injected into the agent environment.
     #[serde(default)]
     pub env: HashMap<String, String>,
 }
+
+/// Backward compatibility alias for `TemplateConfig`.
+pub type WorkspaceConfig = TemplateConfig;
 
 fn default_theme() -> String {
     "tokyo-night".to_string()
@@ -249,12 +256,17 @@ pub struct Config {
     /// Defined agent tools.
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
-    /// Defined workspaces.
-    #[serde(default)]
-    pub workspaces: HashMap<String, WorkspaceConfig>,
+    /// Defined project templates.
+    #[serde(default, alias = "workspaces")]
+    pub templates: HashMap<String, TemplateConfig>,
 }
 
 impl Config {
+    /// Backward compatibility accessor for `templates`.
+    #[inline]
+    pub fn workspaces(&self) -> &HashMap<String, TemplateConfig> {
+        &self.templates
+    }
     /// Returns the resolved `Theme` palette configured for the application.
     pub fn theme(&self) -> Theme {
         Theme::from_name(&self.theme)
@@ -360,21 +372,21 @@ impl Config {
         }
     }
 
-    /// Resolves and validates all repositories declared in a given workspace.
-    pub fn resolve_workspace_repos(&self, workspace_name: &str) -> Result<Vec<ResolvedRepo>, ConfigError> {
-        let ws = self
-            .get_workspace(workspace_name)
-            .ok_or_else(|| ConfigError::WorkspaceNotFound(workspace_name.to_string()))?;
+    /// Resolves and validates all repositories declared in a given template.
+    pub fn resolve_template_repos(&self, template_name: &str) -> Result<Vec<ResolvedRepo>, ConfigError> {
+        let tpl = self
+            .get_template(template_name)
+            .ok_or_else(|| ConfigError::TemplateNotFound(template_name.to_string()))?;
 
         let mut resolved = Vec::new();
         let mut seen_names: HashMap<String, String> = HashMap::new();
 
-        for repo_entry in &ws.repos {
+        for repo_entry in &tpl.repos {
             let res = self.resolve_repo(repo_entry);
             if let Some(prev_entry) = seen_names.get(&res.name) {
                 if prev_entry != repo_entry {
                     return Err(ConfigError::RepoCollision {
-                        workspace: workspace_name.to_string(),
+                        template: template_name.to_string(),
                         name: res.name.clone(),
                         source1: prev_entry.clone(),
                         source2: repo_entry.clone(),
@@ -389,9 +401,19 @@ impl Config {
         Ok(resolved)
     }
 
-    /// Retrieves a workspace configuration by name.
-    pub fn get_workspace(&self, name: &str) -> Option<&WorkspaceConfig> {
-        self.workspaces.get(name)
+    /// Alias for `resolve_template_repos` for backward compatibility.
+    pub fn resolve_workspace_repos(&self, workspace_name: &str) -> Result<Vec<ResolvedRepo>, ConfigError> {
+        self.resolve_template_repos(workspace_name)
+    }
+
+    /// Retrieves a template configuration by name.
+    pub fn get_template(&self, name: &str) -> Option<&TemplateConfig> {
+        self.templates.get(name)
+    }
+
+    /// Alias for `get_template` for backward compatibility.
+    pub fn get_workspace(&self, name: &str) -> Option<&TemplateConfig> {
+        self.get_template(name)
     }
 
     /// Retrieves an agent configuration by name.
@@ -399,28 +421,36 @@ impl Config {
         self.agents.get(name)
     }
 
-    /// Resolves the effective agent configuration for a given workspace.
+    /// Resolves the effective agent configuration for a given template.
     ///
-    /// If the workspace specifies a `default_agent`, that agent is looked up.
+    /// If the template specifies a `default_agent`, that agent is looked up.
     /// Otherwise, falls back to the global `default_agent`.
     ///
-    /// Returns `ConfigError::WorkspaceNotFound` if the workspace does not exist.
+    /// Returns `ConfigError::TemplateNotFound` if the template does not exist.
     /// Returns `ConfigError::AgentNotFound` if the target agent definition does not exist.
-    pub fn resolve_agent_for_workspace(
+    pub fn resolve_agent_for_template(
         &self,
-        workspace_name: &str,
+        template_name: &str,
     ) -> Result<&AgentConfig, ConfigError> {
-        let workspace = self
-            .get_workspace(workspace_name)
-            .ok_or_else(|| ConfigError::WorkspaceNotFound(workspace_name.to_string()))?;
+        let template = self
+            .get_template(template_name)
+            .ok_or_else(|| ConfigError::TemplateNotFound(template_name.to_string()))?;
 
-        let agent_name = workspace
+        let agent_name = template
             .default_agent
             .as_deref()
             .unwrap_or(&self.default_agent);
 
         self.get_agent(agent_name)
             .ok_or_else(|| ConfigError::AgentNotFound(agent_name.to_string()))
+    }
+
+    /// Alias for `resolve_agent_for_template` for backward compatibility.
+    pub fn resolve_agent_for_workspace(
+        &self,
+        workspace_name: &str,
+    ) -> Result<&AgentConfig, ConfigError> {
+        self.resolve_agent_for_template(workspace_name)
     }
 }
 
@@ -447,7 +477,7 @@ args = ["--verbose"]
 command = "gh"
 args = ["copilot", "suggest"]
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 description = "E-commerce platform services"
 default_agent = "agy"
 repos = [
@@ -457,7 +487,7 @@ repos = [
 ]
 env = { PORT = "8080", NODE_ENV = "development" }
 
-[workspaces.analytics]
+[templates.analytics]
 description = "Analytics pipeline"
 repos = [
     "/home/user/code/analytics-core"
@@ -472,7 +502,7 @@ repos = [
         assert_eq!(config.default_agent, "claude");
         assert_eq!(config.repos_dir, PathBuf::from("/tmp/botai_repos"));
         assert_eq!(config.agents.len(), 3);
-        assert_eq!(config.workspaces.len(), 2);
+        assert_eq!(config.templates.len(), 2);
 
         // Verify agent 'claude'
         let claude = config
@@ -491,10 +521,10 @@ repos = [
         assert_eq!(agy.args, vec!["--verbose".to_string()]);
         assert!(agy.env.is_empty());
 
-        // Verify workspace 'ecommerce'
+        // Verify template 'ecommerce'
         let ecommerce = config
-            .get_workspace("ecommerce")
-            .expect("Workspace 'ecommerce' should exist");
+            .get_template("ecommerce")
+            .expect("Template 'ecommerce' should exist");
         assert_eq!(
             ecommerce.description.as_deref(),
             Some("E-commerce platform services")
@@ -514,10 +544,10 @@ repos = [
             Some(&"development".to_string())
         );
 
-        // Verify workspace 'analytics' (omits default_agent and env)
+        // Verify template 'analytics' (omits default_agent and env)
         let analytics = config
-            .get_workspace("analytics")
-            .expect("Workspace 'analytics' should exist");
+            .get_template("analytics")
+            .expect("Template 'analytics' should exist");
         assert_eq!(analytics.description.as_deref(), Some("Analytics pipeline"));
         assert_eq!(analytics.default_agent, None);
         assert_eq!(
@@ -525,6 +555,25 @@ repos = [
             vec!["/home/user/code/analytics-core".to_string()]
         );
         assert!(analytics.env.is_empty());
+    }
+
+    #[test]
+    fn test_parse_backward_compatible_workspaces_alias() {
+        let legacy_toml = r#"
+default_agent = "claude"
+repos_dir = "/tmp/botai_repos"
+
+[workspaces.legacy]
+description = "Legacy workspace entry"
+repos = ["/tmp/legacy-repo"]
+"#;
+        let config = Config::load_from_str(legacy_toml)
+            .expect("Legacy config with [workspaces] should parse via alias");
+
+        assert_eq!(config.templates.len(), 1);
+        let tpl = config.get_template("legacy").expect("Template 'legacy' should be found");
+        assert_eq!(tpl.description.as_deref(), Some("Legacy workspace entry"));
+        assert_eq!(tpl.repos, vec!["/tmp/legacy-repo".to_string()]);
     }
 
     #[test]
@@ -536,7 +585,7 @@ repos_dir = "/tmp/repos"
 [agents.basic]
 command = "echo"
 
-[workspaces.mini]
+[templates.mini]
 repos = ["/tmp/repo"]
 "#;
         let config = Config::load_from_str(minimal_toml)
@@ -556,71 +605,71 @@ repos = ["/tmp/repo"]
             "Omitted env should default to empty map"
         );
 
-        let workspace = config
-            .get_workspace("mini")
-            .expect("Workspace 'mini' must exist");
+        let template = config
+            .get_template("mini")
+            .expect("Template 'mini' must exist");
         assert_eq!(
-            workspace.description, None,
+            template.description, None,
             "Omitted description should be None"
         );
         assert_eq!(
-            workspace.default_agent, None,
+            template.default_agent, None,
             "Omitted default_agent should be None"
         );
-        assert_eq!(workspace.repos, vec!["/tmp/repo".to_string()]);
+        assert_eq!(template.repos, vec!["/tmp/repo".to_string()]);
         assert!(
-            workspace.env.is_empty(),
+            template.env.is_empty(),
             "Omitted env should default to empty map"
         );
     }
 
     #[test]
-    fn test_get_workspace_and_agent_not_found() {
+    fn test_get_template_and_agent_not_found() {
         let config = Config::load_from_str(SAMPLE_VALID_TOML).expect("Config should parse");
 
-        assert!(config.get_workspace("non_existent_workspace").is_none());
+        assert!(config.get_template("non_existent_template").is_none());
         assert!(config.get_agent("non_existent_agent").is_none());
     }
 
     #[test]
-    fn test_resolve_agent_for_workspace_explicit_override() {
+    fn test_resolve_agent_for_template_explicit_override() {
         let config = Config::load_from_str(SAMPLE_VALID_TOML).expect("Config should parse");
 
-        // ecommerce workspace specifies default_agent = "agy"
+        // ecommerce template specifies default_agent = "agy"
         let resolved_agent = config
-            .resolve_agent_for_workspace("ecommerce")
-            .expect("Should resolve explicit agent 'agy' for workspace 'ecommerce'");
+            .resolve_agent_for_template("ecommerce")
+            .expect("Should resolve explicit agent 'agy' for template 'ecommerce'");
         assert_eq!(resolved_agent.command, "agy");
         assert_eq!(resolved_agent.args, vec!["--verbose".to_string()]);
     }
 
     #[test]
-    fn test_resolve_agent_for_workspace_fallback_to_global() {
+    fn test_resolve_agent_for_template_fallback_to_global() {
         let config = Config::load_from_str(SAMPLE_VALID_TOML).expect("Config should parse");
 
-        // analytics workspace does not specify default_agent, should fall back to global default "claude"
+        // analytics template does not specify default_agent, should fall back to global default "claude"
         let resolved_agent = config
-            .resolve_agent_for_workspace("analytics")
-            .expect("Should fallback to global agent 'claude' for workspace 'analytics'");
+            .resolve_agent_for_template("analytics")
+            .expect("Should fallback to global agent 'claude' for template 'analytics'");
         assert_eq!(resolved_agent.command, "claude");
     }
 
     #[test]
-    fn test_resolve_agent_for_workspace_workspace_not_found() {
+    fn test_resolve_agent_for_template_template_not_found() {
         let config = Config::load_from_str(SAMPLE_VALID_TOML).expect("Config should parse");
 
         let err = config
-            .resolve_agent_for_workspace("ghost_workspace")
-            .expect_err("Should return error for missing workspace");
+            .resolve_agent_for_template("ghost_template")
+            .expect_err("Should return error for missing template");
 
         match err {
-            ConfigError::WorkspaceNotFound(name) => assert_eq!(name, "ghost_workspace"),
-            other => panic!("Expected ConfigError::WorkspaceNotFound, got {:?}", other),
+            ConfigError::TemplateNotFound(name) => assert_eq!(name, "ghost_template"),
+            other => panic!("Expected ConfigError::TemplateNotFound, got {:?}", other),
         }
     }
 
     #[test]
-    fn test_resolve_agent_for_workspace_agent_not_found_on_workspace_override() {
+    fn test_resolve_agent_for_template_agent_not_found_on_template_override() {
         let toml = r#"
 default_agent = "claude"
 repos_dir = "/tmp/repos"
@@ -628,15 +677,15 @@ repos_dir = "/tmp/repos"
 [agents.claude]
 command = "claude"
 
-[workspaces.broken]
+[templates.broken]
 default_agent = "nonexistent_agent"
 repos = ["/path/to/repo"]
 "#;
         let config = Config::load_from_str(toml).expect("Config should parse");
 
         let err = config
-            .resolve_agent_for_workspace("broken")
-            .expect_err("Should return error when workspace references missing agent");
+            .resolve_agent_for_template("broken")
+            .expect_err("Should return error when template references missing agent");
 
         match err {
             ConfigError::AgentNotFound(agent) => assert_eq!(agent, "nonexistent_agent"),
@@ -645,7 +694,7 @@ repos = ["/path/to/repo"]
     }
 
     #[test]
-    fn test_resolve_agent_for_workspace_agent_not_found_on_global_fallback() {
+    fn test_resolve_agent_for_template_agent_not_found_on_global_fallback() {
         let toml = r#"
 default_agent = "missing_global_agent"
 repos_dir = "/tmp/repos"
@@ -653,13 +702,13 @@ repos_dir = "/tmp/repos"
 [agents.other]
 command = "other"
 
-[workspaces.test_ws]
+[templates.test_ws]
 repos = ["/path/to/repo"]
 "#;
         let config = Config::load_from_str(toml).expect("Config should parse");
 
         let err = config
-            .resolve_agent_for_workspace("test_ws")
+            .resolve_agent_for_template("test_ws")
             .expect_err("Should return error when global default agent is not in agents table");
 
         match err {
@@ -765,12 +814,12 @@ repos_dir = "/custom/repos/storage"
     }
 
     #[test]
-    fn test_resolve_workspace_repos_hybrid() {
+    fn test_resolve_template_repos_hybrid() {
         let toml = r#"
 default_agent = "claude"
 repos_dir = "/var/botai_repos"
 
-[workspaces.hybrid]
+[templates.hybrid]
 repos = [
     "https://github.com/org/api-service.git",
     "git@github.com:org/web-frontend.git",
@@ -780,8 +829,8 @@ repos = [
 "#;
         let config = Config::load_from_str(toml).expect("Parse hybrid config");
         let resolved = config
-            .resolve_workspace_repos("hybrid")
-            .expect("Resolve workspace repos");
+            .resolve_template_repos("hybrid")
+            .expect("Resolve template repos");
 
         assert_eq!(resolved.len(), 4);
 
@@ -822,12 +871,12 @@ repos = [
     }
 
     #[test]
-    fn test_resolve_workspace_repos_collision_error() {
+    fn test_resolve_template_repos_collision_error() {
         let toml = r#"
 default_agent = "claude"
 repos_dir = "/tmp/repos"
 
-[workspaces.conflicted]
+[templates.conflicted]
 repos = [
     "https://github.com/orgA/auth-service.git",
     "https://github.com/orgB/auth-service.git"
@@ -835,17 +884,17 @@ repos = [
 "#;
         let config = Config::load_from_str(toml).expect("Parse conflicted config");
         let err = config
-            .resolve_workspace_repos("conflicted")
+            .resolve_template_repos("conflicted")
             .expect_err("Should error on name collision");
 
         match err {
             ConfigError::RepoCollision {
-                workspace,
+                template,
                 name,
                 source1,
                 source2,
             } => {
-                assert_eq!(workspace, "conflicted");
+                assert_eq!(template, "conflicted");
                 assert_eq!(name, "auth-service");
                 assert_eq!(source1, "https://github.com/orgA/auth-service.git");
                 assert_eq!(source2, "https://github.com/orgB/auth-service.git");
@@ -896,7 +945,7 @@ repos_dir = "/tmp/repos"
 [agents.claude]
 command = "claude"
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 repos = ["/path/to/repo"]
 "#;
         let err = Config::load_from_str(toml_missing_default_agent)
@@ -917,7 +966,7 @@ repos_dir = "/tmp/repos"
 [agents.claude]
 args = ["--some-arg"]
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 repos = ["/path/to/repo"]
 "#;
         let err = Config::load_from_str(toml_missing_command)
@@ -930,7 +979,7 @@ repos = ["/path/to/repo"]
     }
 
     #[test]
-    fn test_error_missing_workspace_repos() {
+    fn test_error_missing_template_repos() {
         let toml_missing_repos = r#"
 default_agent = "claude"
 repos_dir = "/tmp/repos"
@@ -938,11 +987,11 @@ repos_dir = "/tmp/repos"
 [agents.claude]
 command = "claude"
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 description = "Missing repos field"
 "#;
         let err = Config::load_from_str(toml_missing_repos)
-            .expect_err("Workspace missing required 'repos' field should produce a Parse error");
+            .expect_err("Template missing required 'repos' field should produce a Parse error");
 
         match err {
             ConfigError::Parse(_) => (),
@@ -959,7 +1008,7 @@ repos_dir = "/tmp/repos"
 [agents.claude]
 command = "claude"
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 repos = "not-a-list"
 "#;
         let err = Config::load_from_str(toml_invalid_type)
@@ -993,7 +1042,7 @@ repos = "not-a-list"
             .expect("Config::load_from_file should load and parse valid file");
 
         assert_eq!(config.default_agent, "claude");
-        assert_eq!(config.workspaces.len(), 2);
+        assert_eq!(config.templates.len(), 2);
     }
 
     #[test]
@@ -1021,7 +1070,7 @@ repos_dir = "/tmp/repos"
 [agents.claude]
 command = "claude"
 
-[workspaces.cross_platform]
+[templates.cross_platform]
 repos = [
     "C:\\Users\\User\\Projects\\repo1",
     "/home/user/projects/repo2",
@@ -1033,8 +1082,8 @@ repos = [
             .expect("Config with various cross-platform path representations should parse");
 
         let ws = config
-            .get_workspace("cross_platform")
-            .expect("Workspace must exist");
+            .get_template("cross_platform")
+            .expect("Template must exist");
         assert_eq!(ws.repos.len(), 4);
         assert_eq!(ws.repos[0], "C:\\Users\\User\\Projects\\repo1");
         assert_eq!(ws.repos[1], "/home/user/projects/repo2");
@@ -1043,7 +1092,7 @@ repos = [
     }
 
     #[test]
-    fn test_unicode_in_workspace_and_paths() {
+    fn test_unicode_in_template_and_paths() {
         let toml_unicode = r#"
 default_agent = "claude"
 repos_dir = "/home/пользователь/botai_repos"
@@ -1051,7 +1100,7 @@ repos_dir = "/home/пользователь/botai_repos"
 [agents.claude]
 command = "claude"
 
-[workspaces."проект-тест"]
+[templates."проект-тест"]
 description = "Тестовый воркспейс с юникодом 🚀"
 repos = [
     "/home/пользователь/проекты/тест-репо",
@@ -1060,12 +1109,12 @@ repos = [
 env = { GREETING = "こんにちは" }
 "#;
         let config = Config::load_from_str(toml_unicode).expect(
-            "Unicode workspace names, descriptions, paths, and env vars should parse cleanly",
+            "Unicode template names, descriptions, paths, and env vars should parse cleanly",
         );
 
         let ws = config
-            .get_workspace("проект-тест")
-            .expect("Unicode workspace should be found");
+            .get_template("проект-тест")
+            .expect("Unicode template should be found");
         assert_eq!(
             ws.description.as_deref(),
             Some("Тестовый воркспейс с юникодом 🚀")
@@ -1111,8 +1160,8 @@ env = { GREETING = "こんにちは" }
             "Template must define aider agent"
         );
         assert!(
-            template.contains("[workspaces.ecommerce]"),
-            "Template must define sample workspace"
+            template.contains("[templates.ecommerce]"),
+            "Template must define sample template"
         );
 
         let parsed = Config::load_from_str(template)
@@ -1132,8 +1181,8 @@ env = { GREETING = "こんにちは" }
         assert!(parsed.get_agent("aider").is_some());
 
         let ws = parsed
-            .get_workspace("ecommerce")
-            .expect("ecommerce workspace must exist in template");
+            .get_template("ecommerce")
+            .expect("ecommerce template must exist in template");
         assert_eq!(ws.default_agent.as_deref(), Some("agy"));
         assert!(ws.agents_md_append.is_some());
         assert!(ws
@@ -1259,13 +1308,13 @@ repos_dir = "/tmp/repos"
     }
 
     #[test]
-    fn test_parse_workspace_agents_md_append_present() {
+    fn test_parse_template_agents_md_append_present() {
         let toml = r#"
 default_agent = "claude"
 repos_dir = "/tmp/repos"
 
-[workspaces.custom_instructions]
-description = "Workspace with instructions"
+[templates.custom_instructions]
+description = "Template with instructions"
 agents_md_append = """
 ### Important Rules
 - Never push directly to main.
@@ -1275,8 +1324,8 @@ repos = ["/path/to/repo"]
 "#;
         let config = Config::load_from_str(toml).expect("Config with agents_md_append should parse");
         let ws = config
-            .get_workspace("custom_instructions")
-            .expect("Workspace should exist");
+            .get_template("custom_instructions")
+            .expect("Template should exist");
 
         assert!(ws.agents_md_append.is_some());
         let instructions = ws.agents_md_append.as_deref().unwrap();
@@ -1286,18 +1335,18 @@ repos = ["/path/to/repo"]
     }
 
     #[test]
-    fn test_parse_workspace_agents_md_append_omitted() {
+    fn test_parse_template_agents_md_append_omitted() {
         let toml = r#"
 default_agent = "claude"
 repos_dir = "/tmp/repos"
 
-[workspaces.no_instructions]
+[templates.no_instructions]
 repos = ["/path/to/repo"]
 "#;
         let config = Config::load_from_str(toml).expect("Config should parse");
         let ws = config
-            .get_workspace("no_instructions")
-            .expect("Workspace should exist");
+            .get_template("no_instructions")
+            .expect("Template should exist");
 
         assert_eq!(ws.agents_md_append, None);
     }

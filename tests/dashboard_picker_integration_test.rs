@@ -42,7 +42,7 @@ fn test_integration_dashboard_lifecycle_from_env_to_action() {
     )
     .expect("Failed to write package.json");
 
-    // 2. Setup mock Config with multiple workspaces
+    // 2. Setup mock Config with multiple templates
     let config_toml = r#"
 default_agent = "claude"
 repos_dir = "/repos"
@@ -55,12 +55,12 @@ args = []
 command = "agy"
 args = ["--verbose"]
 
-[workspaces.ecommerce]
+[templates.ecommerce]
 description = "E-commerce platform services"
 default_agent = "claude"
 repos = ["/repos/checkout", "/repos/cart"]
 
-[workspaces.data_pipeline]
+[templates.data_pipeline]
 description = "Big data processing and ETL"
 default_agent = "agy"
 repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
@@ -71,7 +71,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     // 3. Instantiate DashboardState from environment
     let mut state = DashboardState::from_env(&config, cwd);
 
-    // Verify scanned projects (sorted) and configured workspaces (sorted)
+    // Verify scanned projects (sorted) and configured templates (sorted)
     assert_eq!(
         state.local_projects,
         vec![
@@ -80,12 +80,12 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         ]
     );
     assert_eq!(
-        state.workspaces,
+        state.templates,
         vec!["data_pipeline".to_string(), "ecommerce".to_string()]
     );
     assert_eq!(state.active_panel, ActivePanel::Projects);
     assert_eq!(state.selected_project_idx, 0);
-    assert_eq!(state.selected_workspace_idx, 0);
+    assert_eq!(state.selected_template_idx, 0);
     assert!(state.creation_modal.is_none());
 
     // 4. Test Ratatui TestBackend rendering of initial dashboard
@@ -106,7 +106,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         .collect::<String>();
 
     assert!(rendered_text.contains("Local Projects (Existing)"));
-    assert!(rendered_text.contains("Configured Workspaces"));
+    assert!(rendered_text.contains("Project Templates"));
     assert!(rendered_text.contains("payment-gateway"));
     assert!(rendered_text.contains("user-auth-service"));
     assert!(rendered_text.contains("data_pipeline"));
@@ -123,14 +123,14 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         DashboardAction::Attach("user-auth-service".to_string())
     );
 
-    // 6. Switch panel to Workspaces
+    // 6. Switch panel to Templates
     state.handle_key(key(KeyCode::Tab));
-    assert_eq!(state.active_panel, ActivePanel::Workspaces);
-    assert_eq!(state.selected_workspace_idx, 0); // "data_pipeline"
+    assert_eq!(state.active_panel, ActivePanel::Templates);
+    assert_eq!(state.selected_template_idx, 0); // "data_pipeline"
 
-    // Navigate to "ecommerce" workspace
+    // Navigate to "ecommerce" template
     state.handle_key(key(KeyCode::Down));
-    assert_eq!(state.selected_workspace_idx, 1);
+    assert_eq!(state.selected_template_idx, 1);
 
     // 7. Open creation modal with 'n' key
     let action = state.handle_key(key(KeyCode::Char('n')));
@@ -138,7 +138,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     assert!(state.creation_modal.is_some());
 
     let modal = state.creation_modal.as_ref().unwrap();
-    assert_eq!(modal.workspace_name, "ecommerce");
+    assert_eq!(modal.template_name, "ecommerce");
     assert_eq!(modal.active_field, 0);
 
     // 8. Type project name into modal
@@ -182,7 +182,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     assert_eq!(
         action,
         DashboardAction::CreateProject {
-            workspace: "ecommerce".to_string(),
+            template: "ecommerce".to_string(),
             project: "stripe-subscriptions".to_string(),
             prompt: Some("Build recurring billing engine with webhooks".to_string()),
         }
@@ -232,7 +232,7 @@ repos_dir = "/tmp/repos"
 command = "sh"
 args = ["-c", "exit 0"]
 
-[workspaces.test_ws]
+[templates.test_ws]
 repos = []
 "#;
     let config = Config::load_from_str(config_toml).expect("load config");
@@ -299,7 +299,7 @@ repos_dir = "/tmp/repos"
 command = "sh"
 args = ["-c", "sleep 10"]
 
-[workspaces.test_ws]
+[templates.test_ws]
 repos = []
 "#;
     let config = Config::load_from_str(config_toml).expect("load config");
@@ -364,7 +364,7 @@ repos_dir = "/tmp/repos"
 command = "sh"
 args = ["-c", "sleep 10"]
 
-[workspaces.test_ws]
+[templates.test_ws]
 repos = []
 "#;
     let config = Config::load_from_str(config_toml).expect("load config");

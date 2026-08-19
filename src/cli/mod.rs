@@ -19,8 +19,8 @@ pub struct Cli {
 pub enum Commands {
     /// Start a new project with git worktrees and launch an AI agent CLI.
     Start {
-        /// Name of the workspace defined in config.toml.
-        workspace: String,
+        /// Name of the project template defined in config.toml.
+        template: String,
 
         /// Name of the project / feature to create.
         project: String,
@@ -34,10 +34,10 @@ pub enum Commands {
         prompt: Option<String>,
     },
 
-    /// Synchronize workspace repositories by cloning missing repos and fetching latest updates.
+    /// Synchronize template repositories by cloning missing repos and fetching latest updates.
     Sync {
-        /// Optional workspace name to sync. If omitted, synchronizes all configured workspaces.
-        workspace: Option<String>,
+        /// Optional template name to sync. If omitted, synchronizes all configured templates.
+        template: Option<String>,
     },
 
     /// Attach to an ongoing project session in the TUI multiplexer.
@@ -46,7 +46,7 @@ pub enum Commands {
         project: String,
     },
 
-    /// List all configured workspaces, repositories, and active projects.
+    /// List all configured templates, repositories, and active projects.
     List,
 
     /// Initialize a fully commented configuration file template.
@@ -113,12 +113,12 @@ mod tests {
 
         match cli.command {
             Some(Commands::Start {
-                workspace,
+                template,
                 project,
                 agent,
                 prompt,
             }) => {
-                assert_eq!(workspace, "ecommerce");
+                assert_eq!(template, "ecommerce");
                 assert_eq!(project, "feature-cart");
                 assert_eq!(agent, Some("agy".to_string()));
                 assert_eq!(prompt, Some("Implement cart discount logic".to_string()));
@@ -131,19 +131,19 @@ mod tests {
     fn test_cli_sync_subcommand() {
         let cli_all = Cli::try_parse_from(["botai", "sync"]).expect("Failed to parse sync all");
         match cli_all.command {
-            Some(Commands::Sync { workspace }) => {
-                assert_eq!(workspace, None);
+            Some(Commands::Sync { template }) => {
+                assert_eq!(template, None);
             }
             _ => panic!("Expected Sync command"),
         }
 
-        let cli_ws = Cli::try_parse_from(["botai", "sync", "ecommerce"])
-            .expect("Failed to parse sync workspace");
-        match cli_ws.command {
-            Some(Commands::Sync { workspace }) => {
-                assert_eq!(workspace, Some("ecommerce".to_string()));
+        let cli_tpl = Cli::try_parse_from(["botai", "sync", "ecommerce"])
+            .expect("Failed to parse sync template");
+        match cli_tpl.command {
+            Some(Commands::Sync { template }) => {
+                assert_eq!(template, Some("ecommerce".to_string()));
             }
-            _ => panic!("Expected Sync command with workspace"),
+            _ => panic!("Expected Sync command with template"),
         }
     }
 

@@ -18,7 +18,7 @@ use crate::tui::theme::Theme;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivePanel {
     Projects,
-    Workspaces,
+    Templates,
 }
 
 /// Actions emitted by user interactions with the dashboard.
@@ -27,7 +27,7 @@ pub enum DashboardAction {
     None,
     Attach(String),
     CreateProject {
-        workspace: String,
+        template: String,
         project: String,
         prompt: Option<String>,
     },
@@ -38,17 +38,17 @@ pub enum DashboardAction {
 /// State for the floating project creation modal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreationModalState {
-    pub workspace_name: String,
+    pub template_name: String,
     pub project_name_input: String,
     pub prompt_input: String,
     pub active_field: usize, // 0: project name, 1: initial prompt
 }
 
 impl CreationModalState {
-    /// Creates a new `CreationModalState` targeting the given workspace.
-    pub fn new(workspace_name: impl Into<String>) -> Self {
+    /// Creates a new `CreationModalState` targeting the given template.
+    pub fn new(template_name: impl Into<String>) -> Self {
         Self {
-            workspace_name: workspace_name.into(),
+            template_name: template_name.into(),
             project_name_input: String::new(),
             prompt_input: String::new(),
             active_field: 0,
@@ -140,7 +140,7 @@ impl CreationModalState {
                         Some(self.prompt_input.trim().to_string())
                     };
                     Some(DashboardAction::CreateProject {
-                        workspace: self.workspace_name.clone(),
+                        template: self.template_name.clone(),
                         project: trimmed_name.to_string(),
                         prompt,
                     })
@@ -182,26 +182,26 @@ impl DestroyModalState {
 /// Full state for the interactive two-panel launcher dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardState {
-    pub workspaces: Vec<String>,
+    pub templates: Vec<String>,
     pub local_projects: Vec<String>,
     pub running_sessions: HashMap<String, SessionStatus>,
     pub active_panel: ActivePanel,
     pub selected_project_idx: usize,
-    pub selected_workspace_idx: usize,
+    pub selected_template_idx: usize,
     pub creation_modal: Option<CreationModalState>,
     pub destroy_modal: Option<DestroyModalState>,
 }
 
 impl DashboardState {
-    /// Creates a new `DashboardState` with given workspaces and local projects.
-    pub fn new(workspaces: Vec<String>, local_projects: Vec<String>) -> Self {
+    /// Creates a new `DashboardState` with given templates and local projects.
+    pub fn new(templates: Vec<String>, local_projects: Vec<String>) -> Self {
         Self {
-            workspaces,
+            templates,
             local_projects,
             running_sessions: HashMap::new(),
             active_panel: ActivePanel::Projects,
             selected_project_idx: 0,
-            selected_workspace_idx: 0,
+            selected_template_idx: 0,
             creation_modal: None,
             destroy_modal: None,
         }
@@ -218,7 +218,7 @@ impl DashboardState {
         self.running_sessions = running;
     }
 
-    /// Scans the CWD for existing project directories containing `AGENTS.md` and loads workspaces from `Config`.
+    /// Scans the CWD for existing project directories containing `AGENTS.md` and loads templates from `Config`.
     pub fn from_env(config: &Config, cwd: &Path) -> Self {
         let mut local_projects = Vec::new();
         if let Ok(entries) = std::fs::read_dir(cwd) {
@@ -233,17 +233,17 @@ impl DashboardState {
         }
         local_projects.sort();
 
-        let mut workspaces: Vec<String> = config.workspaces.keys().cloned().collect();
-        workspaces.sort();
+        let mut templates: Vec<String> = config.templates.keys().cloned().collect();
+        templates.sort();
 
-        Self::new(workspaces, local_projects)
+        Self::new(templates, local_projects)
     }
 
-    /// Toggles active panel between Projects and Workspaces.
+    /// Toggles active panel between Projects and Templates.
     pub fn switch_panel(&mut self) {
         self.active_panel = match self.active_panel {
-            ActivePanel::Projects => ActivePanel::Workspaces,
-            ActivePanel::Workspaces => ActivePanel::Projects,
+            ActivePanel::Projects => ActivePanel::Templates,
+            ActivePanel::Templates => ActivePanel::Projects,
         };
     }
 
@@ -257,11 +257,11 @@ impl DashboardState {
                     self.selected_project_idx += 1;
                 }
             }
-            ActivePanel::Workspaces => {
-                if !self.workspaces.is_empty()
-                    && self.selected_workspace_idx + 1 < self.workspaces.len()
+            ActivePanel::Templates => {
+                if !self.templates.is_empty()
+                    && self.selected_template_idx + 1 < self.templates.len()
                 {
-                    self.selected_workspace_idx += 1;
+                    self.selected_template_idx += 1;
                 }
             }
         }
@@ -273,20 +273,20 @@ impl DashboardState {
             ActivePanel::Projects => {
                 self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
             }
-            ActivePanel::Workspaces => {
-                self.selected_workspace_idx = self.selected_workspace_idx.saturating_sub(1);
+            ActivePanel::Templates => {
+                self.selected_template_idx = self.selected_template_idx.saturating_sub(1);
             }
         }
     }
 
-    /// Opens the project creation modal for the currently selected workspace.
+    /// Opens the project creation modal for the currently selected template.
     pub fn open_creation_modal(&mut self) {
-        if !self.workspaces.is_empty() {
-            let ws_idx = self
-                .selected_workspace_idx
-                .min(self.workspaces.len().saturating_sub(1));
-            let ws = self.workspaces[ws_idx].clone();
-            self.creation_modal = Some(CreationModalState::new(ws));
+        if !self.templates.is_empty() {
+            let tpl_idx = self
+                .selected_template_idx
+                .min(self.templates.len().saturating_sub(1));
+            let tpl = self.templates[tpl_idx].clone();
+            self.creation_modal = Some(CreationModalState::new(tpl));
         }
     }
 
@@ -366,7 +366,7 @@ impl DashboardState {
                         DashboardAction::None
                     }
                 }
-                ActivePanel::Workspaces => {
+                ActivePanel::Templates => {
                     self.open_creation_modal();
                     DashboardAction::None
                 }
@@ -520,8 +520,8 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
         list.render(left_inner, buf);
     }
 
-    // 3. Render Right Panel (Configured Workspaces)
-    let is_right_active = state.active_panel == ActivePanel::Workspaces;
+    // 3. Render Right Panel (Project Templates)
+    let is_right_active = state.active_panel == ActivePanel::Templates;
     let right_border_style = if is_right_active {
         Style::default()
             .fg(theme.border_focused)
@@ -532,23 +532,23 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
 
     let right_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Configured Workspaces ")
+        .title(" Project Templates ")
         .border_style(right_border_style);
 
     let right_inner = right_block.inner(right_area);
     right_block.render(right_area, buf);
 
-    if state.workspaces.is_empty() {
-        let msg = Paragraph::new(" (No workspaces found in config) ")
+    if state.templates.is_empty() {
+        let msg = Paragraph::new(" (No templates found in config) ")
             .style(Style::default().fg(theme.input_placeholder));
         msg.render(right_inner, buf);
     } else {
         let items: Vec<ListItem> = state
-            .workspaces
+            .templates
             .iter()
             .enumerate()
             .map(|(i, ws)| {
-                let is_selected = i == state.selected_workspace_idx;
+                let is_selected = i == state.selected_template_idx;
                 let (prefix, style) = if is_selected && is_right_active {
                     (
                         " > ",
@@ -649,7 +649,7 @@ fn render_creation_modal(modal: &CreationModalState, area: Rect, buf: &mut Buffe
     // Clear background of modal area
     Clear.render(modal_area, buf);
 
-    let title = format!(" Create New Project [{}] ", modal.workspace_name);
+    let title = format!(" Create New Project [{}] ", modal.template_name);
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -759,7 +759,7 @@ mod tests {
 
         assert!(rendered.contains("botai"));
         assert!(rendered.contains("Local Projects (Existing)"));
-        assert!(rendered.contains("Configured Workspaces"));
+        assert!(rendered.contains("Project Templates"));
         assert!(rendered.contains("cart-service"));
         assert!(rendered.contains("billing-api"));
         assert!(rendered.contains("payments"));
@@ -860,7 +860,7 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("(No local projects found in CWD)"));
-        assert!(rendered.contains("(No workspaces found in config)"));
+        assert!(rendered.contains("(No templates found in config)"));
     }
 
     #[test]
@@ -892,7 +892,7 @@ mod tests {
         assert_eq!(
             action,
             DashboardAction::CreateProject {
-                workspace: "воркспейс-1 🚀".to_string(),
+                template: "воркспейс-1 🚀".to_string(),
                 project: "проект-юникод".to_string(),
                 prompt: None,
             }
@@ -919,16 +919,16 @@ mod tests {
 
     #[test]
     fn test_dashboard_state_initialization() {
-        let workspaces = vec!["ecommerce".to_string(), "analytics".to_string()];
+        let templates = vec!["ecommerce".to_string(), "analytics".to_string()];
         let local_projects = vec!["feature-checkout".to_string(), "hotfix-auth".to_string()];
 
-        let state = DashboardState::new(workspaces.clone(), local_projects.clone());
+        let state = DashboardState::new(templates.clone(), local_projects.clone());
 
         assert_eq!(state.active_panel, ActivePanel::Projects);
-        assert_eq!(state.workspaces, workspaces);
+        assert_eq!(state.templates, templates);
         assert_eq!(state.local_projects, local_projects);
         assert_eq!(state.selected_project_idx, 0);
-        assert_eq!(state.selected_workspace_idx, 0);
+        assert_eq!(state.selected_template_idx, 0);
         assert!(state.creation_modal.is_none());
     }
 
@@ -962,10 +962,10 @@ repos_dir = "/repos"
 [agents.claude]
 command = "claude"
 
-[workspaces.backend]
+[templates.backend]
 repos = ["/path/repo1"]
 
-[workspaces.frontend]
+[templates.frontend]
 repos = ["/path/repo2"]
 "#;
         let config = Config::load_from_str(toml_content).unwrap();
@@ -976,7 +976,7 @@ repos = ["/path/repo2"]
             vec!["alpha-service".to_string(), "beta-service".to_string()]
         );
         assert_eq!(
-            state.workspaces,
+            state.templates,
             vec!["backend".to_string(), "frontend".to_string()]
         );
     }
@@ -999,7 +999,7 @@ command = "claude"
 
         let state = DashboardState::from_env(&config, &empty_cwd);
         assert!(state.local_projects.is_empty());
-        assert!(state.workspaces.is_empty());
+        assert!(state.templates.is_empty());
 
         let non_existent_cwd = tmp.path().join("does_not_exist");
         let state_nonexistent = DashboardState::from_env(&config, &non_existent_cwd);
@@ -1013,7 +1013,7 @@ command = "claude"
 
         // Switch via method
         state.switch_panel();
-        assert_eq!(state.active_panel, ActivePanel::Workspaces);
+        assert_eq!(state.active_panel, ActivePanel::Templates);
 
         state.switch_panel();
         assert_eq!(state.active_panel, ActivePanel::Projects);
@@ -1021,7 +1021,7 @@ command = "claude"
         // Switch via key events: Tab, Left, Right
         let action = state.handle_key(key(KeyCode::Tab));
         assert_eq!(action, DashboardAction::None);
-        assert_eq!(state.active_panel, ActivePanel::Workspaces);
+        assert_eq!(state.active_panel, ActivePanel::Templates);
 
         let action = state.handle_key(key(KeyCode::Left));
         assert_eq!(action, DashboardAction::None);
@@ -1029,7 +1029,7 @@ command = "claude"
 
         let action = state.handle_key(key(KeyCode::Right));
         assert_eq!(action, DashboardAction::None);
-        assert_eq!(state.active_panel, ActivePanel::Workspaces);
+        assert_eq!(state.active_panel, ActivePanel::Templates);
     }
 
     #[test]
@@ -1048,6 +1048,10 @@ command = "claude"
         state.handle_key(key(KeyCode::Down));
         assert_eq!(state.selected_project_idx, 1);
 
+        // Down at boundary stays at max index
+        state.handle_key(key(KeyCode::Down));
+        assert_eq!(state.selected_project_idx, 1);
+
         // Up moves back
         state.handle_key(key(KeyCode::Up));
         assert_eq!(state.selected_project_idx, 0);
@@ -1056,19 +1060,19 @@ command = "claude"
         state.handle_key(key(KeyCode::Up));
         assert_eq!(state.selected_project_idx, 0);
 
-        // Switch to Workspaces
+        // Switch to Templates
         state.switch_panel();
-        assert_eq!(state.selected_workspace_idx, 0);
+        assert_eq!(state.selected_template_idx, 0);
 
         state.handle_key(key(KeyCode::Char('j'))); // vim down
-        assert_eq!(state.selected_workspace_idx, 1);
+        assert_eq!(state.selected_template_idx, 1);
         state.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(state.selected_workspace_idx, 2);
+        assert_eq!(state.selected_template_idx, 2);
         state.handle_key(key(KeyCode::Char('j'))); // boundary
-        assert_eq!(state.selected_workspace_idx, 2);
+        assert_eq!(state.selected_template_idx, 2);
 
         state.handle_key(key(KeyCode::Char('k'))); // vim up
-        assert_eq!(state.selected_workspace_idx, 1);
+        assert_eq!(state.selected_template_idx, 1);
     }
 
     #[test]
@@ -1081,9 +1085,9 @@ command = "claude"
 
         state.switch_panel();
         state.next_item();
-        assert_eq!(state.selected_workspace_idx, 0);
+        assert_eq!(state.selected_template_idx, 0);
         state.prev_item();
-        assert_eq!(state.selected_workspace_idx, 0);
+        assert_eq!(state.selected_template_idx, 0);
     }
 
     #[test]
@@ -1093,15 +1097,15 @@ command = "claude"
             vec!["proj1".into()],
         );
 
-        // When in Workspaces panel, pressing Enter or 'n' opens modal
-        state.active_panel = ActivePanel::Workspaces;
-        state.selected_workspace_idx = 1;
+        // When in Templates panel, pressing Enter or 'n' opens modal
+        state.active_panel = ActivePanel::Templates;
+        state.selected_template_idx = 1;
 
         let action = state.handle_key(key(KeyCode::Enter));
         assert_eq!(action, DashboardAction::None);
         assert!(state.creation_modal.is_some());
         assert_eq!(
-            state.creation_modal.as_ref().unwrap().workspace_name,
+            state.creation_modal.as_ref().unwrap().template_name,
             "analytics"
         );
 
@@ -1110,14 +1114,14 @@ command = "claude"
         assert_eq!(action, DashboardAction::None);
         assert!(state.creation_modal.is_none());
 
-        // Pressing 'n' from Projects panel also triggers modal for selected workspace
+        // Pressing 'n' from Projects panel also triggers modal for selected template
         state.active_panel = ActivePanel::Projects;
-        state.selected_workspace_idx = 0;
+        state.selected_template_idx = 0;
         let action = state.handle_key(key(KeyCode::Char('n')));
         assert_eq!(action, DashboardAction::None);
         assert!(state.creation_modal.is_some());
         assert_eq!(
-            state.creation_modal.as_ref().unwrap().workspace_name,
+            state.creation_modal.as_ref().unwrap().template_name,
             "ecommerce"
         );
 
@@ -1126,7 +1130,7 @@ command = "claude"
     }
 
     #[test]
-    fn test_modal_opening_empty_workspaces() {
+    fn test_modal_opening_empty_templates() {
         let mut state = DashboardState::new(vec![], vec!["proj1".into()]);
         state.open_creation_modal();
         assert!(state.creation_modal.is_none());
@@ -1197,7 +1201,7 @@ command = "claude"
         assert_eq!(
             action,
             DashboardAction::CreateProject {
-                workspace: "cloud-infra".to_string(),
+                template: "cloud-infra".to_string(),
                 project: "k8s-cluster".to_string(),
                 prompt: Some("Deploy helm chart".to_string()),
             }
@@ -1221,7 +1225,7 @@ command = "claude"
         assert_eq!(
             action,
             DashboardAction::CreateProject {
-                workspace: "ws".to_string(),
+                template: "ws".to_string(),
                 project: "my-project".to_string(),
                 prompt: None,
             }
@@ -1301,7 +1305,7 @@ command = "claude"
         );
         assert!(state.destroy_modal.is_none());
 
-        // On Workspaces panel, 'd' key does nothing and doesn't open modal
+        // On Templates panel, 'd' key does nothing and doesn't open modal
         state.switch_panel();
         let action = state.handle_key(key(KeyCode::Char('d')));
         assert_eq!(action, DashboardAction::None);
@@ -1424,7 +1428,7 @@ command = "claude"
             "proj-inactive".to_string(),
         ];
 
-        let state = DashboardState::new(vec!["workspace-a".to_string()], projects)
+        let state = DashboardState::new(vec!["template-a".to_string()], projects)
             .with_running_sessions(running);
 
         let area = Rect::new(0, 0, 100, 20);

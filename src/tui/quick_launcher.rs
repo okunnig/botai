@@ -23,7 +23,7 @@ pub enum LauncherTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherFocus {
     TabBar,
-    Workspace,
+    Template,
     ProjectName,
     Prompt,
     ProjectList,
@@ -34,7 +34,7 @@ pub enum LauncherFocus {
 pub enum QuickLauncherAction {
     None,
     Create {
-        workspace: String,
+        template: String,
         project: String,
         prompt: Option<String>,
     },
@@ -47,8 +47,8 @@ pub enum QuickLauncherAction {
 pub struct QuickLauncherState {
     pub tab: LauncherTab,
     pub focus: LauncherFocus,
-    pub workspaces: Vec<String>,
-    pub selected_workspace_idx: usize,
+    pub templates: Vec<String>,
+    pub selected_template_idx: usize,
     pub project_name_input: String,
     pub prompt_input: String,
     pub local_projects: Vec<String>,
@@ -58,22 +58,22 @@ pub struct QuickLauncherState {
 }
 
 impl QuickLauncherState {
-    /// Creates a new `QuickLauncherState` with available workspaces and local projects.
-    /// Defaults selected workspace to `default_workspace` if provided and found.
+    /// Creates a new `QuickLauncherState` with available templates and local projects.
+    /// Defaults selected template to `default_template` if provided and found.
     pub fn new(
-        workspaces: Vec<String>,
+        templates: Vec<String>,
         local_projects: Vec<String>,
-        default_workspace: Option<&str>,
+        default_template: Option<&str>,
     ) -> Self {
-        let selected_workspace_idx = default_workspace
-            .and_then(|target| workspaces.iter().position(|w| w == target))
+        let selected_template_idx = default_template
+            .and_then(|target| templates.iter().position(|w| w == target))
             .unwrap_or(0);
 
         Self {
             tab: LauncherTab::Create,
-            focus: LauncherFocus::Workspace,
-            workspaces,
-            selected_workspace_idx,
+            focus: LauncherFocus::Template,
+            templates,
+            selected_template_idx,
             project_name_input: String::new(),
             prompt_input: String::new(),
             local_projects,
@@ -190,13 +190,18 @@ impl QuickLauncherState {
         self.error_message = None;
     }
 
-    /// Returns the currently selected workspace name, if available.
-    pub fn selected_workspace(&self) -> Option<&str> {
-        if !self.workspaces.is_empty() && self.selected_workspace_idx < self.workspaces.len() {
-            Some(&self.workspaces[self.selected_workspace_idx])
+    /// Returns the currently selected template name, if available.
+    pub fn selected_template(&self) -> Option<&str> {
+        if !self.templates.is_empty() && self.selected_template_idx < self.templates.len() {
+            Some(&self.templates[self.selected_template_idx])
         } else {
             None
         }
+    }
+
+    /// Backward compatibility alias for selected_template.
+    pub fn selected_workspace(&self) -> Option<&str> {
+        self.selected_template()
     }
 
     /// Returns the currently selected local project name, if available.
@@ -209,20 +214,30 @@ impl QuickLauncherState {
         }
     }
 
-    /// Cycles to the next workspace.
-    pub fn cycle_workspace_next(&mut self) {
-        if !self.workspaces.is_empty() {
-            self.selected_workspace_idx =
-                (self.selected_workspace_idx + 1) % self.workspaces.len();
+    /// Cycles to the next template.
+    pub fn cycle_template_next(&mut self) {
+        if !self.templates.is_empty() {
+            self.selected_template_idx =
+                (self.selected_template_idx + 1) % self.templates.len();
         }
     }
 
-    /// Cycles to the previous workspace.
-    pub fn cycle_workspace_prev(&mut self) {
-        if !self.workspaces.is_empty() {
-            self.selected_workspace_idx = (self.selected_workspace_idx + self.workspaces.len() - 1)
-                % self.workspaces.len();
+    /// Backward compatibility alias for cycle_template_next.
+    pub fn cycle_workspace_next(&mut self) {
+        self.cycle_template_next();
+    }
+
+    /// Cycles to the previous template.
+    pub fn cycle_template_prev(&mut self) {
+        if !self.templates.is_empty() {
+            self.selected_template_idx = (self.selected_template_idx + self.templates.len() - 1)
+                % self.templates.len();
         }
+    }
+
+    /// Backward compatibility alias for cycle_template_prev.
+    pub fn cycle_workspace_prev(&mut self) {
+        self.cycle_template_prev();
     }
 
     /// Switches the active modal tab.
@@ -231,7 +246,7 @@ impl QuickLauncherState {
         match new_tab {
             LauncherTab::Create => {
                 if self.focus == LauncherFocus::ProjectList {
-                    self.focus = LauncherFocus::Workspace;
+                    self.focus = LauncherFocus::Template;
                 }
             }
             LauncherTab::Attach => {
@@ -247,11 +262,11 @@ impl QuickLauncherState {
         match self.tab {
             LauncherTab::Create => {
                 self.focus = match self.focus {
-                    LauncherFocus::TabBar => LauncherFocus::Workspace,
-                    LauncherFocus::Workspace => LauncherFocus::ProjectName,
+                    LauncherFocus::TabBar => LauncherFocus::Template,
+                    LauncherFocus::Template => LauncherFocus::ProjectName,
                     LauncherFocus::ProjectName => LauncherFocus::Prompt,
                     LauncherFocus::Prompt => LauncherFocus::TabBar,
-                    LauncherFocus::ProjectList => LauncherFocus::Workspace,
+                    LauncherFocus::ProjectList => LauncherFocus::Template,
                 };
             }
             LauncherTab::Attach => {
@@ -270,8 +285,8 @@ impl QuickLauncherState {
             LauncherTab::Create => {
                 self.focus = match self.focus {
                     LauncherFocus::TabBar => LauncherFocus::Prompt,
-                    LauncherFocus::Workspace => LauncherFocus::TabBar,
-                    LauncherFocus::ProjectName => LauncherFocus::Workspace,
+                    LauncherFocus::Template => LauncherFocus::TabBar,
+                    LauncherFocus::ProjectName => LauncherFocus::Template,
                     LauncherFocus::Prompt => LauncherFocus::ProjectName,
                     LauncherFocus::ProjectList => LauncherFocus::TabBar,
                 };
@@ -314,9 +329,9 @@ impl QuickLauncherState {
                         LauncherTab::Attach => LauncherTab::Create,
                     };
                     self.switch_tab(next_tab);
-                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Workspace
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template
                 {
-                    self.cycle_workspace_prev();
+                    self.cycle_template_prev();
                 }
                 QuickLauncherAction::None
             }
@@ -327,9 +342,9 @@ impl QuickLauncherState {
                         LauncherTab::Attach => LauncherTab::Create,
                     };
                     self.switch_tab(next_tab);
-                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Workspace
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template
                 {
-                    self.cycle_workspace_next();
+                    self.cycle_template_next();
                 }
                 QuickLauncherAction::None
             }
@@ -431,19 +446,19 @@ impl QuickLauncherState {
                     if trimmed_name.is_empty() {
                         self.set_error("Project name cannot be empty");
                         QuickLauncherAction::None
-                    } else if let Some(ws) = self.selected_workspace() {
+                    } else if let Some(tpl) = self.selected_template() {
                         let prompt = if self.prompt_input.trim().is_empty() {
                             None
                         } else {
                             Some(self.prompt_input.trim().to_string())
                         };
                         QuickLauncherAction::Create {
-                            workspace: ws.to_string(),
+                            template: tpl.to_string(),
                             project: trimmed_name.to_string(),
                             prompt,
                         }
                     } else {
-                        self.set_error("No workspace available");
+                        self.set_error("No template available");
                         QuickLauncherAction::None
                     }
                 }
@@ -598,11 +613,11 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
     // 3. Render Body
     match state.tab {
         LauncherTab::Create => {
-            let ws_focused = state.focus == LauncherFocus::Workspace;
+            let tpl_focused = state.focus == LauncherFocus::Template;
             let proj_focused = state.focus == LauncherFocus::ProjectName;
             let prompt_focused = state.focus == LauncherFocus::Prompt;
 
-            let ws_style = if ws_focused {
+            let tpl_style = if tpl_focused {
                 Style::default()
                     .fg(theme.modal_label)
                     .add_modifier(Modifier::BOLD)
@@ -626,22 +641,22 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                 Style::default().fg(theme.status_bar_fg)
             };
 
-            let ws_prefix = if ws_focused { "▶ " } else { "  " };
+            let tpl_prefix = if tpl_focused { "▶ " } else { "  " };
             let proj_prefix = if proj_focused { "▶ " } else { "  " };
             let prompt_prefix = if prompt_focused { "▶ " } else { "  " };
 
-            let ws_display = if state.workspaces.is_empty() {
+            let tpl_display = if state.templates.is_empty() {
                 Span::styled(
-                    "(No workspaces found)",
+                    "(No templates found)",
                     Style::default().fg(theme.input_placeholder),
                 )
             } else {
-                let ws_name = state.selected_workspace().unwrap_or("default");
+                let tpl_name = state.selected_template().unwrap_or("default");
                 let count_str = format!(
                     " ◀ {} ▶  ({}/{})",
-                    ws_name,
-                    state.selected_workspace_idx + 1,
-                    state.workspaces.len()
+                    tpl_name,
+                    state.selected_template_idx + 1,
+                    state.templates.len()
                 );
                 Span::styled(
                     count_str,
@@ -681,8 +696,8 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
 
             let lines = vec![
                 Line::from(vec![
-                    Span::styled(format!("{}Workspace: ", ws_prefix), ws_style),
-                    ws_display,
+                    Span::styled(format!("{}Template: ", tpl_prefix), tpl_style),
+                    tpl_display,
                 ]),
                 Line::from(""),
                 Line::from(vec![
@@ -780,7 +795,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
     // 5. Render Footer Hints
     let footer_text = match state.tab {
         LauncherTab::Create => {
-            " [Tab/Shift+Tab] Nav | [←/→] Tab/WS | [Enter] Create | [Esc] Cancel "
+            " [Tab/Shift+Tab] Nav | [←/→] Tab/Template | [Enter] Create | [Esc] Cancel "
         }
         LauncherTab::Attach => {
             " [Tab/Shift+Tab] Nav | [↑/↓/j/k] Select | [Enter] Attach | [Esc] Cancel "
@@ -832,57 +847,57 @@ mod tests {
 
     #[test]
     fn test_quick_launcher_initialization() {
-        let workspaces = vec!["ecommerce".to_string(), "analytics".to_string()];
+        let templates = vec!["ecommerce".to_string(), "analytics".to_string()];
         let projects = vec!["feature-cart".to_string(), "fix-auth".to_string()];
 
         let launcher =
-            QuickLauncherState::new(workspaces.clone(), projects.clone(), Some("analytics"));
+            QuickLauncherState::new(templates.clone(), projects.clone(), Some("analytics"));
 
         assert_eq!(launcher.tab, LauncherTab::Create);
-        assert_eq!(launcher.focus, LauncherFocus::Workspace);
-        assert_eq!(launcher.workspaces, workspaces);
+        assert_eq!(launcher.focus, LauncherFocus::Template);
+        assert_eq!(launcher.templates, templates);
         assert_eq!(launcher.local_projects, projects);
-        assert_eq!(launcher.selected_workspace_idx, 1);
-        assert_eq!(launcher.selected_workspace(), Some("analytics"));
+        assert_eq!(launcher.selected_template_idx, 1);
+        assert_eq!(launcher.selected_template(), Some("analytics"));
         assert_eq!(launcher.selected_project(), Some("feature-cart"));
         assert!(launcher.error_message.is_none());
     }
 
     #[test]
     fn test_quick_launcher_initialization_default_fallback() {
-        let workspaces = vec!["backend".to_string()];
-        let launcher = QuickLauncherState::new(workspaces, vec![], Some("unknown"));
-        assert_eq!(launcher.selected_workspace_idx, 0);
-        assert_eq!(launcher.selected_workspace(), Some("backend"));
+        let templates = vec!["backend".to_string()];
+        let launcher = QuickLauncherState::new(templates, vec![], Some("unknown"));
+        assert_eq!(launcher.selected_template_idx, 0);
+        assert_eq!(launcher.selected_template(), Some("backend"));
     }
 
     #[test]
-    fn test_workspace_cycling() {
-        let workspaces = vec!["ws1".to_string(), "ws2".to_string(), "ws3".to_string()];
-        let mut launcher = QuickLauncherState::new(workspaces, vec![], None);
-        assert_eq!(launcher.selected_workspace_idx, 0);
+    fn test_template_cycling() {
+        let templates = vec!["ws1".to_string(), "ws2".to_string(), "ws3".to_string()];
+        let mut launcher = QuickLauncherState::new(templates, vec![], None);
+        assert_eq!(launcher.selected_template_idx, 0);
 
-        launcher.cycle_workspace_next();
-        assert_eq!(launcher.selected_workspace_idx, 1);
-        launcher.cycle_workspace_next();
-        assert_eq!(launcher.selected_workspace_idx, 2);
-        launcher.cycle_workspace_next();
-        assert_eq!(launcher.selected_workspace_idx, 0);
+        launcher.cycle_template_next();
+        assert_eq!(launcher.selected_template_idx, 1);
+        launcher.cycle_template_next();
+        assert_eq!(launcher.selected_template_idx, 2);
+        launcher.cycle_template_next();
+        assert_eq!(launcher.selected_template_idx, 0);
 
-        launcher.cycle_workspace_prev();
-        assert_eq!(launcher.selected_workspace_idx, 2);
-        launcher.cycle_workspace_prev();
-        assert_eq!(launcher.selected_workspace_idx, 1);
+        launcher.cycle_template_prev();
+        assert_eq!(launcher.selected_template_idx, 2);
+        launcher.cycle_template_prev();
+        assert_eq!(launcher.selected_template_idx, 1);
     }
 
     #[test]
-    fn test_workspace_cycling_empty() {
+    fn test_template_cycling_empty() {
         let mut launcher = QuickLauncherState::new(vec![], vec![], None);
-        assert_eq!(launcher.selected_workspace(), None);
-        launcher.cycle_workspace_next();
-        assert_eq!(launcher.selected_workspace_idx, 0);
-        launcher.cycle_workspace_prev();
-        assert_eq!(launcher.selected_workspace_idx, 0);
+        assert_eq!(launcher.selected_template(), None);
+        launcher.cycle_template_next();
+        assert_eq!(launcher.selected_template_idx, 0);
+        launcher.cycle_template_prev();
+        assert_eq!(launcher.selected_template_idx, 0);
     }
 
     #[test]
@@ -920,9 +935,9 @@ mod tests {
         let mut launcher = QuickLauncherState::new(vec!["ws".into()], vec![], None);
         launcher.focus = LauncherFocus::TabBar;
 
-        // Tab moves forward: TabBar -> Workspace -> ProjectName -> Prompt -> TabBar
+        // Tab moves forward: TabBar -> Template -> ProjectName -> Prompt -> TabBar
         launcher.handle_key(key(KeyCode::Tab));
-        assert_eq!(launcher.focus, LauncherFocus::Workspace);
+        assert_eq!(launcher.focus, LauncherFocus::Template);
 
         launcher.handle_key(key(KeyCode::Tab));
         assert_eq!(launcher.focus, LauncherFocus::ProjectName);
@@ -933,7 +948,7 @@ mod tests {
         launcher.handle_key(key(KeyCode::Tab));
         assert_eq!(launcher.focus, LauncherFocus::TabBar);
 
-        // BackTab moves backward: TabBar -> Prompt -> ProjectName -> Workspace -> TabBar
+        // BackTab moves backward: TabBar -> Prompt -> ProjectName -> Template -> TabBar
         launcher.handle_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(launcher.focus, LauncherFocus::Prompt);
 
@@ -941,14 +956,14 @@ mod tests {
         assert_eq!(launcher.focus, LauncherFocus::ProjectName);
 
         launcher.handle_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(launcher.focus, LauncherFocus::Workspace);
+        assert_eq!(launcher.focus, LauncherFocus::Template);
 
         launcher.handle_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(launcher.focus, LauncherFocus::TabBar);
 
         // Up/Down navigation
         launcher.handle_key(key(KeyCode::Down));
-        assert_eq!(launcher.focus, LauncherFocus::Workspace);
+        assert_eq!(launcher.focus, LauncherFocus::Template);
 
         launcher.handle_key(key(KeyCode::Up));
         assert_eq!(launcher.focus, LauncherFocus::TabBar);
@@ -1018,7 +1033,7 @@ mod tests {
         assert_eq!(
             action,
             QuickLauncherAction::Create {
-                workspace: "analytics".to_string(),
+                template: "analytics".to_string(),
                 project: "my-feature".to_string(),
                 prompt: Some("Initial task prompt".to_string()),
             }
@@ -1037,7 +1052,7 @@ mod tests {
         assert_eq!(
             action,
             QuickLauncherAction::Create {
-                workspace: "ws1".to_string(),
+                template: "ws1".to_string(),
                 project: "proj-without-prompt".to_string(),
                 prompt: None,
             }
@@ -1045,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn test_submission_create_project_empty_workspaces() {
+    fn test_submission_create_project_empty_templates() {
         let mut launcher = QuickLauncherState::new(vec![], vec![], None);
         launcher.focus = LauncherFocus::ProjectName;
         for c in "my-proj".chars() {
@@ -1056,7 +1071,7 @@ mod tests {
         assert_eq!(action, QuickLauncherAction::None);
         assert_eq!(
             launcher.error_message,
-            Some("No workspace available".to_string())
+            Some("No template available".to_string())
         );
     }
 
@@ -1146,7 +1161,7 @@ mod tests {
         assert!(rendered.contains("Quick Project Launcher (Ctrl+Space c)"));
         assert!(rendered.contains("1. Create New Project"));
         assert!(rendered.contains("2. Attach Existing Project"));
-        assert!(rendered.contains("Workspace:"));
+        assert!(rendered.contains("Template:"));
         assert!(rendered.contains("ecommerce"));
         assert!(rendered.contains("Project Name:"));
         assert!(rendered.contains("Initial Prompt:"));
@@ -1216,8 +1231,8 @@ mod tests {
         let area = Rect::new(0, 0, 100, 30);
         let mut launcher = QuickLauncherState::new(vec!["ws1".into()], vec!["proj1".into()], None);
 
-        // 1. Initial focus is Workspace -> None
-        assert_eq!(launcher.focus, LauncherFocus::Workspace);
+        // 1. Initial focus is Template -> None
+        assert_eq!(launcher.focus, LauncherFocus::Template);
         assert_eq!(launcher.cursor_position(area), None);
 
         // 2. Focus on ProjectName, empty input

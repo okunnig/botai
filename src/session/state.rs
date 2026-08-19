@@ -83,8 +83,8 @@ pub struct ProjectSession {
     pub id: String,
     /// Name of the project (e.g. branch name and working directory).
     pub project_name: String,
-    /// Name of the workspace this project belongs to.
-    pub workspace_name: String,
+    /// Name of the template this project belongs to.
+    pub template_name: String,
     /// Name of the agent CLI tool being used (e.g., "claude", "agy").
     pub agent_name: String,
     /// Current lifecycle status.
@@ -106,19 +106,19 @@ impl ProjectSession {
     /// Creates a new `ProjectSession` in the `Initializing` state.
     pub fn new(
         project_name: impl Into<String>,
-        workspace_name: impl Into<String>,
+        template_name: impl Into<String>,
         agent_name: impl Into<String>,
     ) -> Self {
         let p_name = project_name.into();
-        let w_name = workspace_name.into();
+        let t_name = template_name.into();
         let a_name = agent_name.into();
         let now = SystemTime::now();
-        let id = format!("{}:{}:{}", w_name, p_name, a_name);
+        let id = format!("{}:{}:{}", t_name, p_name, a_name);
 
         Self {
             id,
             project_name: p_name,
-            workspace_name: w_name,
+            template_name: t_name,
             agent_name: a_name,
             status: SessionStatus::Initializing,
             created_at: now,
@@ -126,6 +126,12 @@ impl ProjectSession {
             prompt: None,
             exit_code: None,
         }
+    }
+
+    /// Backward compatibility helper for workspace_name.
+    #[inline]
+    pub fn workspace_name(&self) -> &str {
+        &self.template_name
     }
 
     /// Sets a custom session identifier.
@@ -300,7 +306,7 @@ mod tests {
             .with_prompt("Fix checkout button bug");
 
         assert_eq!(session.project_name, "feat-checkout");
-        assert_eq!(session.workspace_name, "ecommerce");
+        assert_eq!(session.template_name, "ecommerce");
         assert_eq!(session.agent_name, "claude");
         assert_eq!(session.status, SessionStatus::Initializing);
         assert_eq!(session.prompt.as_deref(), Some("Fix checkout button bug"));
@@ -353,6 +359,6 @@ mod tests {
 
         assert_eq!(session.id, "custom-uuid-12345");
         assert_eq!(session.project_name, "feature/auth-2.0 🚀");
-        assert_eq!(session.workspace_name, "ws-cloud");
+        assert_eq!(session.template_name, "ws-cloud");
     }
 }

@@ -42,25 +42,25 @@ impl RepoMapping {
 pub struct ProjectContext {
     /// Name of the active project (and git branch).
     pub project_name: String,
-    /// Name of the workspace configuration.
-    pub workspace_name: String,
-    /// Optional workspace description.
+    /// Name of the template configuration.
+    pub template_name: String,
+    /// Optional template description.
     pub description: Option<String>,
-    /// Optional custom workspace instructions appended to AGENTS.md.
+    /// Optional custom template instructions appended to AGENTS.md.
     pub agents_md_append: Option<String>,
-    /// Mappings of all repositories included in this workspace/project.
+    /// Mappings of all repositories included in this template/project.
     pub repos: Vec<RepoMapping>,
-    /// Environment variables injected for the workspace.
+    /// Environment variables injected for the template.
     pub env: HashMap<String, String>,
     /// Optional initial prompt/task seeded by the user.
     pub initial_prompt: Option<String>,
 }
 
 impl ProjectContext {
-    pub fn new(project_name: impl Into<String>, workspace_name: impl Into<String>) -> Self {
+    pub fn new(project_name: impl Into<String>, template_name: impl Into<String>) -> Self {
         Self {
             project_name: project_name.into(),
-            workspace_name: workspace_name.into(),
+            template_name: template_name.into(),
             description: None,
             agents_md_append: None,
             repos: Vec::new(),
@@ -104,7 +104,7 @@ impl ContextSynthesizer {
         let mut md = String::new();
 
         md.push_str(&format!("# Project: {}\n\n", context.project_name));
-        md.push_str(&format!("Workspace: **{}**\n\n", context.workspace_name));
+        md.push_str(&format!("Template: **{}**\n\n", context.template_name));
 
         if let Some(desc) = &context.description {
             md.push_str(&format!("{}\n\n", desc));
@@ -158,7 +158,7 @@ impl ContextSynthesizer {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 md.push('\n');
-                md.push_str("## Workspace Instructions\n\n");
+                md.push_str("## Template Instructions\n\n");
                 md.push_str(trimmed);
                 md.push('\n');
             }
@@ -225,7 +225,7 @@ mod tests {
 
         // Header & metadata
         assert!(markdown.contains("# Project: checkout-flow"));
-        assert!(markdown.contains("Workspace: **ecommerce**"));
+        assert!(markdown.contains("Template: **ecommerce**"));
         assert!(markdown.contains("E-commerce core services and web app"));
 
         // Multi-repo table
@@ -261,7 +261,7 @@ mod tests {
         let markdown = ContextSynthesizer::synthesize(&context);
 
         assert!(markdown.contains("# Project: quick-fix"));
-        assert!(markdown.contains("Workspace: **infra**"));
+        assert!(markdown.contains("Template: **infra**"));
         assert!(markdown.contains("single-service"));
         assert!(markdown.contains("/var/repos/single-service"));
     }
@@ -272,7 +272,7 @@ mod tests {
         let project_root = temp_dir.path().join("my-project");
 
         let context =
-            ProjectContext::new("my-project", "my-workspace").with_repos(vec![RepoMapping::new(
+            ProjectContext::new("my-project", "my-template").with_repos(vec![RepoMapping::new(
                 "backend",
                 PathBuf::from("/repos/backend"),
                 PathBuf::from("backend"),
@@ -286,7 +286,7 @@ mod tests {
 
         let content = fs::read_to_string(&agents_md_path).expect("read AGENTS.md");
         assert!(content.contains("my-project"));
-        assert!(content.contains("my-workspace"));
+        assert!(content.contains("my-template"));
         assert!(content.contains("backend"));
     }
 
@@ -299,15 +299,15 @@ mod tests {
         let agents_md = project_root.join("AGENTS.md");
         fs::write(&agents_md, "Old content").expect("write old file");
 
-        let context = ProjectContext::new("existing-project", "workspace-v2")
-            .with_description("Updated workspace");
+        let context = ProjectContext::new("existing-project", "template-v2")
+            .with_description("Updated template");
 
         generate_agents_md(&project_root, &context).expect("generate agents md");
 
         let content = fs::read_to_string(&agents_md).expect("read updated file");
         assert!(!content.contains("Old content"));
-        assert!(content.contains("workspace-v2"));
-        assert!(content.contains("Updated workspace"));
+        assert!(content.contains("template-v2"));
+        assert!(content.contains("Updated template"));
     }
 
     #[test]
@@ -352,7 +352,7 @@ mod tests {
         let markdown = ContextSynthesizer::synthesize(&context);
 
         assert!(markdown.contains("## Multi-Repository Guidelines"));
-        assert!(markdown.contains("## Workspace Instructions\n\n### Guidelines\n- Always run `cargo test --all`\n- Follow conventional commits\n"));
+        assert!(markdown.contains("## Template Instructions\n\n### Guidelines\n- Always run `cargo test --all`\n- Follow conventional commits\n"));
     }
 
     #[test]
@@ -363,18 +363,18 @@ mod tests {
         let markdown = ContextSynthesizer::synthesize(&context);
 
         assert!(markdown.contains("## Multi-Repository Guidelines"));
-        assert!(!markdown.contains("## Workspace Instructions"));
+        assert!(!markdown.contains("## Template Instructions"));
     }
 
     #[test]
     fn test_synthesize_with_empty_or_whitespace_agents_md_append() {
         let context_empty = ProjectContext::new("p1", "ws1").with_agents_md_append("");
         let md_empty = ContextSynthesizer::synthesize(&context_empty);
-        assert!(!md_empty.contains("## Workspace Instructions"));
+        assert!(!md_empty.contains("## Template Instructions"));
 
         let context_whitespace =
             ProjectContext::new("p2", "ws2").with_agents_md_append("   \n\t  \n  ");
         let md_whitespace = ContextSynthesizer::synthesize(&context_whitespace);
-        assert!(!md_whitespace.contains("## Workspace Instructions"));
+        assert!(!md_whitespace.contains("## Template Instructions"));
     }
 }

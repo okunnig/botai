@@ -29,11 +29,11 @@ fn test_pty_config_and_session_state_creation() {
     assert_eq!(config.size.cols, 100);
     assert_eq!(config.size.rows, 30);
 
-    let mut session = ProjectSession::new("test-project", "test-workspace", "claude")
+    let mut session = ProjectSession::new("test-project", "test-template", "claude")
         .with_prompt("Execute test prompt");
 
     assert_eq!(session.project_name, "test-project");
-    assert_eq!(session.workspace_name, "test-workspace");
+    assert_eq!(session.template_name, "test-template");
     assert_eq!(session.agent_name, "claude");
     assert_eq!(session.status, SessionStatus::Initializing);
     assert_eq!(session.prompt.as_deref(), Some("Execute test prompt"));

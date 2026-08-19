@@ -37,18 +37,18 @@ fn main() -> Result<()> {
         None => run_default_dashboard(&config),
         Some(Commands::Init { .. }) => unreachable!(),
         Some(Commands::Start {
-            workspace,
+            template,
             project,
             agent,
             prompt,
         }) => cmd_start(
             &config,
-            &workspace,
+            &template,
             &project,
             agent.as_deref(),
             prompt.as_deref(),
         ),
-        Some(Commands::Sync { workspace }) => cmd_sync(&config, workspace.as_deref()),
+        Some(Commands::Sync { template }) => cmd_sync(&config, template.as_deref()),
         Some(Commands::Attach { project }) => cmd_attach(&config, &project),
         Some(Commands::List) => cmd_list(&config),
         Some(Commands::Destroy { project, force }) => cmd_destroy(&project, force),
@@ -76,34 +76,34 @@ fn cmd_init(config_override: Option<&Path>, force: bool, stdout: bool) -> Result
     Ok(())
 }
 
-/// `botai sync [workspace]`
-fn cmd_sync(config: &Config, workspace_filter: Option<&str>) -> Result<()> {
+/// `botai sync [template]`
+fn cmd_sync(config: &Config, template_filter: Option<&str>) -> Result<()> {
     let repos_dir = config.resolved_repos_dir();
     println!("=== botai Repository Sync ===");
     println!("Central Repos Directory: {:?}", repos_dir);
 
-    let workspaces_to_sync: Vec<&str> = match workspace_filter {
-        Some(ws_name) => {
-            if !config.workspaces.contains_key(ws_name) {
-                bail!("Workspace '{}' not found in configuration", ws_name);
+    let templates_to_sync: Vec<&str> = match template_filter {
+        Some(tpl_name) => {
+            if !config.templates.contains_key(tpl_name) {
+                bail!("Template '{}' not found in configuration", tpl_name);
             }
-            vec![ws_name]
+            vec![tpl_name]
         }
         None => {
-            let mut keys: Vec<&str> = config.workspaces.keys().map(|s| s.as_str()).collect();
+            let mut keys: Vec<&str> = config.templates.keys().map(|s| s.as_str()).collect();
             keys.sort();
             keys
         }
     };
 
-    if workspaces_to_sync.is_empty() {
-        println!("No workspaces configured to sync.");
+    if templates_to_sync.is_empty() {
+        println!("No templates configured to sync.");
         return Ok(());
     }
 
-    for ws_name in workspaces_to_sync {
-        println!("\n--- Workspace: {} ---", ws_name);
-        let resolved = config.resolve_workspace_repos(ws_name)?;
+    for tpl_name in templates_to_sync {
+        println!("\n--- Template: {} ---", tpl_name);
+        let resolved = config.resolve_template_repos(tpl_name)?;
         for repo in resolved {
             if !repo.exists_locally() {
                 if let Some(url) = &repo.clone_url {
@@ -147,21 +147,21 @@ fn run_default_dashboard(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// `botai start <workspace> <project> [--agent <agent>] [--prompt <prompt>]`
+/// `botai start <template> <project> [--agent <agent>] [--prompt <prompt>]`
 fn cmd_start(
     config: &Config,
-    workspace_name: &str,
+    template_name: &str,
     project_name: &str,
     agent_override: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<()> {
-    let ws = config
-        .get_workspace(workspace_name)
-        .with_context(|| format!("Workspace '{workspace_name}' not found in configuration"))?;
+    let tpl = config
+        .get_template(template_name)
+        .with_context(|| format!("Template '{template_name}' not found in configuration"))?;
 
     let agent_name = match agent_override {
         Some(name) => name,
-        None => ws.default_agent.as_deref().unwrap_or(&config.default_agent),
+        None => tpl.default_agent.as_deref().unwrap_or(&config.default_agent),
     };
 
     let agent = config
@@ -169,8 +169,8 @@ fn cmd_start(
         .with_context(|| format!("Agent '{agent_name}' not found in configuration"))?;
 
     let resolved_repos = config
-        .resolve_workspace_repos(workspace_name)
-        .with_context(|| format!("Failed to resolve repositories for workspace '{workspace_name}'"))?;
+        .resolve_template_repos(template_name)
+        .with_context(|| format!("Failed to resolve repositories for template '{template_name}'"))?;
 
     // Auto-clone any missing repositories and fetch updates best-effort
     for repo in &resolved_repos {
@@ -216,7 +216,7 @@ fn cmd_start(
 
     let mut repo_mappings = Vec::new();
 
-    // Create worktree for each resolved repo in the workspace
+    // Create worktree for each resolved repo in the template
     for repo in &resolved_repos {
         let worktree_path = project_dir.join(&repo.name);
 
@@ -246,11 +246,11 @@ fn cmd_start(
     // Synthesize and write AGENTS.md
     let project_context = ProjectContext {
         project_name: project_name.to_string(),
-        workspace_name: workspace_name.to_string(),
-        description: ws.description.clone(),
-        agents_md_append: ws.agents_md_append.clone(),
+        template_name: template_name.to_string(),
+        description: tpl.description.clone(),
+        agents_md_append: tpl.agents_md_append.clone(),
         repos: repo_mappings,
-        env: ws.env.clone(),
+        env: tpl.env.clone(),
         initial_prompt: prompt.map(|s| s.to_string()),
     };
 
@@ -270,14 +270,14 @@ fn cmd_start(
     for (k, v) in &agent.env {
         pty_config = pty_config.with_env(k, v);
     }
-    for (k, v) in &ws.env {
+    for (k, v) in &tpl.env {
         pty_config = pty_config.with_env(k, v);
     }
 
     let pty = PtySession::spawn(pty_config)
         .with_context(|| format!("Failed to spawn agent command '{}'", agent.command))?;
     let vt = VtScreen::new(term_cols, term_rows);
-    let mut ps = ProjectSession::new(project_name, workspace_name, agent_name);
+    let mut ps = ProjectSession::new(project_name, template_name, agent_name);
     if let Some(p) = prompt {
         ps = ps.with_prompt(p);
     }
@@ -337,20 +337,20 @@ fn cmd_list(config: &Config) -> Result<()> {
     println!("Default Agent: {}", config.default_agent);
     println!("Central Repos Directory: {:?}", config.resolved_repos_dir());
 
-    println!("\n=== Configured Workspaces ===");
-    if config.workspaces.is_empty() {
+    println!("\n=== Configured Templates ===");
+    if config.templates.is_empty() {
         println!("  (None configured)");
     } else {
-        for (name, ws) in &config.workspaces {
-            println!("- Workspace: {}", name);
-            if let Some(desc) = &ws.description {
+        for (name, tpl) in &config.templates {
+            println!("- Template: {}", name);
+            if let Some(desc) = &tpl.description {
                 println!("  Description: {}", desc);
             }
-            if let Some(agent) = &ws.default_agent {
+            if let Some(agent) = &tpl.default_agent {
                 println!("  Default Agent: {}", agent);
             }
             println!("  Repositories:");
-            match config.resolve_workspace_repos(name) {
+            match config.resolve_template_repos(name) {
                 Ok(resolved) => {
                     for repo in resolved {
                         let status = if repo.exists_locally() {

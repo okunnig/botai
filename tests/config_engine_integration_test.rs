@@ -20,7 +20,7 @@ env = { ANTHROPIC_API_KEY = "sk-test-123" }
 command = "agy"
 args = ["--model", "gemini-pro"]
 
-[workspaces.backend]
+[templates.backend]
 description = "Microservices backend"
 default_agent = "agy"
 repos = [
@@ -29,7 +29,7 @@ repos = [
 ]
 env = { DB_HOST = "localhost", DB_PORT = "5432" }
 
-[workspaces.frontend]
+[templates.frontend]
 description = "Web and Mobile Frontends"
 repos = [
     "/var/repos/web-client",
@@ -50,12 +50,12 @@ env = { REACT_APP_API_URL = "http://localhost:8080" }
     assert_eq!(config.theme(), botai::Theme::tokyo_night());
     assert_eq!(config.repos_dir, std::path::PathBuf::from("/var/repos"));
     assert_eq!(config.agents.len(), 2);
-    assert_eq!(config.workspaces.len(), 2);
+    assert_eq!(config.templates.len(), 2);
 
-    // 3. Test workspace queries
+    // 3. Test template queries
     let backend_ws = config
-        .get_workspace("backend")
-        .expect("backend workspace must exist");
+        .get_template("backend")
+        .expect("backend template must exist");
     assert_eq!(
         backend_ws.description.as_deref(),
         Some("Microservices backend")
@@ -63,13 +63,13 @@ env = { REACT_APP_API_URL = "http://localhost:8080" }
     assert_eq!(backend_ws.repos.len(), 2);
 
     let frontend_ws = config
-        .get_workspace("frontend")
-        .expect("frontend workspace must exist");
+        .get_template("frontend")
+        .expect("frontend template must exist");
     assert_eq!(frontend_ws.default_agent, None);
 
     // 4. Test agent resolution (override vs fallback)
     let backend_agent = config
-        .resolve_agent_for_workspace("backend")
+        .resolve_agent_for_template("backend")
         .expect("backend should resolve to agy");
     assert_eq!(backend_agent.command, "agy");
     assert_eq!(
@@ -78,7 +78,7 @@ env = { REACT_APP_API_URL = "http://localhost:8080" }
     );
 
     let frontend_agent = config
-        .resolve_agent_for_workspace("frontend")
+        .resolve_agent_for_template("frontend")
         .expect("frontend should resolve to global default claude");
     assert_eq!(frontend_agent.command, "claude");
     assert_eq!(
@@ -91,13 +91,13 @@ env = { REACT_APP_API_URL = "http://localhost:8080" }
     );
 
     // 5. Test non-existent queries
-    assert!(config.get_workspace("non_existent").is_none());
+    assert!(config.get_template("non_existent").is_none());
     assert!(config.get_agent("non_existent").is_none());
 
-    let resolve_missing_ws = config.resolve_agent_for_workspace("non_existent");
+    let resolve_missing_ws = config.resolve_agent_for_template("non_existent");
     match resolve_missing_ws {
-        Err(ConfigError::WorkspaceNotFound(name)) => assert_eq!(name, "non_existent"),
-        other => panic!("Expected WorkspaceNotFound, got {:?}", other),
+        Err(ConfigError::TemplateNotFound(name)) => assert_eq!(name, "non_existent"),
+        other => panic!("Expected TemplateNotFound, got {:?}", other),
     }
 }
 
@@ -129,7 +129,7 @@ fn test_integration_init_template_lifecycle() {
     assert_eq!(generated, config_path);
     assert!(config_path.exists());
 
-    // 2. Parse generated config and verify all agents/workspaces
+    // 2. Parse generated config and verify all agents/templates
     let config = Config::load_from_file(&config_path)
         .expect("Generated template must be immediately loadable");
     assert_eq!(config.default_agent, "claude");
@@ -140,8 +140,8 @@ fn test_integration_init_template_lifecycle() {
     assert!(config.get_agent("copilot").is_some());
     assert!(config.get_agent("aider").is_some());
     let ecommerce = config
-        .get_workspace("ecommerce")
-        .expect("ecommerce workspace must exist");
+        .get_template("ecommerce")
+        .expect("ecommerce template must exist");
     assert!(ecommerce.agents_md_append.is_some());
 
     // 3. Re-init without force fails with AlreadyExists

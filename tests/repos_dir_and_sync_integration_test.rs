@@ -74,8 +74,8 @@ repos_dir = "{}"
 command = "echo"
 args = ["started"]
 
-[workspaces.platform]
-description = "Platform workspace"
+[templates.platform]
+description = "Platform template"
 repos = [
     "file://{}",
     "file://{}",
@@ -93,9 +93,9 @@ repos = [
     let config = Config::load_from_file(&config_path).expect("load config");
     assert_eq!(config.resolved_repos_dir(), repos_dir);
 
-    // 1. Resolve workspace repos
+    // 1. Resolve template repos
     let resolved = config
-        .resolve_workspace_repos("platform")
+        .resolve_template_repos("platform")
         .expect("resolve platform repos");
     assert_eq!(resolved.len(), 3);
 

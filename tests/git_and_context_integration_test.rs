@@ -75,7 +75,7 @@ fn test_full_git_worktree_and_context_synthesis_lifecycle() {
 
     // 2. Define project structure and context
     let project_name = "my-feature";
-    let workspace_name = "fullstack";
+    let template_name = "fullstack";
     let project_root = temp_dir.path().join("projects").join(project_name);
     fs::create_dir_all(&project_root).expect("Failed to create project root");
 
@@ -91,7 +91,7 @@ fn test_full_git_worktree_and_context_synthesis_lifecycle() {
         RepoMapping::new("backend", &backend_repo, &backend_wt),
     ];
 
-    let context = ProjectContext::new(project_name, workspace_name)
+    let context = ProjectContext::new(project_name, template_name)
         .with_description("Fullstack web app with Rust backend and React frontend")
         .with_repos(repo_mappings)
         .with_env(env)
@@ -125,7 +125,7 @@ fn test_full_git_worktree_and_context_synthesis_lifecycle() {
 
     let agents_content = fs::read_to_string(&agents_md_path).expect("Failed to read AGENTS.md");
     assert!(agents_content.contains(project_name));
-    assert!(agents_content.contains(workspace_name));
+    assert!(agents_content.contains(template_name));
     assert!(agents_content.contains("Fullstack web app with Rust backend and React frontend"));
     assert!(agents_content.contains("frontend"));
     assert!(agents_content.contains("backend"));
@@ -177,7 +177,7 @@ fn test_full_git_worktree_and_context_synthesis_lifecycle() {
 }
 
 #[test]
-fn test_workspace_agents_md_append_integration() {
+fn test_template_agents_md_append_integration() {
     let temp_dir = TempDir::new().expect("Failed to create integration tempdir");
 
     let repo = create_mock_repo(
@@ -188,17 +188,17 @@ fn test_workspace_agents_md_append_integration() {
     );
 
     let project_name = "custom-instructions-feature";
-    let workspace_name = "dev-workspace";
+    let template_name = "dev-template";
     let project_root = temp_dir.path().join("projects").join(project_name);
     fs::create_dir_all(&project_root).expect("Failed to create project root");
 
     let service_wt = project_root.join("service");
     create_worktree(&repo, &service_wt, project_name).expect("Failed to create worktree");
 
-    let custom_instructions = "### Workspace Rules\n- Strictly adhere to TDD.\n- Run `cargo clippy --all-targets` before submitting.";
+    let custom_instructions = "### Template Rules\n- Strictly adhere to TDD.\n- Run `cargo clippy --all-targets` before submitting.";
 
-    let context = ProjectContext::new(project_name, workspace_name)
-        .with_description("Workspace with custom agent rules")
+    let context = ProjectContext::new(project_name, template_name)
+        .with_description("Template with custom agent rules")
         .with_repos(vec![RepoMapping::new("service", &repo, &service_wt)])
         .with_agents_md_append(custom_instructions);
 
@@ -208,9 +208,9 @@ fn test_workspace_agents_md_append_integration() {
 
     let content = fs::read_to_string(&agents_md_path).expect("Failed to read AGENTS.md");
     assert!(content.contains(project_name));
-    assert!(content.contains(workspace_name));
-    assert!(content.contains("## Workspace Instructions"));
-    assert!(content.contains("### Workspace Rules"));
+    assert!(content.contains(template_name));
+    assert!(content.contains("## Template Instructions"));
+    assert!(content.contains("### Template Rules"));
     assert!(content.contains("- Strictly adhere to TDD."));
     assert!(content.contains("- Run `cargo clippy --all-targets` before submitting."));
 }

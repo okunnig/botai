@@ -35,11 +35,11 @@ repos_dir = "/tmp/repos"
 command = "{}"
 args = {}
 
-[workspaces.payments]
+[templates.payments]
 description = "Payment processing services"
 repos = []
 
-[workspaces.notifications]
+[templates.notifications]
 description = "Notification delivery services"
 repos = []
 "#,
@@ -74,13 +74,13 @@ repos = []
 
     let launcher = app.quick_launcher.as_ref().unwrap();
     assert_eq!(
-        launcher.workspaces,
+        launcher.templates,
         vec!["notifications".to_string(), "payments".to_string()]
     );
     assert_eq!(launcher.local_projects, vec!["legacy-service".to_string()]);
     assert_eq!(launcher.tab, LauncherTab::Create);
-    assert_eq!(launcher.focus, LauncherFocus::Workspace);
-    assert_eq!(launcher.selected_workspace(), Some("notifications"));
+    assert_eq!(launcher.focus, LauncherFocus::Template);
+    assert_eq!(launcher.selected_template(), Some("notifications"));
 
     // 3. Test Ratatui TestBackend rendering of launcher modal
     let backend = TestBackend::new(100, 30);
@@ -106,13 +106,13 @@ repos = []
     assert!(rendered.contains("Quick Project Launcher (Ctrl+Space c)"));
     assert!(rendered.contains("1. Create New Project"));
     assert!(rendered.contains("2. Attach Existing Project"));
-    assert!(rendered.contains("Workspace:"));
+    assert!(rendered.contains("Template:"));
     assert!(rendered.contains("notifications"));
 
-    // 4. Cycle workspace with Right arrow to "payments"
+    // 4. Cycle template with Right arrow to "payments"
     app.handle_launcher_key(key(KeyCode::Right));
     assert_eq!(
-        app.quick_launcher.as_ref().unwrap().selected_workspace(),
+        app.quick_launcher.as_ref().unwrap().selected_template(),
         Some("payments")
     );
 
@@ -169,7 +169,7 @@ repos = []
         "stripe-webhooks"
     );
     assert_eq!(
-        app.registry.active_session().unwrap().workspace_name(),
+        app.registry.active_session().unwrap().template_name(),
         "payments"
     );
     assert!(cwd.join("stripe-webhooks").join("AGENTS.md").is_file());
@@ -181,14 +181,14 @@ repos = []
     app.handle_key_event(make_key(KeyCode::Char('C'), KeyModifiers::SHIFT));
     assert!(!app.leader_active);
     assert!(app.quick_launcher.is_some());
-    // Active workspace should default to "payments" (the active session's workspace)
+    // Active template should default to "payments" (the active session's template)
     assert_eq!(
-        app.quick_launcher.as_ref().unwrap().selected_workspace(),
+        app.quick_launcher.as_ref().unwrap().selected_template(),
         Some("payments")
     );
 
     // 11. Switch to TabBar and switch to Attach tab
-    app.handle_launcher_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT)); // from Workspace -> TabBar
+    app.handle_launcher_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT)); // from Template -> TabBar
     assert_eq!(
         app.quick_launcher.as_ref().unwrap().focus,
         LauncherFocus::TabBar

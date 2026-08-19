@@ -8,7 +8,7 @@ A cross-platform terminal session orchestrator and multiplexer for AI agent CLI 
 - main agent delegates implementation and TDD workflow to subagents
 
 ## Key Concepts
-- **Workspace**: A named collection of local git repositories defined in a declarative TOML configuration (`~/.config/botai/config.toml` or `%APPDATA%\botai\config.toml`).
+- **Template** / **Project Template**: A named collection of git repositories defined in a declarative TOML configuration (`~/.config/botai/config.toml` or `%APPDATA%\botai\config.toml`).
 - **Project**: An isolated, multi-repo work environment created inside `CWD/<project_name>`. Each repository gets a git worktree checked out to a new branch `<project_name>`.
 - **Context Synthesis**: Auto-generated multi-repo orientation context (`AGENTS.md`) at the project root for seamless agent multi-directory comprehension.
 - **Agent Instance & Monitoring**: Single AI agent CLI process per project root with desktop notifications and real-time status badges in the TUI (Thinking, Waiting for Input, Done).

@@ -63,7 +63,7 @@ impl std::fmt::Debug for SetupProgressEvent {
 /// State for the asynchronous project setup and progress modal.
 pub struct SetupModalState {
     pub project_name: String,
-    pub workspace_name: String,
+    pub template_name: String,
     pub prompt: Option<String>,
     pub logs: Vec<String>,
     pub current_step: usize,
@@ -79,13 +79,13 @@ impl SetupModalState {
     /// Creates a new `SetupModalState` for monitoring project creation.
     pub fn new(
         project_name: impl Into<String>,
-        workspace_name: impl Into<String>,
+        template_name: impl Into<String>,
         prompt: Option<String>,
         receiver: Receiver<SetupProgressEvent>,
     ) -> Self {
         Self {
             project_name: project_name.into(),
-            workspace_name: workspace_name.into(),
+            template_name: template_name.into(),
             prompt,
             logs: Vec::new(),
             current_step: 1,
@@ -154,7 +154,7 @@ impl SetupModalState {
 /// Background worker function that executes git repository resolution, cloning/fetching,
 /// worktree creation, context generation, and PTY process spawning.
 pub fn run_setup_worker(
-    workspace_name: String,
+    template_name: String,
     project_name: String,
     prompt: Option<String>,
     config: Option<Config>,
@@ -163,15 +163,15 @@ pub fn run_setup_worker(
     tx: Sender<SetupProgressEvent>,
 ) {
     let result = (|| -> anyhow::Result<(ProjectSession, PtySession, VtScreen)> {
-        // Step 1: Checking / resolving workspace repositories
+        // Step 1: Checking / resolving template repositories
         let _ = tx.send(SetupProgressEvent::Step {
             current: 1,
             total: 4,
-            message: format!("Checking repositories for workspace '{}'...", workspace_name),
+            message: format!("Checking repositories for template '{}'...", template_name),
         });
         let _ = tx.send(SetupProgressEvent::Log(format!(
-            "[1/4] Checking repositories for workspace '{}'...",
-            workspace_name
+            "[1/4] Checking repositories for template '{}'...",
+            template_name
         )));
 
         let project_dir = cwd.join(&project_name);
@@ -183,8 +183,8 @@ pub fn run_setup_worker(
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
         let config_ref = config.as_ref().or(default_config.as_ref());
 
-        let ws = config_ref.and_then(|c| c.get_workspace(&workspace_name));
-        let agent_name = ws
+        let tpl = config_ref.and_then(|c| c.get_template(&template_name));
+        let agent_name = tpl
             .and_then(|w| w.default_agent.as_deref())
             .or_else(|| config_ref.map(|c| c.default_agent.as_str()))
             .unwrap_or("claude");
@@ -216,12 +216,12 @@ pub fn run_setup_worker(
 
         let mut resolved_repos_list = Vec::new();
         if let Some(cfg) = config_ref {
-            match cfg.resolve_workspace_repos(&workspace_name) {
+            match cfg.resolve_template_repos(&template_name) {
                 Ok(repos) => {
                     resolved_repos_list = repos;
                 }
                 Err(err) => {
-                    anyhow::bail!("Failed to resolve workspace repositories: {}", err);
+                    anyhow::bail!("Failed to resolve template repositories: {}", err);
                 }
             }
         }
@@ -295,11 +295,11 @@ pub fn run_setup_worker(
 
         let project_context = ProjectContext {
             project_name: project_name.clone(),
-            workspace_name: workspace_name.clone(),
-            description: ws.and_then(|w| w.description.clone()),
-            agents_md_append: ws.and_then(|w| w.agents_md_append.clone()),
+            template_name: template_name.clone(),
+            description: tpl.and_then(|w| w.description.clone()),
+            agents_md_append: tpl.and_then(|w| w.agents_md_append.clone()),
             repos: repo_mappings,
-            env: ws.map(|w| w.env.clone()).unwrap_or_default(),
+            env: tpl.map(|w| w.env.clone()).unwrap_or_default(),
             initial_prompt: prompt.clone(),
         };
 
@@ -323,8 +323,8 @@ pub fn run_setup_worker(
             pty_config = pty_config.with_env(k, v);
         }
 
-        if let Some(ws) = ws {
-            for (k, v) in &ws.env {
+        if let Some(tpl) = tpl {
+            for (k, v) in &tpl.env {
                 pty_config = pty_config.with_env(k, v);
             }
         }
@@ -338,7 +338,7 @@ pub fn run_setup_worker(
         };
 
         let vt = VtScreen::new(cols, rows);
-        let mut ps = ProjectSession::new(&project_name, &workspace_name, agent_name);
+        let mut ps = ProjectSession::new(&project_name, &template_name, agent_name);
         if let Some(ref p) = prompt {
             ps = ps.with_prompt(p);
         }
@@ -464,7 +464,7 @@ pub fn render_setup_modal(
                 ),
             ]),
             Line::from(Span::styled(
-                format!("Workspace: {}", modal.workspace_name),
+                format!("Template: {}", modal.template_name),
                 Style::default().fg(theme.status_bar_fg),
             )),
         ]
@@ -552,7 +552,7 @@ mod tests {
         let mut modal = SetupModalState::new("my-proj", "my-ws", Some("do task".into()), rx);
 
         assert_eq!(modal.project_name, "my-proj");
-        assert_eq!(modal.workspace_name, "my-ws");
+        assert_eq!(modal.template_name, "my-ws");
         assert_eq!(modal.current_step, 1);
         assert!(!modal.is_finished);
         assert!(modal.error.is_none());
