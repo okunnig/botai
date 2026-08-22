@@ -214,3 +214,117 @@ fn test_template_agents_md_append_integration() {
     assert!(content.contains("- Strictly adhere to TDD."));
     assert!(content.contains("- Run `cargo clippy --all-targets` before submitting."));
 }
+
+#[test]
+fn test_project_destruction_clean_removal_of_central_repo_worktrees_and_metadata() {
+    let temp_dir = TempDir::new().expect("Failed to create integration tempdir");
+
+    // 1. Setup central cached repository
+    let central_repo = create_mock_repo(
+        &temp_dir,
+        "central_service",
+        "service.json",
+        r#"{"service": "central", "version": "1.0.0"}"#,
+    );
+
+    // 2. Setup project with worktree
+    let project_name = "feature-xyz";
+    let project_root = temp_dir.path().join("projects").join(project_name);
+    fs::create_dir_all(&project_root).expect("Failed to create project root");
+
+    let worktree_path = project_root.join("central_service");
+    create_worktree(&central_repo, &worktree_path, project_name)
+        .expect("Failed to create worktree");
+
+    let repo_mappings = vec![RepoMapping::new("central_service", &central_repo, &worktree_path)];
+    let context = ProjectContext::new(project_name, "my-template")
+        .with_repos(repo_mappings);
+    let _ = generate_agents_md(&project_root, &context).expect("generate agents.md");
+
+    // 3. Verify resolve_main_repo discovers central_repo
+    let discovered_main = botai::git::resolve_main_repo(&worktree_path)
+        .expect("resolve_main_repo should discover backing central repo");
+    assert_eq!(
+        discovered_main.canonicalize().unwrap(),
+        central_repo.canonicalize().unwrap()
+    );
+
+    // 4. Verify central repo tracks worktree in git metadata before destruction
+    let wt_list_before = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&central_repo)
+        .output()
+        .expect("git worktree list");
+    let list_str_before = String::from_utf8_lossy(&wt_list_before.stdout);
+    assert!(list_str_before.contains(project_name));
+
+    // 5. Cleanly destroy project using remove_worktree_auto
+    let child_entries = fs::read_dir(&project_root).expect("read project dir");
+    for entry in child_entries.flatten() {
+        let child_path = entry.path();
+        if child_path.is_dir() && child_path.join(".git").exists() {
+            botai::git::remove_worktree_auto(&child_path, false)
+                .expect("remove_worktree_auto should succeed");
+        }
+    }
+    fs::remove_dir_all(&project_root).expect("remove project root");
+
+    // 6. Assertions after destruction:
+    // a. Project directory is completely removed
+    assert!(!project_root.exists(), "Project directory must be deleted");
+
+    // b. git worktree list in central repo has 0 stale worktrees (only main worktree remains)
+    let wt_list_after = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&central_repo)
+        .output()
+        .expect("git worktree list after destroy");
+    let list_str_after = String::from_utf8_lossy(&wt_list_after.stdout);
+    assert!(!list_str_after.contains(project_name));
+    let worktree_lines: Vec<&str> = list_str_after
+        .lines()
+        .filter(|line| line.starts_with("worktree "))
+        .collect();
+    assert_eq!(
+        worktree_lines.len(),
+        1,
+        "Only the main worktree should remain in central repository"
+    );
+
+    // c. Central repo's .git/worktrees entry is pruned
+    let central_wt_dir = central_repo.join(".git").join("worktrees").join("central_service");
+    assert!(
+        !central_wt_dir.exists(),
+        "Central repo .git/worktrees/<name> must be pruned"
+    );
+
+    // d. Git branch is preserved in central repo history
+    assert!(
+        branch_exists(&central_repo, project_name).expect("branch exists"),
+        "Branch must still exist in git history"
+    );
+
+    // e. A new worktree can immediately be created with the same branch name (after deleting branch) or new branch
+    let delete_branch_status = Command::new("git")
+        .args(["branch", "-D", project_name])
+        .current_dir(&central_repo)
+        .status()
+        .expect("git branch -D");
+    assert!(delete_branch_status.success());
+
+    let new_project_root = temp_dir.path().join("projects").join("feature-xyz-recreated");
+    fs::create_dir_all(&new_project_root).expect("create new project root");
+    let new_wt_path = new_project_root.join("central_service");
+
+    create_worktree(&central_repo, &new_wt_path, project_name)
+        .expect("Immediate re-creation with same branch name must succeed without collision");
+    assert!(new_wt_path.exists());
+    assert_eq!(
+        get_current_branch(&new_wt_path).expect("current branch"),
+        project_name
+    );
+
+    // Cleanup recreated worktree
+    botai::git::remove_worktree_auto(&new_wt_path, false).expect("cleanup recreated");
+}
+

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Stdout};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -21,7 +21,7 @@ use ratatui::{
 
 use crate::config::Config;
 use crate::context::{generate_agents_md, ProjectContext, RepoMapping};
-use crate::git::{create_worktree, remove_worktree};
+use crate::git::{create_worktree, remove_worktree_auto};
 use crate::notify::{ActivityTracker, NotificationService};
 use crate::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
@@ -867,7 +867,7 @@ impl TuiApp {
                 for entry in entries.flatten() {
                     let child_path = entry.path();
                     if child_path.is_dir() && child_path.join(".git").exists() {
-                        let _ = remove_worktree(Path::new("."), &child_path, true);
+                        let _ = remove_worktree_auto(&child_path, true);
                     }
                 }
             }

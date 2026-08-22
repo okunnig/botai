@@ -50,7 +50,7 @@ pub trait WorktreeManager {
         branch_name: &str,
     ) -> Result<(), GitError>;
 
-    /// Removes a git worktree at `worktree_path`.
+    /// Safely removes a git worktree at `worktree_path`.
     /// If `force` is false, returns `GitError::WorktreeDirty` if uncommitted changes exist.
     /// Preserves the git branch in the repository history.
     fn remove_worktree(
@@ -59,6 +59,13 @@ pub trait WorktreeManager {
         worktree_path: &Path,
         force: bool,
     ) -> Result<(), GitError>;
+
+    /// Automatically discovers the main repository backing `worktree_path`.
+    fn resolve_main_repo(&self, worktree_path: &Path) -> Result<PathBuf, GitError>;
+
+    /// Automatically resolves the backing repository for `worktree_path` and cleanly removes the worktree.
+    /// If `force` is false, returns `GitError::WorktreeDirty` if uncommitted changes exist.
+    fn remove_worktree_auto(&self, worktree_path: &Path, force: bool) -> Result<(), GitError>;
 
     /// Checks if a worktree at `worktree_path` has uncommitted (modified, staged, or untracked) changes.
     fn has_uncommitted_changes(&self, worktree_path: &Path) -> Result<bool, GitError>;
@@ -232,34 +239,162 @@ impl GitWorktreeManager {
             });
         }
 
+        let abs_worktree_path = if worktree_path.is_absolute() {
+            worktree_path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(worktree_path))
+                .unwrap_or_else(|_| worktree_path.to_path_buf())
+        };
+        let wt_arg = abs_worktree_path.canonicalize().unwrap_or(abs_worktree_path);
+
         let mut cmd = Command::new("git");
         cmd.arg("worktree").arg("remove");
         if force {
             cmd.arg("--force");
         }
-        cmd.arg(worktree_path);
+        cmd.arg(&wt_arg);
         cmd.current_dir(repo_path);
 
         let output = cmd.output()?;
-        if !output.status.success() {
-            return Err(GitError::CommandFailed {
-                command: format!(
-                    "git worktree remove{}{:?}",
-                    if force { " --force " } else { " " },
-                    worktree_path
-                ),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            });
-        }
 
-        // Prune stale worktree metadata
+        // Always prune stale worktree metadata on repo_path after git worktree remove
         let _ = Command::new("git")
             .args(["worktree", "prune"])
             .current_dir(repo_path)
             .output();
 
+        if !output.status.success() {
+            return Err(GitError::CommandFailed {
+                command: format!(
+                    "git worktree remove{}{:?}",
+                    if force { " --force " } else { " " },
+                    wt_arg
+                ),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
         if worktree_path.exists() {
             let _ = std::fs::remove_dir_all(worktree_path);
+        }
+
+        Ok(())
+    }
+
+    /// Resolves the main repository path backing a worktree directory.
+    pub fn resolve_main_repo(worktree_path: &Path) -> Result<PathBuf, GitError> {
+        if !worktree_path.exists() {
+            return Err(GitError::WorktreeNotFound(worktree_path.to_path_buf()));
+        }
+
+        // 1. Try running `git rev-parse --git-common-dir`
+        if let Ok(output) = Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(worktree_path)
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !stdout.is_empty() {
+                    let common_path = PathBuf::from(&stdout);
+                    let abs_common = if common_path.is_absolute() {
+                        common_path
+                    } else {
+                        worktree_path.join(common_path)
+                    };
+                    let canon_common = abs_common.canonicalize().unwrap_or(abs_common);
+
+                    // If common dir ends with .git, its parent is the repo root
+                    if canon_common.file_name().and_then(|n| n.to_str()) == Some(".git") {
+                        if let Some(parent) = canon_common.parent() {
+                            let parent_buf = parent.to_path_buf();
+                            if ensure_git_repo(&parent_buf).is_ok() {
+                                return Ok(parent_buf);
+                            }
+                        }
+                    }
+
+                    // Otherwise if the common dir itself is a valid git repo (e.g. bare repo)
+                    if ensure_git_repo(&canon_common).is_ok() {
+                        return Ok(canon_common);
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback: read .git file in worktree_path
+        let git_file = worktree_path.join(".git");
+        if git_file.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&git_file) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if let Some(gitdir_str) = trimmed.strip_prefix("gitdir:") {
+                        let gitdir_str = gitdir_str.trim();
+                        let gitdir_path = PathBuf::from(gitdir_str);
+                        let abs_gitdir = if gitdir_path.is_absolute() {
+                            gitdir_path
+                        } else {
+                            worktree_path.join(gitdir_path)
+                        };
+                        let canon_gitdir = abs_gitdir.canonicalize().unwrap_or(abs_gitdir);
+
+                        // Walk up ancestors looking for main repo root
+                        let mut current = Some(canon_gitdir.as_path());
+                        while let Some(p) = current {
+                            if p.file_name().and_then(|n| n.to_str()) == Some(".git") {
+                                if let Some(parent) = p.parent() {
+                                    let parent_buf = parent.to_path_buf();
+                                    if ensure_git_repo(&parent_buf).is_ok() {
+                                        return Ok(parent_buf);
+                                    }
+                                }
+                            }
+                            if ensure_git_repo(p).is_ok() {
+                                return Ok(p.to_path_buf());
+                            }
+                            current = p.parent();
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback: check if worktree_path itself is a git repository
+        if ensure_git_repo(worktree_path).is_ok() {
+            let canon = worktree_path
+                .canonicalize()
+                .unwrap_or_else(|_| worktree_path.to_path_buf());
+            return Ok(canon);
+        }
+
+        Err(GitError::RepoNotFound(worktree_path.to_path_buf()))
+    }
+
+    /// Automatically resolves the backing repository for `worktree_path` and cleanly removes the worktree.
+    /// Errors if uncommitted changes exist and `force` is false.
+    pub fn remove_worktree_auto(worktree_path: &Path, force: bool) -> Result<(), GitError> {
+        if !worktree_path.exists() {
+            return Err(GitError::WorktreeNotFound(worktree_path.to_path_buf()));
+        }
+
+        if !force && Self::has_uncommitted_changes(worktree_path)? {
+            return Err(GitError::WorktreeDirty {
+                path: worktree_path.to_path_buf(),
+            });
+        }
+
+        let main_repo = Self::resolve_main_repo(worktree_path)?;
+
+        let remove_res = Self::remove_worktree(&main_repo, worktree_path, force);
+        if remove_res.is_err() || worktree_path.exists() {
+            if worktree_path.exists() {
+                let _ = std::fs::remove_dir_all(worktree_path);
+            }
+            let _ = Command::new("git")
+                .args(["worktree", "prune"])
+                .current_dir(&main_repo)
+                .output();
         }
 
         Ok(())
@@ -397,6 +532,14 @@ impl WorktreeManager for GitWorktreeManager {
         Self::remove_worktree(repo_path, worktree_path, force)
     }
 
+    fn resolve_main_repo(&self, worktree_path: &Path) -> Result<PathBuf, GitError> {
+        Self::resolve_main_repo(worktree_path)
+    }
+
+    fn remove_worktree_auto(&self, worktree_path: &Path, force: bool) -> Result<(), GitError> {
+        Self::remove_worktree_auto(worktree_path, force)
+    }
+
     fn has_uncommitted_changes(&self, worktree_path: &Path) -> Result<bool, GitError> {
         Self::has_uncommitted_changes(worktree_path)
     }
@@ -448,6 +591,16 @@ pub fn remove_worktree(
     force: bool,
 ) -> Result<(), GitError> {
     GitWorktreeManager::remove_worktree(repo_path, worktree_path, force)
+}
+
+/// Module-level convenience function to resolve the main repository backing a worktree.
+pub fn resolve_main_repo(worktree_path: &Path) -> Result<PathBuf, GitError> {
+    GitWorktreeManager::resolve_main_repo(worktree_path)
+}
+
+/// Module-level convenience function to remove a worktree automatically resolving its main repository.
+pub fn remove_worktree_auto(worktree_path: &Path, force: bool) -> Result<(), GitError> {
+    GitWorktreeManager::remove_worktree_auto(worktree_path, force)
 }
 
 /// Module-level convenience function to check for uncommitted changes.
@@ -866,5 +1019,147 @@ mod tests {
             }
             other => panic!("Expected CloneFailed error, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_resolve_main_repo_from_worktree() {
+        let (_dir, repo_path) = init_mock_repo("main");
+        let worktree_dir = TempDir::new().expect("tempdir");
+        let worktree_path = worktree_dir.path().join("wt_resolve");
+
+        create_worktree(&repo_path, &worktree_path, "feat-resolve").expect("create worktree");
+
+        let resolved = resolve_main_repo(&worktree_path).expect("resolve main repo");
+        assert_eq!(
+            resolved.canonicalize().expect("canon resolved"),
+            repo_path.canonicalize().expect("canon repo")
+        );
+    }
+
+    #[test]
+    fn test_resolve_main_repo_from_main_repo_itself() {
+        let (_dir, repo_path) = init_mock_repo("main");
+        let resolved = resolve_main_repo(&repo_path).expect("resolve repo itself");
+        assert_eq!(
+            resolved.canonicalize().expect("canon resolved"),
+            repo_path.canonicalize().expect("canon repo")
+        );
+    }
+
+    #[test]
+    fn test_resolve_main_repo_nonexistent_and_invalid() {
+        let nonexistent = PathBuf::from("/nonexistent/path/that/does/not/exist");
+        assert!(matches!(
+            resolve_main_repo(&nonexistent),
+            Err(GitError::WorktreeNotFound(_))
+        ));
+
+        let empty_temp = TempDir::new().expect("tempdir");
+        assert!(matches!(
+            resolve_main_repo(empty_temp.path()),
+            Err(GitError::RepoNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_remove_worktree_auto_clean_removes_metadata_and_prunes() {
+        let (_dir, repo_path) = init_mock_repo("main");
+        let worktree_dir = TempDir::new().expect("tempdir");
+        let worktree_path = worktree_dir.path().join("wt_auto_clean");
+
+        create_worktree(&repo_path, &worktree_path, "feat-auto-clean").expect("create worktree");
+        assert!(worktree_path.exists());
+
+        // Verify git worktree list contains the worktree before removal
+        let wt_list_before = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree list");
+        let list_str_before = String::from_utf8_lossy(&wt_list_before.stdout);
+        assert!(list_str_before.contains("feat-auto-clean"));
+
+        // Remove worktree automatically
+        remove_worktree_auto(&worktree_path, false).expect("remove_worktree_auto");
+
+        // Directory should be gone
+        assert!(!worktree_path.exists());
+
+        // git worktree list should no longer list the worktree
+        let wt_list_after = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree list");
+        let list_str_after = String::from_utf8_lossy(&wt_list_after.stdout);
+        assert!(!list_str_after.contains("feat-auto-clean"));
+
+        // Branch is preserved
+        assert!(branch_exists(&repo_path, "feat-auto-clean").expect("branch exists"));
+
+        // Worktrees metadata directory should not contain the pruned entry
+        let wt_meta_dir = repo_path.join(".git").join("worktrees").join("wt_auto_clean");
+        assert!(!wt_meta_dir.exists());
+    }
+
+    #[test]
+    fn test_remove_worktree_auto_dirty_without_force_fails() {
+        let (_dir, repo_path) = init_mock_repo("main");
+        let worktree_dir = TempDir::new().expect("tempdir");
+        let worktree_path = worktree_dir.path().join("wt_auto_dirty");
+
+        create_worktree(&repo_path, &worktree_path, "feat-auto-dirty").expect("create worktree");
+        fs::write(worktree_path.join("uncommitted.txt"), "dirty").expect("write dirty file");
+
+        let err = remove_worktree_auto(&worktree_path, false).expect_err("should fail on dirty");
+        match err {
+            GitError::WorktreeDirty { path } => {
+                assert_eq!(path, worktree_path);
+            }
+            other => panic!("Expected WorktreeDirty, got {:?}", other),
+        }
+
+        assert!(worktree_path.exists());
+    }
+
+    #[test]
+    fn test_remove_worktree_auto_dirty_with_force_succeeds() {
+        let (_dir, repo_path) = init_mock_repo("main");
+        let worktree_dir = TempDir::new().expect("tempdir");
+        let worktree_path = worktree_dir.path().join("wt_auto_force_dirty");
+
+        create_worktree(&repo_path, &worktree_path, "feat-force-dirty").expect("create worktree");
+        fs::write(worktree_path.join("uncommitted.txt"), "dirty").expect("write dirty file");
+
+        remove_worktree_auto(&worktree_path, true).expect("force remove should succeed");
+        assert!(!worktree_path.exists());
+
+        let wt_list_after = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git worktree list");
+        let list_str_after = String::from_utf8_lossy(&wt_list_after.stdout);
+        assert!(!list_str_after.contains("feat-force-dirty"));
+        assert!(branch_exists(&repo_path, "feat-force-dirty").expect("branch exists"));
+    }
+
+    #[test]
+    fn test_remove_worktree_auto_recreate_worktree_at_same_path() {
+        let (_dir, repo_path) = init_mock_repo("main");
+        let worktree_dir = TempDir::new().expect("tempdir");
+        let worktree_path = worktree_dir.path().join("wt_recreate");
+
+        create_worktree(&repo_path, &worktree_path, "branch-1").expect("create branch-1");
+        assert_eq!(get_current_branch(&worktree_path).unwrap(), "branch-1");
+
+        remove_worktree_auto(&worktree_path, false).expect("remove worktree");
+        assert!(!worktree_path.exists());
+
+        create_worktree(&repo_path, &worktree_path, "branch-2").expect("create branch-2");
+        assert_eq!(get_current_branch(&worktree_path).unwrap(), "branch-2");
+
+        remove_worktree_auto(&worktree_path, false).expect("remove worktree again");
+        assert!(!worktree_path.exists());
     }
 }

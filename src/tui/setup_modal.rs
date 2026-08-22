@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -14,7 +14,7 @@ use ratatui::{
 
 use crate::config::Config;
 use crate::context::{generate_agents_md, ProjectContext, RepoMapping};
-use crate::git::{create_worktree, remove_worktree};
+use crate::git::{create_worktree, remove_worktree_auto};
 use crate::session::{ProjectSession, PtyConfig, PtySession, VtScreen};
 use crate::tui::theme::Theme;
 
@@ -298,7 +298,7 @@ pub fn run_setup_worker(
             if let Err(err) = create_worktree(&repo.local_path, &worktree_path, &project_name) {
                 // Rollback partially created worktrees & project_dir
                 for mapping in &repo_mappings {
-                    let _ = remove_worktree(Path::new("."), &mapping.worktree_path, true);
+                    let _ = remove_worktree_auto(&mapping.worktree_path, true);
                 }
                 let _ = fs::remove_dir_all(&project_dir);
                 anyhow::bail!("Failed to create worktree for '{}': {}", repo.name, err);

@@ -7,7 +7,7 @@ use std::path::Path;
 use botai::cli::{Cli, Commands};
 use botai::config::Config;
 use botai::context::{generate_agents_md, ProjectContext, RepoMapping};
-use botai::git::{create_worktree, has_uncommitted_changes, remove_worktree};
+use botai::git::{create_worktree, has_uncommitted_changes, remove_worktree_auto};
 use botai::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen};
 use botai::tui::{DashboardState, TuiApp};
 
@@ -214,7 +214,7 @@ fn cmd_start(
         .canonicalize()
         .unwrap_or(project_dir);
 
-    let mut repo_mappings = Vec::new();
+    let mut repo_mappings: Vec<RepoMapping> = Vec::new();
 
     // Create worktree for each resolved repo in the template
     for repo in &resolved_repos {
@@ -227,6 +227,9 @@ fn cmd_start(
 
         if let Err(e) = create_worktree(&repo.local_path, &worktree_path, project_name) {
             // Rollback on failure
+            for mapping in &repo_mappings {
+                let _ = remove_worktree_auto(&mapping.worktree_path, true);
+            }
             let _ = fs::remove_dir_all(&project_dir);
             return Err(e).with_context(|| {
                 format!(
@@ -410,23 +413,32 @@ fn cmd_destroy(project_name: &str, force: bool) -> Result<()> {
 
     // Inspect child directories for git worktrees
     if let Ok(entries) = fs::read_dir(&project_dir) {
-        for entry in entries.flatten() {
-            let child_path = entry.path();
-            if child_path.is_dir() && child_path.join(".git").exists() {
-                if !force && has_uncommitted_changes(&child_path)? {
+        let child_paths: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && p.join(".git").exists())
+            .collect();
+
+        if !force {
+            for child_path in &child_paths {
+                if has_uncommitted_changes(child_path)? {
                     bail!(
                         "Worktree {:?} has uncommitted changes. Use --force to destroy anyway.",
                         child_path
                     );
                 }
-                // Attempt removal
-                let _ = remove_worktree(Path::new("."), &child_path, force);
             }
+        }
+
+        for child_path in &child_paths {
+            let _ = remove_worktree_auto(child_path, force);
         }
     }
 
-    fs::remove_dir_all(&project_dir)
-        .with_context(|| format!("Failed to remove project directory {:?}", project_dir))?;
+    if project_dir.exists() {
+        fs::remove_dir_all(&project_dir)
+            .with_context(|| format!("Failed to remove project directory {:?}", project_dir))?;
+    }
 
     println!("Successfully destroyed project '{project_name}' and cleaned up worktrees.");
     Ok(())

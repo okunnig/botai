@@ -6,4 +6,5 @@ pub mod notify;
 pub mod session;
 pub mod tui;
 
+pub use git::{remove_worktree_auto, resolve_main_repo};
 pub use tui::Theme;

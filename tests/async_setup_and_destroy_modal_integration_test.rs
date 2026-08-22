@@ -94,6 +94,95 @@ fn test_integration_destroy_confirmation_modal_lifecycle() {
 }
 
 #[test]
+fn test_integration_destroy_project_with_git_worktrees_cleans_central_repo() {
+    let tmp = tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+
+    // 1. Setup mock central repo
+    let central_repo = cwd.join("repos").join("my_service");
+    fs::create_dir_all(&central_repo).expect("create repo dir");
+
+    let init = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&central_repo)
+        .status()
+        .or_else(|_| {
+            std::process::Command::new("git")
+                .arg("init")
+                .current_dir(&central_repo)
+                .status()
+        })
+        .expect("git init");
+    assert!(init.success());
+
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Tester"])
+        .current_dir(&central_repo)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "tester@botai.dev"])
+        .current_dir(&central_repo)
+        .status();
+
+    fs::write(central_repo.join("README.md"), "# Central Service\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&central_repo)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&central_repo)
+        .status();
+
+    // 2. Setup project with worktree
+    let project_name = "test-project-destroy";
+    let project_dir = cwd.join(project_name);
+    fs::create_dir_all(&project_dir).expect("create project dir");
+    fs::write(project_dir.join("AGENTS.md"), "# Project").unwrap();
+
+    let worktree_path = project_dir.join("my_service");
+    botai::git::create_worktree(&central_repo, &worktree_path, project_name)
+        .expect("create worktree");
+
+    // Verify central repo tracks worktree
+    let list_before = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&central_repo)
+        .output()
+        .expect("worktree list");
+    let str_before = String::from_utf8_lossy(&list_before.stdout);
+    assert!(str_before.contains(project_name));
+
+    // 3. Destroy project via TuiApp::destroy_project
+    let registry = SessionRegistry::new();
+    let mut app = TuiApp::new(registry).with_cwd(cwd.clone());
+
+    app.destroy_project(project_name).expect("destroy_project");
+
+    // 4. Verify project directory removed and central repo metadata cleaned up
+    assert!(!project_dir.exists(), "Project directory must be removed");
+
+    let list_after = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&central_repo)
+        .output()
+        .expect("worktree list after");
+    let str_after = String::from_utf8_lossy(&list_after.stdout);
+    assert!(
+        !str_after.contains(project_name),
+        "Central repo must not list destroyed worktree"
+    );
+
+    let wt_meta = central_repo.join(".git").join("worktrees").join("my_service");
+    assert!(!wt_meta.exists(), "Central repo worktree metadata must be pruned");
+
+    assert!(
+        botai::git::branch_exists(&central_repo, project_name).expect("branch exists"),
+        "Branch must be preserved in central repo history"
+    );
+}
+
+#[test]
 fn test_integration_async_project_setup_progress_streaming_and_success() {
     let tmp = tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();

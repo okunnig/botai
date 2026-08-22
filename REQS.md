@@ -110,11 +110,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Best-Effort Upstream Fetching**:
   - Performs a best-effort `git fetch origin` for cached repositories to discover upstream default branch changes.
   - Branches worktrees off `origin/<default_branch>` when available, or falls back to local default branch if offline.
-- **Worktrees**: For every repository defined in the template:
+- **Worktrees & Metadata Lifecycle**: For every repository defined in the template:
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
   - Checks out a new branch named `<project_name>`.
   - **Strict Branching Strategy**: Branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
   - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the template repositories or if `<project_name>` directory exists.
+  - **Backing Repository Auto-Discovery (`resolve_main_repo`)**: Resolves the main cached repository from any worktree directory using `git rev-parse --git-common-dir` and `.git` file (`gitdir: <path>`) fallback traversal.
+  - **Clean Destruction & Metadata Pruning (`remove_worktree_auto`)**: Validates uncommitted changes (guarded unless forced), removes worktrees directly from backing central repositories, and executes `git worktree prune` so stale `.git/worktrees/<name>` metadata entries are eliminated while preserving git branch history.
 - **Agent Execution**: Spawns a single agent CLI instance at the project root (`CWD/<project_name>`), providing access to all worktree subdirectories.
 
 ---
@@ -206,9 +208,11 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Refuses to overwrite an existing configuration file unless `--force` (`-f`) is passed.
   - `--stdout` (`-s`): Outputs the configuration template directly to `stdout` without creating or modifying files on disk.
 - **`botai destroy <project-name> [--force]`**:
-  - Refuses deletion if any worktree contains uncommitted git changes unless `--force` is specified.
-  - Cleans up git worktrees and removes the project directory.
-  - Preserves git branches (leaving code intact in git history).
+  - Validates all child worktrees for uncommitted changes upfront and refuses deletion unless `--force` is specified.
+  - Automatically resolves the underlying source repository in `repos_dir` (or local path) for every child worktree via `resolve_main_repo`.
+  - Executes `git worktree remove` and `git worktree prune` directly against the backing central cached repositories via `remove_worktree_auto`, thoroughly clearing worktree metadata, `.git/worktrees/<name>` directories, and internal git registrations.
+  - Removes the project directory and its worktrees from disk.
+  - Preserves git branches (leaving code intact in git history) and enables immediate re-creation without stale metadata collisions.
 
 ---
 
