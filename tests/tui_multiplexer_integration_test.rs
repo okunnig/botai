@@ -176,3 +176,119 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
     assert!(text2.contains("interactive-cli"));
     assert!(text2.contains("Ctrl+Space:Leader"));
 }
+
+#[test]
+fn test_integration_tui_multiplexer_mouse_scroll_forwarding_end_to_end() {
+    use botai::tui::app::TuiApp;
+    use botai::tui::events::{mouse_event_to_bytes, mouse_scroll_to_bytes};
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+    let mut registry = SessionRegistry::new();
+
+    // Session 1: backend-api
+    let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+    let pty1 = PtySession::spawn(config1).unwrap();
+    let vt1 = VtScreen::new(80, 24);
+    let mut ps1 = ProjectSession::new("backend-api", "workspace", "claude");
+    ps1.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps1, pty1, vt1).unwrap();
+
+    // Session 2: frontend-ui
+    let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty2 = PtySession::spawn(config2).unwrap();
+    let vt2 = VtScreen::new(80, 24);
+    let mut ps2 = ProjectSession::new("frontend-ui", "workspace", "agy");
+    ps2.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps2, pty2, vt2).unwrap();
+
+    let mut app = TuiApp::new(registry);
+    assert_eq!(app.registry.len(), 2);
+    assert_eq!(app.registry.active_index(), Some(0));
+
+    // 1. Verify mouse escape sequence conversions
+    assert_eq!(
+        mouse_scroll_to_bytes(MouseEventKind::ScrollUp),
+        b"\x1b[A\x1b[A\x1b[A".to_vec()
+    );
+    assert_eq!(
+        mouse_scroll_to_bytes(MouseEventKind::ScrollDown),
+        b"\x1b[B\x1b[B\x1b[B".to_vec()
+    );
+    assert_eq!(
+        mouse_scroll_to_bytes(MouseEventKind::ScrollLeft),
+        b"\x1b[D".to_vec()
+    );
+    assert_eq!(
+        mouse_scroll_to_bytes(MouseEventKind::ScrollRight),
+        b"\x1b[C".to_vec()
+    );
+
+    // 2. Forward ScrollUp to active session 1
+    let scroll_up = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 15,
+        row: 10,
+        modifiers: KeyModifiers::empty(),
+    };
+    app.handle_mouse_event(scroll_up);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+    assert_eq!(
+        app.registry.active_session().unwrap().project_name(),
+        "backend-api"
+    );
+
+    // 3. Switch to session 2
+    app.registry.set_active_index(1).unwrap();
+    assert_eq!(app.registry.active_index(), Some(1));
+    assert_eq!(
+        app.registry.active_session().unwrap().project_name(),
+        "frontend-ui"
+    );
+
+    // Forward ScrollDown to active session 2
+    let scroll_down = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 20,
+        row: 12,
+        modifiers: KeyModifiers::empty(),
+    };
+    app.handle_mouse_event(scroll_down);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    // 4. When leader is active, mouse scrolling is suppressed
+    app.leader_active = true;
+    app.registry.active_session_mut().unwrap().project_session.set_status(SessionStatus::WaitingForInput);
+    app.handle_mouse_event(scroll_up);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::WaitingForInput
+    );
+    app.leader_active = false;
+
+    // 5. Non-scroll events do not produce activity
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        row: 5,
+        modifiers: KeyModifiers::empty(),
+    };
+    assert!(mouse_event_to_bytes(&click).is_empty());
+    app.handle_mouse_event(click);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::WaitingForInput
+    );
+}
+

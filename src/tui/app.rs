@@ -61,7 +61,12 @@ struct TerminalCleanupGuard;
 impl Drop for TerminalCleanupGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        let _ = execute!(
+            io::stdout(),
+            crossterm::event::DisableMouseCapture,
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
     }
 }
 
@@ -171,7 +176,12 @@ impl TuiApp {
     /// Runs the interactive TUI application event loop.
     pub fn run(&mut self, stdout: &mut Stdout) -> io::Result<()> {
         enable_raw_mode()?;
-        execute!(stdout, EnterAlternateScreen, crossterm::cursor::Show)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            crossterm::event::EnableMouseCapture,
+            crossterm::cursor::Show
+        )?;
         let _guard = TerminalCleanupGuard;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
@@ -180,7 +190,12 @@ impl TuiApp {
 
         // Always restore terminal state even on error
         disable_raw_mode()?;
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show)?;
+        execute!(
+            terminal.backend_mut(),
+            crossterm::event::DisableMouseCapture,
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        )?;
         terminal.show_cursor()?;
 
         res
@@ -313,6 +328,17 @@ impl TuiApp {
                                 } else {
                                     self.handle_key_event(key);
                                 }
+                            }
+                        }
+                        Event::Mouse(mouse) => {
+                            if self.setup_modal.is_some() {
+                                self.handle_setup_modal_mouse(mouse);
+                            } else if self.quick_launcher.is_some() {
+                                self.handle_launcher_mouse(mouse);
+                            } else if self.is_showing_dashboard() {
+                                self.handle_dashboard_mouse(mouse);
+                            } else if !self.leader_active {
+                                self.handle_mouse_event(mouse);
                             }
                         }
                         Event::Resize(cols, rows) => {
@@ -467,10 +493,57 @@ impl TuiApp {
         }
     }
 
+    /// Dispatches a mouse event to the quick launcher and handles any triggered action.
+    pub fn handle_launcher_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        if let Some(mut launcher) = self.quick_launcher.take() {
+            let action = launcher.handle_mouse(mouse);
+            match action {
+                QuickLauncherAction::Cancel => {
+                    self.quick_launcher = None;
+                }
+                QuickLauncherAction::Create {
+                    template,
+                    project,
+                    prompt,
+                } => {
+                    self.quick_launcher = None;
+                    self.start_project_creation(&template, &project, prompt.as_deref());
+                }
+                QuickLauncherAction::Attach(project) => {
+                    if let Some(pos) = self
+                        .registry
+                        .list()
+                        .iter()
+                        .position(|s| s.project_name() == project)
+                    {
+                        let _ = self.registry.set_active_index(pos);
+                        self.showing_dashboard = false;
+                    } else if self.attach_project(&project).is_ok() {
+                        let new_idx = self.registry.len().saturating_sub(1);
+                        let _ = self.registry.set_active_index(new_idx);
+                        self.showing_dashboard = false;
+                    }
+                }
+                QuickLauncherAction::None => {
+                    self.quick_launcher = Some(launcher);
+                }
+            }
+        }
+    }
+
     /// Dispatches a key event to the dashboard and processes the resulting `DashboardAction`.
     pub fn handle_dashboard_key(&mut self, key: crossterm::event::KeyEvent) {
         if let Some(mut dashboard) = self.dashboard.take() {
             let action = dashboard.handle_key(key);
+            self.dashboard = Some(dashboard);
+            self.handle_dashboard_action(action);
+        }
+    }
+
+    /// Dispatches a mouse event to the dashboard and processes the resulting `DashboardAction`.
+    pub fn handle_dashboard_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        if let Some(mut dashboard) = self.dashboard.take() {
+            let action = dashboard.handle_mouse(mouse);
             self.dashboard = Some(dashboard);
             self.handle_dashboard_action(action);
         }
@@ -538,6 +611,13 @@ impl TuiApp {
                     self.refresh_dashboard();
                 }
             }
+        }
+    }
+
+    /// Handles mouse events when the setup modal is active.
+    pub fn handle_setup_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        if let Some(modal) = &mut self.setup_modal {
+            let _ = modal.handle_mouse(mouse);
         }
     }
 
@@ -905,6 +985,22 @@ impl TuiApp {
                 }
             }
             TuiAction::Resize(..) | TuiAction::Tick => {}
+        }
+    }
+
+    /// Forwards mouse scroll events to the active session's PTY as ANSI escape sequences.
+    pub fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
+        if self.leader_active {
+            return;
+        }
+        let bytes = crate::tui::events::mouse_event_to_bytes(&mouse);
+        if !bytes.is_empty() {
+            if let Some(active) = self.registry.active_session_mut() {
+                if active.pty_mut().write_all(&bytes).is_ok() {
+                    let new_status = self.tracker.record_activity();
+                    active.project_session.set_status(new_status);
+                }
+            }
         }
     }
 }
@@ -1804,6 +1900,169 @@ repos = []
         );
         app.handle_setup_modal_key(esc_key);
         assert!(app.setup_modal.is_none());
+    }
+
+    #[test]
+    fn test_tui_app_handle_mouse_event_scroll_forwarding_to_pty() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("test-pty-scroll", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert_eq!(app.registry.len(), 1);
+
+        // 1. Send ScrollUp event
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(scroll_up);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 2. Send ScrollDown event
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(scroll_down);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+    }
+
+    #[test]
+    fn test_tui_app_handle_mouse_event_ignored_when_leader_active() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let mut ps = ProjectSession::new("test-leader-scroll", "ws", "mock");
+        ps.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        app.leader_active = true;
+
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(scroll_up);
+
+        // Status should remain WaitingForInput because leader is active
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn test_tui_app_handle_mouse_event_ignored_non_scroll() {
+        use crossterm::event::{MouseButton, KeyModifiers, MouseEvent, MouseEventKind};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let mut ps = ProjectSession::new("test-non-scroll", "ws", "mock");
+        ps.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(click);
+
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn test_tui_app_mouse_scrolling_routes_to_dashboard_and_setup_modal() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+        // 1. Dashboard routing
+        let registry = SessionRegistry::new();
+        let dashboard = DashboardState::new(
+            vec!["ws1".to_string(), "ws2".to_string()],
+            vec!["proj1".to_string(), "proj2".to_string()],
+        );
+        let mut app = TuiApp::new(registry).with_dashboard(dashboard);
+        app.showing_dashboard = true;
+
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_dashboard_mouse(scroll_down);
+        assert_eq!(
+            app.dashboard.as_ref().unwrap().selected_project_idx,
+            1
+        );
+
+        // 2. Setup modal routing
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let mut modal = SetupModalState::new("proj-modal", "tpl", None, rx);
+        for i in 1..=10 {
+            modal.logs.push(format!("log {}", i));
+        }
+        app.setup_modal = Some(modal);
+
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_setup_modal_mouse(scroll_up);
+        assert_eq!(
+            app.setup_modal.as_ref().unwrap().scroll_offset,
+            3
+        );
     }
 }
 

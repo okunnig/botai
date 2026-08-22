@@ -12,7 +12,10 @@ pub use dashboard::{
     render_dashboard, ActivePanel, CreationModalState, DashboardAction, DashboardState,
     DestroyModalState,
 };
-pub use events::{key_to_bytes, map_key_event, KeyHandler, TuiAction};
+pub use events::{
+    key_to_bytes, map_key_event, mouse_event_to_bytes, mouse_scroll_to_bytes, KeyHandler,
+    TuiAction,
+};
 pub use quick_launcher::{
     render_quick_launcher, LauncherFocus, LauncherTab, QuickLauncherAction, QuickLauncherState,
 };

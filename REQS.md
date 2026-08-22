@@ -158,6 +158,10 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Accurately tracks cursor coordinates and visibility state (`\x1b[?25h` / `\x1b[?25l`) from the active session's VT parser.
   - Positions the terminal hardware cursor directly at the active input position during interactive sessions, rendering the native block cursor where user input is focused.
   - Automatically positions cursor in active text fields within dialogs/modals and hides the cursor when appropriate.
+- **Mouse Event Capture & Mouse Scroll Forwarding**:
+  - Enables terminal mouse capture (`crossterm::event::EnableMouseCapture`) on application startup and cleanly releases it (`crossterm::event::DisableMouseCapture`) on termination / cleanup.
+  - **Active Session Mouse Scrolling**: When an active project session is focused in the viewport, mouse scroll wheel events (`MouseEventKind::ScrollUp`, `MouseEventKind::ScrollDown`) are captured and forwarded directly to the active session's PTY as standard ANSI / VT scroll escape sequences (Up / Down cursor sequences, 3 lines per scroll notch by default) so interactive agent CLIs, pagers, text editors, and TUIs scroll seamlessly.
+  - **Modal & Dashboard Mouse Scrolling**: When floating modals (such as the Asynchronous Setup & Log Modal) or the interactive Dashboard are active, mouse wheel scroll events scroll the active log view or list view appropriately without leaking scroll bytes to background sessions.
 - **Session Termination & Exit Transitions**:
   - **Multi-Session Scenario (Normal Exit)**: When an agent process exits cleanly (exit code 0) and other session tabs remain active, the finished tab is automatically closed and focus transitions immediately to the adjacent active session tab.
   - **Last / Only Session Scenario (Context-Aware Exit)**:

@@ -477,6 +477,33 @@ impl QuickLauncherState {
             _ => QuickLauncherAction::None,
         }
     }
+
+    /// Handles a mouse event (e.g. scroll wheel) and returns any triggered `QuickLauncherAction`.
+    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> QuickLauncherAction {
+        match mouse.kind {
+            crossterm::event::MouseEventKind::ScrollUp => {
+                if self.tab == LauncherTab::Attach && self.focus == LauncherFocus::ProjectList {
+                    self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template {
+                    self.cycle_template_prev();
+                }
+                QuickLauncherAction::None
+            }
+            crossterm::event::MouseEventKind::ScrollDown => {
+                if self.tab == LauncherTab::Attach && self.focus == LauncherFocus::ProjectList {
+                    if !self.local_projects.is_empty()
+                        && self.selected_project_idx + 1 < self.local_projects.len()
+                    {
+                        self.selected_project_idx += 1;
+                    }
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template {
+                    self.cycle_template_next();
+                }
+                QuickLauncherAction::None
+            }
+            _ => QuickLauncherAction::None,
+        }
+    }
 }
 
 /// Renders the floating Quick Launcher modal on top of the given area in the buffer.
@@ -1358,5 +1385,64 @@ mod tests {
         assert_eq!(cell_inactive_space1.symbol(), " ");
         assert_eq!(cell_inactive_space2.symbol(), " ");
         assert_eq!(cell_inactive_p.symbol(), "p");
+    }
+
+    #[test]
+    fn test_quick_launcher_mouse_scrolling() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut state = QuickLauncherState::new(
+            vec!["tpl1".to_string(), "tpl2".to_string(), "tpl3".to_string()],
+            vec!["proj1".to_string(), "proj2".to_string(), "proj3".to_string()],
+            None,
+        );
+
+        assert_eq!(state.tab, LauncherTab::Create);
+        assert_eq!(state.focus, LauncherFocus::Template);
+        assert_eq!(state.selected_template_idx, 0);
+
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+
+        // ScrollDown cycles template forward
+        assert_eq!(state.handle_mouse(scroll_down), QuickLauncherAction::None);
+        assert_eq!(state.selected_template_idx, 1);
+
+        // ScrollUp cycles template backward
+        assert_eq!(state.handle_mouse(scroll_up), QuickLauncherAction::None);
+        assert_eq!(state.selected_template_idx, 0);
+
+        // Switch to Attach tab
+        state.switch_tab(LauncherTab::Attach);
+        assert_eq!(state.tab, LauncherTab::Attach);
+        assert_eq!(state.focus, LauncherFocus::ProjectList);
+        assert_eq!(state.selected_project_idx, 0);
+
+        // ScrollDown navigates projects down
+        assert_eq!(state.handle_mouse(scroll_down), QuickLauncherAction::None);
+        assert_eq!(state.selected_project_idx, 1);
+
+        // ScrollUp navigates projects up
+        assert_eq!(state.handle_mouse(scroll_up), QuickLauncherAction::None);
+        assert_eq!(state.selected_project_idx, 0);
+
+        // Non-scroll event
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(state.handle_mouse(click), QuickLauncherAction::None);
     }
 }

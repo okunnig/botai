@@ -375,6 +375,25 @@ impl DashboardState {
             _ => DashboardAction::None,
         }
     }
+
+    /// Handles a mouse event (e.g. scroll wheel) and returns any triggered `DashboardAction`.
+    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> DashboardAction {
+        if self.destroy_modal.is_some() || self.creation_modal.is_some() {
+            return DashboardAction::None;
+        }
+
+        match mouse.kind {
+            crossterm::event::MouseEventKind::ScrollUp => {
+                self.prev_item();
+                DashboardAction::None
+            }
+            crossterm::event::MouseEventKind::ScrollDown => {
+                self.next_item();
+                DashboardAction::None
+            }
+            _ => DashboardAction::None,
+        }
+    }
 }
 
 
@@ -1501,5 +1520,64 @@ command = "claude"
         let cell_busy_dot = buf.cell((4, 2)).unwrap();
         assert_eq!(cell_busy_dot.symbol(), "●");
         assert_eq!(cell_busy_dot.fg, theme.status_busy);
+    }
+
+    #[test]
+    fn test_dashboard_mouse_scrolling() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let mut state = DashboardState::new(
+            vec!["ws1".to_string(), "ws2".to_string(), "ws3".to_string()],
+            vec!["proj1".to_string(), "proj2".to_string(), "proj3".to_string()],
+        );
+
+        assert_eq!(state.active_panel, ActivePanel::Projects);
+        assert_eq!(state.selected_project_idx, 0);
+
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+
+        // ScrollDown in Projects panel
+        assert_eq!(state.handle_mouse(scroll_down), DashboardAction::None);
+        assert_eq!(state.selected_project_idx, 1);
+
+        assert_eq!(state.handle_mouse(scroll_down), DashboardAction::None);
+        assert_eq!(state.selected_project_idx, 2);
+
+        // ScrollUp in Projects panel
+        assert_eq!(state.handle_mouse(scroll_up), DashboardAction::None);
+        assert_eq!(state.selected_project_idx, 1);
+
+        // Switch panel to Templates
+        state.switch_panel();
+        assert_eq!(state.active_panel, ActivePanel::Templates);
+        assert_eq!(state.selected_template_idx, 0);
+
+        // ScrollDown in Templates panel
+        assert_eq!(state.handle_mouse(scroll_down), DashboardAction::None);
+        assert_eq!(state.selected_template_idx, 1);
+
+        // ScrollUp in Templates panel
+        assert_eq!(state.handle_mouse(scroll_up), DashboardAction::None);
+        assert_eq!(state.selected_template_idx, 0);
+
+        // Non-scroll mouse event
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(state.handle_mouse(click), DashboardAction::None);
     }
 }

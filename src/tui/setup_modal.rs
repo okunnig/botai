@@ -73,6 +73,7 @@ pub struct SetupModalState {
     pub error: Option<String>,
     pub receiver: Option<Receiver<SetupProgressEvent>>,
     pub spinner_frame: usize,
+    pub scroll_offset: usize,
 }
 
 impl SetupModalState {
@@ -95,6 +96,7 @@ impl SetupModalState {
             error: None,
             receiver: Some(receiver),
             spinner_frame: 0,
+            scroll_offset: 0,
         }
     }
 
@@ -138,6 +140,31 @@ impl SetupModalState {
             }
         }
         success
+    }
+
+    /// Scrolls the log viewport upwards (into older log lines).
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(self.logs.len());
+    }
+
+    /// Scrolls the log viewport downwards (towards latest log lines).
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    }
+
+    /// Handles mouse events (e.g. scroll wheel) on the setup modal.
+    pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> bool {
+        match mouse.kind {
+            crossterm::event::MouseEventKind::ScrollUp => {
+                self.scroll_up(3);
+                true
+            }
+            crossterm::event::MouseEventKind::ScrollDown => {
+                self.scroll_down(3);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Handles keyboard events when the setup modal is displayed.
@@ -479,11 +506,15 @@ pub fn render_setup_modal(
     let log_inner = log_box_block.inner(log_area);
     log_box_block.render(log_area, buf);
 
+    let total_logs = modal.logs.len();
     let max_lines = log_inner.height as usize;
-    let log_slice: Vec<&String> = if modal.logs.len() > max_lines {
-        modal.logs[modal.logs.len() - max_lines..].iter().collect()
+    let effective_offset = modal.scroll_offset.min(total_logs.saturating_sub(max_lines));
+    let end_idx = total_logs.saturating_sub(effective_offset);
+    let start_idx = end_idx.saturating_sub(max_lines);
+    let log_slice: Vec<&String> = if total_logs > 0 {
+        modal.logs[start_idx..end_idx].iter().collect()
     } else {
-        modal.logs.iter().collect()
+        Vec::new()
     };
 
     let log_lines: Vec<Line> = log_slice
@@ -629,5 +660,70 @@ mod tests {
         assert!(err_text.contains("Project Setup Failed: payment-api"));
         assert!(err_text.contains("Branch collision on 'payment-api'"));
         assert!(err_text.contains("[Esc] / [Enter] Close"));
+    }
+
+    #[test]
+    fn test_setup_modal_mouse_scrolling() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let (_tx, rx) = channel();
+        let mut modal = SetupModalState::new("test-project", "template", None, rx);
+        for i in 1..=20 {
+            modal.logs.push(format!("Log line {}", i));
+        }
+
+        assert_eq!(modal.scroll_offset, 0);
+
+        // ScrollUp increases scroll offset by 3
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(modal.handle_mouse(scroll_up));
+        assert_eq!(modal.scroll_offset, 3);
+
+        modal.handle_mouse(scroll_up);
+        assert_eq!(modal.scroll_offset, 6);
+
+        // ScrollDown decreases scroll offset by 3
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(modal.handle_mouse(scroll_down));
+        assert_eq!(modal.scroll_offset, 3);
+
+        modal.handle_mouse(scroll_down);
+        assert_eq!(modal.scroll_offset, 0);
+
+        // ScrollDown at 0 stays at 0
+        modal.handle_mouse(scroll_down);
+        assert_eq!(modal.scroll_offset, 0);
+
+        // Non-scroll mouse event returns false
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(!modal.handle_mouse(click));
+
+        // Test rendering with scroll offset
+        modal.scroll_up(15);
+        let area = Rect::new(0, 0, 100, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+        render_setup_modal(&modal, area, &mut buf, &theme);
+        let text = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(text.contains("Log line 1"));
     }
 }

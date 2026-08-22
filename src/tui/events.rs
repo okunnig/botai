@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 /// High-level actions triggered by user keyboard events or internal TUI timers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,16 @@ impl KeyHandler {
     /// Converts a crossterm `KeyEvent` into raw terminal input bytes suitable for writing to a PTY.
     pub fn key_to_bytes(event: &KeyEvent) -> Vec<u8> {
         key_to_bytes(event)
+    }
+
+    /// Converts a crossterm `MouseEventKind` into standard ANSI / VT escape sequences for scrolling.
+    pub fn mouse_scroll_to_bytes(kind: MouseEventKind) -> Vec<u8> {
+        mouse_scroll_to_bytes(kind)
+    }
+
+    /// Converts a crossterm `MouseEvent` into standard ANSI / VT escape sequences for scrolling.
+    pub fn mouse_event_to_bytes(event: &MouseEvent) -> Vec<u8> {
+        mouse_event_to_bytes(event)
     }
 }
 
@@ -165,10 +175,26 @@ pub fn key_to_bytes(event: &KeyEvent) -> Vec<u8> {
     bytes
 }
 
+/// Converts a crossterm `MouseEventKind` into standard ANSI / VT escape sequences for scrolling.
+pub fn mouse_scroll_to_bytes(kind: MouseEventKind) -> Vec<u8> {
+    match kind {
+        MouseEventKind::ScrollUp => b"\x1b[A\x1b[A\x1b[A".to_vec(),
+        MouseEventKind::ScrollDown => b"\x1b[B\x1b[B\x1b[B".to_vec(),
+        MouseEventKind::ScrollLeft => b"\x1b[D".to_vec(),
+        MouseEventKind::ScrollRight => b"\x1b[C".to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// Converts a crossterm `MouseEvent` into standard ANSI / VT escape sequences for scrolling.
+pub fn mouse_event_to_bytes(event: &MouseEvent) -> Vec<u8> {
+    mouse_scroll_to_bytes(event.kind)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyEventKind, KeyEventState};
+    use crossterm::event::{KeyEventKind, KeyEventState, MouseButton};
 
     fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
@@ -480,5 +506,123 @@ mod tests {
         let key = make_key(KeyCode::Char('k'), KeyModifiers::empty());
         let action = KeyHandler::map_key_event(key, false);
         assert_eq!(action, TuiAction::Passthrough(b"k".to_vec()));
+    }
+
+    #[test]
+    fn test_mouse_scroll_to_bytes_scroll_up() {
+        assert_eq!(
+            mouse_scroll_to_bytes(MouseEventKind::ScrollUp),
+            b"\x1b[A\x1b[A\x1b[A".to_vec()
+        );
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 15,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(mouse_event_to_bytes(&event), b"\x1b[A\x1b[A\x1b[A".to_vec());
+        assert_eq!(
+            KeyHandler::mouse_scroll_to_bytes(MouseEventKind::ScrollUp),
+            b"\x1b[A\x1b[A\x1b[A".to_vec()
+        );
+        assert_eq!(
+            KeyHandler::mouse_event_to_bytes(&event),
+            b"\x1b[A\x1b[A\x1b[A".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_mouse_scroll_to_bytes_scroll_down() {
+        assert_eq!(
+            mouse_scroll_to_bytes(MouseEventKind::ScrollDown),
+            b"\x1b[B\x1b[B\x1b[B".to_vec()
+        );
+        let event = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 5,
+            row: 20,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(mouse_event_to_bytes(&event), b"\x1b[B\x1b[B\x1b[B".to_vec());
+        assert_eq!(
+            KeyHandler::mouse_scroll_to_bytes(MouseEventKind::ScrollDown),
+            b"\x1b[B\x1b[B\x1b[B".to_vec()
+        );
+        assert_eq!(
+            KeyHandler::mouse_event_to_bytes(&event),
+            b"\x1b[B\x1b[B\x1b[B".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_mouse_scroll_to_bytes_scroll_left_right() {
+        assert_eq!(
+            mouse_scroll_to_bytes(MouseEventKind::ScrollLeft),
+            b"\x1b[D".to_vec()
+        );
+        assert_eq!(
+            mouse_scroll_to_bytes(MouseEventKind::ScrollRight),
+            b"\x1b[C".to_vec()
+        );
+
+        let left_event = MouseEvent {
+            kind: MouseEventKind::ScrollLeft,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        };
+        let right_event = MouseEvent {
+            kind: MouseEventKind::ScrollRight,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(mouse_event_to_bytes(&left_event), b"\x1b[D".to_vec());
+        assert_eq!(mouse_event_to_bytes(&right_event), b"\x1b[C".to_vec());
+    }
+
+    #[test]
+    fn test_mouse_scroll_to_bytes_non_scroll_events() {
+        let non_scroll_kinds = vec![
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Middle),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Right),
+            MouseEventKind::Drag(MouseButton::Middle),
+            MouseEventKind::Moved,
+        ];
+
+        for kind in non_scroll_kinds {
+            assert!(
+                mouse_scroll_to_bytes(kind).is_empty(),
+                "Expected empty byte sequence for non-scroll kind {:?}",
+                kind
+            );
+            let event = MouseEvent {
+                kind,
+                column: 12,
+                row: 8,
+                modifiers: KeyModifiers::empty(),
+            };
+            assert!(
+                mouse_event_to_bytes(&event).is_empty(),
+                "Expected empty byte sequence for non-scroll event {:?}",
+                event
+            );
+            assert!(
+                KeyHandler::mouse_scroll_to_bytes(kind).is_empty(),
+                "Expected empty byte sequence from KeyHandler for non-scroll kind {:?}",
+                kind
+            );
+            assert!(
+                KeyHandler::mouse_event_to_bytes(&event).is_empty(),
+                "Expected empty byte sequence from KeyHandler for non-scroll event {:?}",
+                event
+            );
+        }
     }
 }
