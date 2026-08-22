@@ -124,19 +124,33 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     assert_eq!(action, DashboardAction::None);
     assert!(state.creation_modal.is_some());
 
-    // 7. Configure template, project name, and prompt in creation modal
-    // Focus starts on ProjectName; switch to Template with BackTab/Up to cycle template
-    state.handle_key(key(KeyCode::BackTab));
-    assert_eq!(state.creation_modal.as_ref().unwrap().focus, CreationFocus::Template);
-    assert_eq!(state.creation_modal.as_ref().unwrap().selected_template(), Some("data_pipeline"));
+    // 7. Step 1: Select template in creation modal
+    assert_eq!(
+        state.creation_modal.as_ref().unwrap().step,
+        botai::tui::CreationStep::SelectTemplate
+    );
+    assert_eq!(
+        state.creation_modal.as_ref().unwrap().selected_template(),
+        Some("data_pipeline")
+    );
 
-    // Cycle template to "ecommerce"
-    state.handle_key(key(KeyCode::Right));
-    assert_eq!(state.creation_modal.as_ref().unwrap().selected_template(), Some("ecommerce"));
+    // Navigate to "ecommerce" template
+    state.handle_key(key(KeyCode::Down));
+    assert_eq!(
+        state.creation_modal.as_ref().unwrap().selected_template(),
+        Some("ecommerce")
+    );
 
-    // Switch focus to ProjectName
-    state.handle_key(key(KeyCode::Tab));
-    assert_eq!(state.creation_modal.as_ref().unwrap().focus, CreationFocus::ProjectName);
+    // Press Enter to advance to Step 2 (ConfigureDetails)
+    state.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        state.creation_modal.as_ref().unwrap().step,
+        botai::tui::CreationStep::ConfigureDetails
+    );
+    assert_eq!(
+        state.creation_modal.as_ref().unwrap().focus,
+        CreationFocus::ProjectName
+    );
 
     // Type project name into modal
     for c in "stripe-subscriptions".chars() {
@@ -146,7 +160,10 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     // Switch to agent and then prompt input field using Tab
     state.handle_key(key(KeyCode::Tab));
     state.handle_key(key(KeyCode::Tab));
-    assert_eq!(state.creation_modal.as_ref().unwrap().focus, CreationFocus::Prompt);
+    assert_eq!(
+        state.creation_modal.as_ref().unwrap().focus,
+        CreationFocus::Prompt
+    );
 
     // Type prompt into modal
     for c in "Build recurring billing engine with webhooks".chars() {

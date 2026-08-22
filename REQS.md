@@ -225,12 +225,26 @@ env = { PORT = "8080", NODE_ENV = "development" }
     5. **PTY Process Spawning**: Spawns the agent CLI process inside a master/slave pseudo-terminal attached to a virtual terminal screen buffer.
   - **Event & Progress Streaming**: Emits structured `ProjectSetupEvent` (Steps, Logs, Success, Error) consumed by CLI stdout or the TUI setup modal.
   - **Atomic Rollback**: On any initialization error (e.g. branch collision, clone failure, process crash), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory.
-- **Unified Interactive Project Creation Modal**:
+- **Unified Interactive Project Creation Modal (Two-Step Flow)**:
   - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session Quick Launcher.
-  - **Template Selection & Preview**: Interactive template cycling with real-time repository count, repo names/sources, and default agent preview.
-  - **Live Pre-Validation**: Real-time inline feedback if a project directory already exists in CWD or if branch collisions exist in template repositories.
-  - **Agent Override & Initial Prompt**: Allows selecting an alternative agent tool (`claude`, `agy`, `copilot`, `aider`) and typing an optional initial task prompt.
-  - **Asynchronous Transition**: On submission (`Enter`), transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder`.
+  - **Two-Step Dialog Progression**:
+    1. **Step 1: Searchable Template Selection (`CreationStep::SelectTemplate`)**:
+       - **Top Filter Search Bar**: Real-time search filter query (`Filter: <query>`).
+       - **Comprehensive Matching Criteria**: Case-insensitive substring matching against template names, descriptions, and constituent repository names/sources.
+       - **Master-Detail Split Layout**:
+         - *Left Panel*: Filtered template list with active selection indicator (` > `) and matching template count.
+         - *Right Preview Pane*: Live preview of the highlighted template (description, repository count, repository names and clone URLs, default agent CLI, and custom instructions).
+       - **Controls**: `Up`/`Down`/`j`/`k` (navigate list), typing text filters list, `Backspace` deletes query char, `Enter` selects template and advances to Step 2, `Esc` cancels/closes modal.
+       - **Smart Single-Template Bypass**: If only one template is configured in `config.toml`, initializes directly into Step 2 with that template pre-selected.
+    2. **Step 2: Project Details & Configuration (`CreationStep::ConfigureDetails`)**:
+       - **Modal Header**: Displays step progress and selected template name (`Create New Project (Template: <name>)`).
+       - **Form Fields**:
+         - `Project Name:` Text input with real-time pre-validation badges (`[✓ Ready]`, `[✗ Collision]`, `[Required]`).
+         - `Agent CLI:` Interactive tool selector (`claude`, `agy`, `copilot`, `aider`, etc. cycled via `Left`/`Right`).
+         - `Initial Prompt:` Optional task instruction prompt.
+         - Live pre-validation status banner at the bottom.
+       - **Back-Navigation**: Pressing `Esc` (or `Backspace` when project name input is empty) returns to Step 1 without losing configuration.
+       - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder`.
 
 ---
 

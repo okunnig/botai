@@ -9,7 +9,9 @@ pub mod theme;
 pub mod ui;
 
 pub use app::TuiApp;
-pub use creation_modal::{CreationFocus, CreationModalAction, ProjectCreationModal};
+pub use creation_modal::{
+    CreationFocus, CreationModalAction, CreationStep, ProjectCreationModal,
+};
 pub use dashboard::{
     render_dashboard, CreationModalState, DashboardAction, DashboardState,
     DestroyModalState,
