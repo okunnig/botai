@@ -156,7 +156,7 @@ impl GitWorktreeManager {
     /// Checks if a remote branch exists (e.g. `origin/main`).
     pub fn remote_branch_exists(repo_path: &Path, remote_branch: &str) -> Result<bool, GitError> {
         ensure_git_repo(repo_path)?;
-        let ref_name = format!("refs/remotes/{}", remote_branch);
+        let ref_name = format!("refs/remotes/{remote_branch}");
         let output = Command::new("git")
             .args(["rev-parse", "--verify", &ref_name])
             .current_dir(repo_path)
@@ -188,7 +188,7 @@ impl GitWorktreeManager {
         }
 
         let default_branch = Self::get_default_branch(repo_path)?;
-        let origin_ref = format!("origin/{}", default_branch);
+        let origin_ref = format!("origin/{default_branch}");
         let branch_target = if Self::remote_branch_exists(repo_path, &origin_ref).unwrap_or(false) {
             origin_ref
         } else {
@@ -211,8 +211,7 @@ impl GitWorktreeManager {
         if !output.status.success() {
             return Err(GitError::CommandFailed {
                 command: format!(
-                    "git worktree add -b {} {:?} {}",
-                    branch_name, worktree_path, branch_target
+                    "git worktree add -b {branch_name} {worktree_path:?} {branch_target}"
                 ),
                 stderr: String::from_utf8_lossy(&output.stderr).to_string(),
             });
@@ -485,7 +484,7 @@ impl GitWorktreeManager {
     /// Returns true if `branch_name` already exists in `repo_path`.
     pub fn branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, GitError> {
         ensure_git_repo(repo_path)?;
-        let ref_name = format!("refs/heads/{}", branch_name);
+        let ref_name = format!("refs/heads/{branch_name}");
         let output = Command::new("git")
             .args(["rev-parse", "--verify", &ref_name])
             .current_dir(repo_path)
@@ -720,7 +719,7 @@ mod tests {
                 assert_eq!(branch, "existing-feat");
                 assert_eq!(repo, repo_path);
             }
-            other => panic!("Expected BranchAlreadyExists error, got: {:?}", other),
+            other => panic!("Expected BranchAlreadyExists error, got: {other:?}"),
         }
         assert!(
             !worktree_path.exists(),
@@ -742,7 +741,7 @@ mod tests {
             Err(GitError::WorktreePathExists(p)) => {
                 assert_eq!(p, worktree_path);
             }
-            other => panic!("Expected WorktreePathExists error, got: {:?}", other),
+            other => panic!("Expected WorktreePathExists error, got: {other:?}"),
         }
     }
 
@@ -757,7 +756,7 @@ mod tests {
             Err(GitError::RepoNotFound(p)) => {
                 assert_eq!(p, nonexistent_repo);
             }
-            other => panic!("Expected RepoNotFound error, got: {:?}", other),
+            other => panic!("Expected RepoNotFound error, got: {other:?}"),
         }
     }
 
@@ -890,7 +889,7 @@ mod tests {
             Err(GitError::WorktreeDirty { path }) => {
                 assert_eq!(path, worktree_path);
             }
-            other => panic!("Expected WorktreeDirty error, got: {:?}", other),
+            other => panic!("Expected WorktreeDirty error, got: {other:?}"),
         }
 
         // Worktree directory must still exist
@@ -934,7 +933,7 @@ mod tests {
             Err(GitError::WorktreeNotFound(p)) => {
                 assert_eq!(p, nonexistent_wt);
             }
-            other => panic!("Expected WorktreeNotFound error, got: {:?}", other),
+            other => panic!("Expected WorktreeNotFound error, got: {other:?}"),
         }
     }
 
@@ -1017,7 +1016,7 @@ mod tests {
                 assert!(url.contains("invalid.domain"));
                 assert_eq!(path, target);
             }
-            other => panic!("Expected CloneFailed error, got: {:?}", other),
+            other => panic!("Expected CloneFailed error, got: {other:?}"),
         }
     }
 
@@ -1116,7 +1115,7 @@ mod tests {
             GitError::WorktreeDirty { path } => {
                 assert_eq!(path, worktree_path);
             }
-            other => panic!("Expected WorktreeDirty, got {:?}", other),
+            other => panic!("Expected WorktreeDirty, got {other:?}"),
         }
 
         assert!(worktree_path.exists());

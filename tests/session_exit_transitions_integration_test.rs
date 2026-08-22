@@ -148,7 +148,7 @@ fn test_integration_session_exit_error_retention_and_banner_dismissal() {
         .unwrap();
 
     let buf = terminal.backend().buffer();
-    let text = buf.content().iter().map(|c| c.symbol()).collect::<String>();
+    let text = buf.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
     assert!(text.contains("Fatal Error: failed to compile"));
     assert!(text.contains("[Process exited with code 1 - Press Enter or Ctrl+Space w to dismiss]"));
 

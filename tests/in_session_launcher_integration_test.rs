@@ -32,8 +32,8 @@ default_agent = "mock_agent"
 repos_dir = "/tmp/repos"
 
 [agents.mock_agent]
-command = "{}"
-args = {}
+command = "{cmd}"
+args = {args}
 
 [templates.payments]
 description = "Payment processing services"
@@ -42,8 +42,7 @@ repos = []
 [templates.notifications]
 description = "Notification delivery services"
 repos = []
-"#,
-        cmd, args
+"#
     );
     let config = Config::load_from_str(&config_toml).expect("load config");
 
@@ -100,7 +99,7 @@ repos = []
         .buffer()
         .content()
         .iter()
-        .map(|cell| cell.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
 
     assert!(rendered.contains("Quick Project Launcher (Ctrl+Space c)"));
@@ -128,7 +127,7 @@ repos = []
         app.handle_launcher_key(key(KeyCode::Char(c)));
     }
     assert_eq!(
-        app.quick_launcher.as_ref().unwrap().project_name_input,
+        app.quick_launcher.as_ref().unwrap().creation_modal.project_name_input,
         "stripe-webhooks"
     );
 
@@ -144,7 +143,7 @@ repos = []
         app.handle_launcher_key(key(KeyCode::Char(c)));
     }
     assert_eq!(
-        app.quick_launcher.as_ref().unwrap().prompt_input,
+        app.quick_launcher.as_ref().unwrap().creation_modal.prompt_input,
         "Implement idempotency keys"
     );
 

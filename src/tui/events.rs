@@ -599,8 +599,7 @@ mod tests {
         for kind in non_scroll_kinds {
             assert!(
                 mouse_scroll_to_bytes(kind).is_empty(),
-                "Expected empty byte sequence for non-scroll kind {:?}",
-                kind
+                "Expected empty byte sequence for non-scroll kind {kind:?}"
             );
             let event = MouseEvent {
                 kind,
@@ -610,18 +609,15 @@ mod tests {
             };
             assert!(
                 mouse_event_to_bytes(&event).is_empty(),
-                "Expected empty byte sequence for non-scroll event {:?}",
-                event
+                "Expected empty byte sequence for non-scroll event {event:?}"
             );
             assert!(
                 KeyHandler::mouse_scroll_to_bytes(kind).is_empty(),
-                "Expected empty byte sequence from KeyHandler for non-scroll kind {:?}",
-                kind
+                "Expected empty byte sequence from KeyHandler for non-scroll kind {kind:?}"
             );
             assert!(
                 KeyHandler::mouse_event_to_bytes(&event).is_empty(),
-                "Expected empty byte sequence from KeyHandler for non-scroll event {:?}",
-                event
+                "Expected empty byte sequence from KeyHandler for non-scroll event {event:?}"
             );
         }
     }

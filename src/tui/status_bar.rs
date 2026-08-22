@@ -47,7 +47,7 @@ impl<'a> StatusBar<'a> {
 
         let proj = session.project_name();
 
-        format!("  ● {}: {}  ", hotkey, proj)
+        format!("  ● {hotkey}: {proj}  ")
     }
 
     /// Formats a single tab into styled Spans with a themed leading colored status dot indicator.
@@ -79,7 +79,7 @@ impl<'a> StatusBar<'a> {
             vec![
                 Span::styled("  ", active_style),
                 Span::styled("●", dot_style_active),
-                Span::styled(format!(" {}: {}  ", hotkey, proj), active_style),
+                Span::styled(format!(" {hotkey}: {proj}  "), active_style),
             ]
         } else {
             let inactive_style = Style::default()
@@ -92,7 +92,7 @@ impl<'a> StatusBar<'a> {
             vec![
                 Span::styled("  ", inactive_style),
                 Span::styled("●", dot_style_inactive),
-                Span::styled(format!(" {}: {}  ", hotkey, proj), inactive_style),
+                Span::styled(format!(" {hotkey}: {proj}  "), inactive_style),
             ]
         }
     }
@@ -410,7 +410,7 @@ mod tests {
         let rendered = buffer
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered.contains("No Active Sessions"));
     }
@@ -437,7 +437,7 @@ mod tests {
         let rendered = buffer
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("● 1: proj-backend"));
@@ -475,7 +475,7 @@ mod tests {
         let rendered = buffer
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("● 1: proj-backend"));
@@ -496,25 +496,25 @@ mod tests {
         // 1. 200 cols -> Full hints
         let mut buf200 = Buffer::empty(Rect::new(0, 0, 200, 1));
         StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 200, 1), &mut buf200);
-        let rendered200 = buf200.content().iter().map(|c| c.symbol()).collect::<String>();
+        let rendered200 = buf200.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
         assert!(rendered200.contains("Ctrl+Space:Leader | 1..9:Switch | c:New | n/p:Nav | w:Close | d:Detach | q:Quit"));
 
         // 2. 95 cols -> Compact hints
         let mut buf95 = Buffer::empty(Rect::new(0, 0, 95, 1));
         StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 95, 1), &mut buf95);
-        let rendered95 = buf95.content().iter().map(|c| c.symbol()).collect::<String>();
+        let rendered95 = buf95.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
         assert!(rendered95.contains("Ctrl+Space:Leader | 1..9 | c:New | w:Close | d:Detach"));
 
         // 3. 60 cols -> Minimal hints
         let mut buf60 = Buffer::empty(Rect::new(0, 0, 60, 1));
         StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 60, 1), &mut buf60);
-        let rendered60 = buf60.content().iter().map(|c| c.symbol()).collect::<String>();
+        let rendered60 = buf60.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
         assert!(rendered60.contains("Ctrl+Space:Leader"));
 
         // 4. 20 cols -> Tight space, hints gracefully hidden, active tab still visible
         let mut buf20 = Buffer::empty(Rect::new(0, 0, 20, 1));
         StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 20, 1), &mut buf20);
-        let rendered20 = buf20.content().iter().map(|c| c.symbol()).collect::<String>();
+        let rendered20 = buf20.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
         assert!(rendered20.contains("● 1: p1"));
         assert!(!rendered20.contains("Ctrl+Space:Leader"));
     }
@@ -523,7 +523,7 @@ mod tests {
     fn test_status_bar_tab_clipping_preserves_active_tab() {
         let mut registry = SessionRegistry::new();
         for i in 1..=10 {
-            let name = format!("service-long-name-{}", i);
+            let name = format!("service-long-name-{i}");
             let (ps, pty, vt) =
                 create_test_session_with_status(&name, "ws", "claude", SessionStatus::Done);
             registry.add(ps, pty, vt).unwrap();
@@ -535,29 +535,28 @@ mod tests {
         // Render in a 60-col width buffer (cannot fit all 10 long tabs)
         let mut buf60 = Buffer::empty(Rect::new(0, 0, 60, 1));
         StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 60, 1), &mut buf60);
-        let rendered60 = buf60.content().iter().map(|c| c.symbol()).collect::<String>();
+        let rendered60 = buf60.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
 
         // Active tab 8 MUST be rendered
         assert!(
             rendered60.contains("● 8: service-long-name-8"),
-            "Rendered output must contain active tab 8, got: {}",
-            rendered60
+            "Rendered output must contain active tab 8, got: {rendered60}"
         );
     }
 
     #[test]
     fn test_status_bar_themed_rendering() {
         let mut registry = SessionRegistry::new();
-        let (ps, pty, vt) =
+        let (ps1, pty1, vt1) =
             create_test_session_with_status("themed-proj", "ws", "claude", SessionStatus::Busy);
-        registry.add(ps, pty, vt).unwrap();
+        registry.add(ps1, pty1, vt1).unwrap();
 
         let theme = Theme::cyberpunk();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 1));
         StatusBar::render_to_buffer_with_theme(&registry, false, &theme, Rect::new(0, 0, 80, 1), &mut buffer);
 
         // Check active tab text and colors
-        let rendered = buffer.content().iter().map(|c| c.symbol()).collect::<String>();
+        let rendered = buffer.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
         assert!(rendered.contains("● 1: themed-proj"));
 
         // Tab leading space cell at (1, 0) matches tab_active_fg and tab_active_bg

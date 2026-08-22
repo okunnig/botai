@@ -242,7 +242,7 @@ pub fn run_setup_worker(
         }
         Err(err) => {
             let err_msg = err.to_string();
-            let _ = tx.send(SetupProgressEvent::Log(format!("✗ Error: {}", err_msg)));
+            let _ = tx.send(SetupProgressEvent::Log(format!("✗ Error: {err_msg}")));
             let _ = tx.send(SetupProgressEvent::Error(err_msg));
         }
     }
@@ -326,7 +326,7 @@ pub fn render_setup_modal(
                 ),
             ]),
             Line::from(vec![Span::styled(
-                format!("Reason: {}", err),
+                format!("Reason: {err}"),
                 Style::default().fg(theme.status_error),
             )]),
         ]
@@ -409,7 +409,7 @@ pub fn render_setup_modal(
         let spinner = SPINNER_CHARS[modal.spinner_frame % SPINNER_CHARS.len()];
         Line::from(vec![
             Span::styled(
-                format!(" {} ", spinner),
+                format!(" {spinner} "),
                 Style::default()
                     .fg(theme.status_busy)
                     .add_modifier(Modifier::BOLD),
@@ -494,7 +494,7 @@ mod tests {
         let text = buf
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(text.contains("Setting Up Project: payment-api"));
@@ -510,7 +510,7 @@ mod tests {
         let err_text = err_buf
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(err_text.contains("Project Setup Failed: payment-api"));
@@ -525,7 +525,7 @@ mod tests {
         let (_tx, rx) = channel();
         let mut modal = SetupModalState::new("test-project", "template", None, rx);
         for i in 1..=20 {
-            modal.logs.push(format!("Log line {}", i));
+            modal.logs.push(format!("Log line {i}"));
         }
 
         assert_eq!(modal.scroll_offset, 0);
@@ -578,7 +578,7 @@ mod tests {
         let text = buf
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(text.contains("Log line 1"));
     }

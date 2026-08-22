@@ -248,8 +248,7 @@ impl ProjectBuilder {
         let project_dir = self.cwd.join(trimmed_name);
         if project_dir.exists() {
             validation.add_error(format!(
-                "Directory '{}' already exists in current directory",
-                trimmed_name
+                "Directory '{trimmed_name}' already exists in current directory"
             ));
             return validation;
         }
@@ -272,7 +271,7 @@ impl ProjectBuilder {
                 }
             }
             Err(e) => {
-                validation.add_error(format!("Repository resolution error: {}", e));
+                validation.add_error(format!("Repository resolution error: {e}"));
                 return validation;
             }
         }
@@ -412,14 +411,13 @@ impl ProjectBuilder {
                     let _ = remove_worktree_auto(&mapping.worktree_path, true);
                 }
                 let _ = fs::remove_dir_all(&project_dir);
-                anyhow::bail!("Failed to generate AGENTS.md: {}", err);
+                anyhow::bail!("Failed to generate AGENTS.md: {err}");
             }
 
             // Step 5: Spawning agent CLI in pseudo-terminal
             let (cols, rows) = self.viewport_size;
             progress_sink(ProjectSetupEvent::Log(format!(
-                "Spawning AI agent CLI '{}' in pseudo-terminal ({}x{})...",
-                agent_cmd, cols, rows
+                "Spawning AI agent CLI '{agent_cmd}' in pseudo-terminal ({cols}x{rows})..."
             )));
 
             let mut pty_config = PtyConfig::new(&agent_cmd, &project_dir_canon)
@@ -440,7 +438,7 @@ impl ProjectBuilder {
                         let _ = remove_worktree_auto(&mapping.worktree_path, true);
                     }
                     let _ = fs::remove_dir_all(&project_dir);
-                    anyhow::bail!("Failed to spawn agent process '{}': {}", agent_cmd, err);
+                    anyhow::bail!("Failed to spawn agent process '{agent_cmd}': {err}");
                 }
             };
 
@@ -463,7 +461,7 @@ impl ProjectBuilder {
             }
             Err(err) => {
                 let err_msg = err.to_string();
-                progress_sink(ProjectSetupEvent::Log(format!("✗ Error: {}", err_msg)));
+                progress_sink(ProjectSetupEvent::Log(format!("✗ Error: {err_msg}")));
                 progress_sink(ProjectSetupEvent::Error(err_msg));
                 Err(err)
             }

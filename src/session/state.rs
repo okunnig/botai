@@ -113,7 +113,7 @@ impl ProjectSession {
         let t_name = template_name.into();
         let a_name = agent_name.into();
         let now = SystemTime::now();
-        let id = format!("{}:{}:{}", t_name, p_name, a_name);
+        let id = format!("{t_name}:{p_name}:{a_name}");
 
         Self {
             id,

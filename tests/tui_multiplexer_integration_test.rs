@@ -104,7 +104,7 @@ fn test_integration_tui_multiplexer_navigation_and_rendering() {
     let rendered_text = buffer
         .content()
         .iter()
-        .map(|cell| cell.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
 
     assert!(rendered_text.contains("● 1: backend-api"));
@@ -146,7 +146,7 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
         .unwrap();
 
     let buf = terminal.backend().buffer();
-    let text = buf.content().iter().map(|c| c.symbol()).collect::<String>();
+    let text = buf.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
     assert!(text.contains("interactive-cli"));
     assert!(text.contains("agy-prompt> user input"));
 
@@ -171,7 +171,7 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
         .buffer()
         .content()
         .iter()
-        .map(|c| c.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
     assert!(text2.contains("interactive-cli"));
     assert!(text2.contains("Ctrl+Space:Leader"));

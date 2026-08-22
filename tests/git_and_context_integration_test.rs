@@ -153,7 +153,7 @@ fn test_full_git_worktree_and_context_synthesis_lifecycle() {
         Err(GitError::WorktreeDirty { path }) => {
             assert_eq!(path, frontend_wt);
         }
-        other => panic!("Expected WorktreeDirty error, got {:?}", other),
+        other => panic!("Expected WorktreeDirty error, got {other:?}"),
     }
     assert!(frontend_wt.exists(), "Dirty worktree must not be removed");
 

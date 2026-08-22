@@ -97,7 +97,7 @@ env = { REACT_APP_API_URL = "http://localhost:8080" }
     let resolve_missing_ws = config.resolve_agent_for_template("non_existent");
     match resolve_missing_ws {
         Err(ConfigError::TemplateNotFound(name)) => assert_eq!(name, "non_existent"),
-        other => panic!("Expected TemplateNotFound, got {:?}", other),
+        other => panic!("Expected TemplateNotFound, got {other:?}"),
     }
 }
 
@@ -114,7 +114,7 @@ fn test_integration_corrupted_config_file() {
 
     match res.unwrap_err() {
         ConfigError::Parse(_) => (),
-        other => panic!("Expected ConfigError::Parse, got {:?}", other),
+        other => panic!("Expected ConfigError::Parse, got {other:?}"),
     }
 }
 
@@ -149,7 +149,7 @@ fn test_integration_init_template_lifecycle() {
         .expect_err("Re-init without force must return ConfigError::AlreadyExists");
     match err {
         ConfigError::AlreadyExists(p) => assert_eq!(p, config_path),
-        other => panic!("Expected ConfigError::AlreadyExists, got {:?}", other),
+        other => panic!("Expected ConfigError::AlreadyExists, got {other:?}"),
     }
 
     // 4. Overwrite dummy content with force=true

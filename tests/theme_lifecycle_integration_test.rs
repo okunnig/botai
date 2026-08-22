@@ -138,14 +138,13 @@ fn test_integration_theme_palette_switching_and_fallbacks() {
     ];
 
     for (name, expected_theme) in test_cases {
-        let config_path = dir.path().join(format!("config_{}.toml", name));
+        let config_path = dir.path().join(format!("config_{name}.toml"));
         let toml = format!(
             r#"
 default_agent = "claude"
-theme = "{}"
+theme = "{name}"
 repos_dir = "/tmp/repos"
-"#,
-            name
+"#
         );
         fs::write(&config_path, toml).expect("write config");
 

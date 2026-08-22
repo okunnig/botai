@@ -27,7 +27,7 @@ fn main() -> Result<()> {
 
     let config = if config_path.exists() {
         Config::load_from_file(&config_path)
-            .with_context(|| format!("Failed to load configuration from {:?}", config_path))?
+            .with_context(|| format!("Failed to load configuration from {config_path:?}"))?
     } else {
         Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
             .context("Failed to load fallback configuration")?
@@ -70,9 +70,9 @@ fn cmd_init(config_override: Option<&Path>, force: bool, stdout: bool) -> Result
     };
 
     Config::init_file(&target_path, force)
-        .with_context(|| format!("Failed to initialize configuration at {:?}", target_path))?;
+        .with_context(|| format!("Failed to initialize configuration at {target_path:?}"))?;
 
-    println!("Initialized botai configuration at: {:?}", target_path);
+    println!("Initialized botai configuration at: {target_path:?}");
     Ok(())
 }
 
@@ -80,12 +80,12 @@ fn cmd_init(config_override: Option<&Path>, force: bool, stdout: bool) -> Result
 fn cmd_sync(config: &Config, template_filter: Option<&str>) -> Result<()> {
     let repos_dir = config.resolved_repos_dir();
     println!("=== botai Repository Sync ===");
-    println!("Central Repos Directory: {:?}", repos_dir);
+    println!("Central Repos Directory: {repos_dir:?}");
 
     let templates_to_sync: Vec<&str> = match template_filter {
         Some(tpl_name) => {
             if !config.templates.contains_key(tpl_name) {
-                bail!("Template '{}' not found in configuration", tpl_name);
+                bail!("Template '{tpl_name}' not found in configuration");
             }
             vec![tpl_name]
         }
@@ -102,7 +102,7 @@ fn cmd_sync(config: &Config, template_filter: Option<&str>) -> Result<()> {
     }
 
     for tpl_name in templates_to_sync {
-        println!("\n--- Template: {} ---", tpl_name);
+        println!("\n--- Template: {tpl_name} ---");
         let resolved = config.resolve_template_repos(tpl_name)?;
         for repo in resolved {
             if !repo.exists_locally() {
@@ -121,7 +121,7 @@ fn cmd_sync(config: &Config, template_filter: Option<&str>) -> Result<()> {
             } else {
                 print!("  [fetch] Fetching updates for '{}'...", repo.name);
                 if let Err(e) = botai::git::fetch_repo(&repo.local_path) {
-                    println!(" (fetch failed: {}, using cached branch)", e);
+                    println!(" (fetch failed: {e}, using cached branch)");
                 } else {
                     println!(" ✓ Updated");
                 }
@@ -178,16 +178,16 @@ fn cmd_start(
             total,
             message,
         } => {
-            println!("[{}/{}] {}", current, total, message);
+            println!("[{current}/{total}] {message}");
         }
         ProjectSetupEvent::Log(msg) => {
-            println!("{}", msg);
+            println!("{msg}");
         }
         ProjectSetupEvent::Success => {
             println!("✓ Project setup completed successfully!");
         }
         ProjectSetupEvent::Error(err) => {
-            eprintln!("✗ Error: {}", err);
+            eprintln!("✗ Error: {err}");
         }
     };
 
@@ -213,7 +213,7 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
     let project_dir = cwd.join(project_name);
 
     if !project_dir.exists() {
-        bail!("Project directory '{:?}' does not exist.", project_dir);
+        bail!("Project directory '{project_dir:?}' does not exist.");
     }
 
     let project_dir = project_dir
@@ -257,12 +257,12 @@ fn cmd_list(config: &Config) -> Result<()> {
         println!("  (None configured)");
     } else {
         for (name, tpl) in &config.templates {
-            println!("- Template: {}", name);
+            println!("- Template: {name}");
             if let Some(desc) = &tpl.description {
-                println!("  Description: {}", desc);
+                println!("  Description: {desc}");
             }
             if let Some(agent) = &tpl.default_agent {
-                println!("  Default Agent: {}", agent);
+                println!("  Default Agent: {agent}");
             }
             println!("  Repositories:");
             match config.resolve_template_repos(name) {
@@ -283,7 +283,7 @@ fn cmd_list(config: &Config) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    println!("    (Configuration error: {})", e);
+                    println!("    (Configuration error: {e})");
                 }
             }
         }
@@ -320,7 +320,7 @@ fn cmd_destroy(project_name: &str, force: bool) -> Result<()> {
     let project_dir = cwd.join(project_name);
 
     if !project_dir.exists() {
-        bail!("Project directory {:?} does not exist.", project_dir);
+        bail!("Project directory {project_dir:?} does not exist.");
     }
 
     // Inspect child directories for git worktrees
@@ -335,8 +335,7 @@ fn cmd_destroy(project_name: &str, force: bool) -> Result<()> {
             for child_path in &child_paths {
                 if has_uncommitted_changes(child_path)? {
                     bail!(
-                        "Worktree {:?} has uncommitted changes. Use --force to destroy anyway.",
-                        child_path
+                        "Worktree {child_path:?} has uncommitted changes. Use --force to destroy anyway."
                     );
                 }
             }
@@ -349,7 +348,7 @@ fn cmd_destroy(project_name: &str, force: bool) -> Result<()> {
 
     if project_dir.exists() {
         fs::remove_dir_all(&project_dir)
-            .with_context(|| format!("Failed to remove project directory {:?}", project_dir))?;
+            .with_context(|| format!("Failed to remove project directory {project_dir:?}"))?;
     }
 
     println!("Successfully destroyed project '{project_name}' and cleaned up worktrees.");

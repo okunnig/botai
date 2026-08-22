@@ -841,9 +841,9 @@ impl ProjectCreationModal {
                     for repo in &tpl.repos {
                         let name = crate::config::derive_repo_name(repo);
                         let display_str = if repo != &name {
-                            format!("  • {} ({})", name, repo)
+                            format!("  • {name} ({repo})")
                         } else {
-                            format!("  • {}", name)
+                            format!("  • {name}")
                         };
                         right_lines.push(Line::from(Span::styled(
                             display_str,
@@ -865,7 +865,7 @@ impl ProjectCreationModal {
                         ]));
                         for line in trimmed.lines().take(2) {
                             right_lines.push(Line::from(Span::styled(
-                                format!("  {}", line),
+                                format!("  {line}"),
                                 Style::default().fg(theme.input_placeholder),
                             )));
                         }
@@ -907,7 +907,7 @@ impl ProjectCreationModal {
     /// Renders Step 2: Project Details & Configuration.
     fn render_step2(&self, modal_area: Rect, buf: &mut Buffer, theme: &Theme) {
         let tpl_name = self.selected_template().unwrap_or("default");
-        let title = format!(" Create New Project (Template: {}) ", tpl_name);
+        let title = format!(" Create New Project (Template: {tpl_name}) ");
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -975,11 +975,11 @@ impl ProjectCreationModal {
             let d_str = tpl
                 .description
                 .as_deref()
-                .map(|d| format!("    Description: {}", d))
+                .map(|d| format!("    Description: {d}"))
                 .unwrap_or_default();
             (r_str, d_str)
         } else {
-            (format!("  Template: {}", tpl_name), String::new())
+            (format!("  Template: {tpl_name}"), String::new())
         };
 
         // 2. Project Name input with validation badge
@@ -1111,7 +1111,7 @@ impl ProjectCreationModal {
 
         // Row 3: Project Name
         lines.push(Line::from(vec![
-            Span::styled(format!("{}Project Name: ", proj_prefix), proj_label_style),
+            Span::styled(format!("{proj_prefix}Project Name: "), proj_label_style),
             proj_display,
             Span::raw(" "),
             badge_span,
@@ -1119,13 +1119,13 @@ impl ProjectCreationModal {
 
         // Row 4: Agent
         lines.push(Line::from(vec![
-            Span::styled(format!("{}Agent CLI: ", agent_prefix), agent_label_style),
+            Span::styled(format!("{agent_prefix}Agent CLI: "), agent_label_style),
             agent_display,
         ]));
 
         // Row 5: Prompt
         lines.push(Line::from(vec![
-            Span::styled(format!("{}Initial Prompt: ", prompt_prefix), prompt_label_style),
+            Span::styled(format!("{prompt_prefix}Initial Prompt: "), prompt_label_style),
             prompt_display,
         ]));
 
@@ -1257,7 +1257,7 @@ mod tests {
                 assert!(agent_override.is_some());
                 assert_eq!(prompt.as_deref(), Some("Do task"));
             }
-            other => panic!("Expected Submit action, got: {:?}", other),
+            other => panic!("Expected Submit action, got: {other:?}"),
         }
     }
 
@@ -1469,7 +1469,7 @@ mod tests {
         let text1 = buf1
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(text1.contains("Create New Project"));
@@ -1493,7 +1493,7 @@ mod tests {
         let text2 = buf2
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(text2.contains("Create New Project (Template: billing)"));

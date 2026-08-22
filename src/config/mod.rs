@@ -664,7 +664,7 @@ repos = ["/tmp/repo"]
 
         match err {
             ConfigError::TemplateNotFound(name) => assert_eq!(name, "ghost_template"),
-            other => panic!("Expected ConfigError::TemplateNotFound, got {:?}", other),
+            other => panic!("Expected ConfigError::TemplateNotFound, got {other:?}"),
         }
     }
 
@@ -689,7 +689,7 @@ repos = ["/path/to/repo"]
 
         match err {
             ConfigError::AgentNotFound(agent) => assert_eq!(agent, "nonexistent_agent"),
-            other => panic!("Expected ConfigError::AgentNotFound, got {:?}", other),
+            other => panic!("Expected ConfigError::AgentNotFound, got {other:?}"),
         }
     }
 
@@ -713,7 +713,7 @@ repos = ["/path/to/repo"]
 
         match err {
             ConfigError::AgentNotFound(agent) => assert_eq!(agent, "missing_global_agent"),
-            other => panic!("Expected ConfigError::AgentNotFound, got {:?}", other),
+            other => panic!("Expected ConfigError::AgentNotFound, got {other:?}"),
         }
     }
 
@@ -728,8 +728,7 @@ repos = ["/path/to/repo"]
         let path = default_path.unwrap();
         assert!(
             path.ends_with("botai/config.toml") || path.ends_with(r"botai\config.toml"),
-            "Expected default config path to end with 'botai/config.toml', got: {:?}",
-            path
+            "Expected default config path to end with 'botai/config.toml', got: {path:?}"
         );
 
         #[cfg(unix)]
@@ -738,8 +737,7 @@ repos = ["/path/to/repo"]
             assert!(
                 path_str.contains(".config/botai/config.toml")
                     || path_str.contains("botai/config.toml"),
-                "On Unix, default path should follow XDG or ~/.config conventions: {}",
-                path_str
+                "On Unix, default path should follow XDG or ~/.config conventions: {path_str}"
             );
         }
 
@@ -899,7 +897,7 @@ repos = [
                 assert_eq!(source1, "https://github.com/orgA/auth-service.git");
                 assert_eq!(source2, "https://github.com/orgB/auth-service.git");
             }
-            other => panic!("Expected ConfigError::RepoCollision, got {:?}", other),
+            other => panic!("Expected ConfigError::RepoCollision, got {other:?}"),
         }
     }
 
@@ -916,7 +914,7 @@ command = "claude"
 
         match err {
             ConfigError::Parse(_) => (),
-            other => panic!("Expected ConfigError::Parse, got: {:?}", other),
+            other => panic!("Expected ConfigError::Parse, got: {other:?}"),
         }
     }
 
@@ -933,7 +931,7 @@ command = "claude"
 
         match err {
             ConfigError::Parse(_) => (),
-            other => panic!("Expected ConfigError::Parse, got: {:?}", other),
+            other => panic!("Expected ConfigError::Parse, got: {other:?}"),
         }
     }
 
@@ -953,7 +951,7 @@ repos = ["/path/to/repo"]
 
         match err {
             ConfigError::Parse(_) => (),
-            other => panic!("Expected ConfigError::Parse, got: {:?}", other),
+            other => panic!("Expected ConfigError::Parse, got: {other:?}"),
         }
     }
 
@@ -974,7 +972,7 @@ repos = ["/path/to/repo"]
 
         match err {
             ConfigError::Parse(_) => (),
-            other => panic!("Expected ConfigError::Parse, got: {:?}", other),
+            other => panic!("Expected ConfigError::Parse, got: {other:?}"),
         }
     }
 
@@ -995,7 +993,7 @@ description = "Missing repos field"
 
         match err {
             ConfigError::Parse(_) => (),
-            other => panic!("Expected ConfigError::Parse, got: {:?}", other),
+            other => panic!("Expected ConfigError::Parse, got: {other:?}"),
         }
     }
 
@@ -1016,7 +1014,7 @@ repos = "not-a-list"
 
         match err {
             ConfigError::Parse(_) => (),
-            other => panic!("Expected ConfigError::Parse, got: {:?}", other),
+            other => panic!("Expected ConfigError::Parse, got: {other:?}"),
         }
     }
 
@@ -1027,7 +1025,7 @@ repos = "not-a-list"
 
         match err {
             ConfigError::Parse(_) => (),
-            other => panic!("Expected ConfigError::Parse, got: {:?}", other),
+            other => panic!("Expected ConfigError::Parse, got: {other:?}"),
         }
     }
 
@@ -1055,8 +1053,7 @@ repos = "not-a-list"
             ConfigError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
             ConfigError::NotFound(p) => assert_eq!(p, non_existent_path),
             other => panic!(
-                "Expected ConfigError::Io or ConfigError::NotFound, got: {:?}",
-                other
+                "Expected ConfigError::Io or ConfigError::NotFound, got: {other:?}"
             ),
         }
     }
@@ -1286,7 +1283,7 @@ repos_dir = "/tmp/repos"
 
         match err {
             ConfigError::AlreadyExists(p) => assert_eq!(p, config_path),
-            other => panic!("Expected ConfigError::AlreadyExists, got: {:?}", other),
+            other => panic!("Expected ConfigError::AlreadyExists, got: {other:?}"),
         }
     }
 

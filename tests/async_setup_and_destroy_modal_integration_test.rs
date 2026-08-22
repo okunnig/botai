@@ -52,7 +52,7 @@ fn test_integration_destroy_confirmation_modal_lifecycle() {
     let rendered = buf
         .content()
         .iter()
-        .map(|c| c.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
     assert!(rendered.contains("Confirm Destroy Project"));
     assert!(rendered.contains("service-del"));
@@ -306,7 +306,7 @@ repos = ["nonexistent-repo-that-does-not-exist"]
     let text = buf
         .content()
         .iter()
-        .map(|c| c.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
     assert!(text.contains("Project Setup Failed: failing-proj"));
     assert!(text.contains("[Esc] / [Enter] Close"));

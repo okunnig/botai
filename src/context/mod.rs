@@ -107,12 +107,12 @@ impl ContextSynthesizer {
         md.push_str(&format!("Template: **{}**\n\n", context.template_name));
 
         if let Some(desc) = &context.description {
-            md.push_str(&format!("{}\n\n", desc));
+            md.push_str(&format!("{desc}\n\n"));
         }
 
         if let Some(prompt) = &context.initial_prompt {
             md.push_str("## Task Description\n\n");
-            md.push_str(&format!("{}\n\n", prompt));
+            md.push_str(&format!("{prompt}\n\n"));
         }
 
         md.push_str("## Repository Layout\n\n");
@@ -140,7 +140,7 @@ impl ContextSynthesizer {
             keys.sort();
             for key in keys {
                 let val = &context.env[key];
-                md.push_str(&format!("| `{}` | `{}` |\n", key, val));
+                md.push_str(&format!("| `{key}` | `{val}` |\n"));
             }
             md.push('\n');
         }

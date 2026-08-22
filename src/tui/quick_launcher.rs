@@ -51,9 +51,6 @@ pub struct QuickLauncherState {
     pub tab: LauncherTab,
     pub focus: LauncherFocus,
     pub templates: Vec<String>,
-    pub selected_template_idx: usize,
-    pub project_name_input: String,
-    pub prompt_input: String,
     pub local_projects: Vec<String>,
     pub running_sessions: HashMap<String, SessionStatus>,
     pub selected_project_idx: usize,
@@ -88,19 +85,13 @@ impl QuickLauncherState {
             });
         }
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let creation_modal = ProjectCreationModal::new(&config, &cwd, default_template);
-
-        let selected_template_idx = default_template
-            .and_then(|target| templates.iter().position(|w| w == target))
-            .unwrap_or(0);
+        let mut creation_modal = ProjectCreationModal::new(&config, &cwd, default_template);
+        creation_modal.step = crate::tui::creation_modal::CreationStep::ConfigureDetails;
 
         Self {
             tab: LauncherTab::Create,
             focus: LauncherFocus::Template,
             templates,
-            selected_template_idx,
-            project_name_input: String::new(),
-            prompt_input: String::new(),
             local_projects,
             running_sessions: HashMap::new(),
             selected_project_idx: 0,
@@ -119,18 +110,13 @@ impl QuickLauncherState {
         let mut templates: Vec<String> = config.templates.keys().cloned().collect();
         templates.sort();
 
-        let creation_modal = ProjectCreationModal::new(config, cwd, default_template);
-        let selected_template_idx = default_template
-            .and_then(|target| templates.iter().position(|w| w == target))
-            .unwrap_or(0);
+        let mut creation_modal = ProjectCreationModal::new(config, cwd, default_template);
+        creation_modal.step = crate::tui::creation_modal::CreationStep::ConfigureDetails;
 
         Self {
             tab: LauncherTab::Create,
             focus: LauncherFocus::Template,
             templates,
-            selected_template_idx,
-            project_name_input: String::new(),
-            prompt_input: String::new(),
             local_projects,
             running_sessions: HashMap::new(),
             selected_project_idx: 0,
@@ -205,7 +191,7 @@ impl QuickLauncherState {
             match self.focus {
                 LauncherFocus::ProjectName => {
                     let prefix_len = 16u16;
-                    let cursor_x = body_area.x + prefix_len + self.project_name_input.chars().count() as u16;
+                    let cursor_x = body_area.x + prefix_len + self.creation_modal.project_name_input.chars().count() as u16;
                     let cursor_y = body_area.y + 2;
                     if cursor_x < body_area.x + body_area.width && cursor_y < body_area.y + body_area.height {
                         Some(Position::new(cursor_x, cursor_y))
@@ -218,7 +204,7 @@ impl QuickLauncherState {
                 }
                 LauncherFocus::Prompt => {
                     let prefix_len = 18u16;
-                    let cursor_x = body_area.x + prefix_len + self.prompt_input.chars().count() as u16;
+                    let cursor_x = body_area.x + prefix_len + self.creation_modal.prompt_input.chars().count() as u16;
                     let cursor_y = body_area.y + 4;
                     if cursor_x < body_area.x + body_area.width && cursor_y < body_area.y + body_area.height {
                         Some(Position::new(cursor_x, cursor_y))
@@ -248,16 +234,7 @@ impl QuickLauncherState {
 
     /// Returns the currently selected template name, if available.
     pub fn selected_template(&self) -> Option<&str> {
-        if !self.templates.is_empty() && self.selected_template_idx < self.templates.len() {
-            Some(&self.templates[self.selected_template_idx])
-        } else {
-            None
-        }
-    }
-
-    /// Backward compatibility alias for selected_template.
-    pub fn selected_workspace(&self) -> Option<&str> {
-        self.selected_template()
+        self.creation_modal.selected_template()
     }
 
     /// Returns the currently selected local project name, if available.
@@ -272,32 +249,12 @@ impl QuickLauncherState {
 
     /// Cycles to the next template.
     pub fn cycle_template_next(&mut self) {
-        if !self.templates.is_empty() {
-            self.selected_template_idx =
-                (self.selected_template_idx + 1) % self.templates.len();
-            self.creation_modal.cycle_template_next();
-            self.selected_template_idx = self.creation_modal.selected_template_idx;
-        }
-    }
-
-    /// Backward compatibility alias for cycle_template_next.
-    pub fn cycle_workspace_next(&mut self) {
-        self.cycle_template_next();
+        self.creation_modal.cycle_template_next();
     }
 
     /// Cycles to the previous template.
     pub fn cycle_template_prev(&mut self) {
-        if !self.templates.is_empty() {
-            self.selected_template_idx = (self.selected_template_idx + self.templates.len() - 1)
-                % self.templates.len();
-            self.creation_modal.cycle_template_prev();
-            self.selected_template_idx = self.creation_modal.selected_template_idx;
-        }
-    }
-
-    /// Backward compatibility alias for cycle_template_prev.
-    pub fn cycle_workspace_prev(&mut self) {
-        self.cycle_template_prev();
+        self.creation_modal.cycle_template_prev();
     }
 
     /// Switches the active modal tab.
@@ -337,6 +294,12 @@ impl QuickLauncherState {
                 };
             }
         }
+        match self.focus {
+            LauncherFocus::Template => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Template,
+            LauncherFocus::ProjectName => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::ProjectName,
+            LauncherFocus::Prompt => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt,
+            _ => {}
+        }
     }
 
     /// Moves focus to the previous field/tab.
@@ -358,6 +321,12 @@ impl QuickLauncherState {
                     _ => LauncherFocus::TabBar,
                 };
             }
+        }
+        match self.focus {
+            LauncherFocus::Template => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Template,
+            LauncherFocus::ProjectName => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::ProjectName,
+            LauncherFocus::Prompt => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt,
+            _ => {}
         }
     }
 
@@ -389,8 +358,7 @@ impl QuickLauncherState {
                         LauncherTab::Attach => LauncherTab::Create,
                     };
                     self.switch_tab(next_tab);
-                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template
-                {
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template {
                     self.cycle_template_prev();
                 }
                 QuickLauncherAction::None
@@ -402,8 +370,7 @@ impl QuickLauncherState {
                         LauncherTab::Attach => LauncherTab::Create,
                     };
                     self.switch_tab(next_tab);
-                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template
-                {
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template {
                     self.cycle_template_next();
                 }
                 QuickLauncherAction::None
@@ -479,13 +446,11 @@ impl QuickLauncherState {
             KeyCode::Char(c) if !has_ctrl && !has_alt => {
                 if self.tab == LauncherTab::Create {
                     if self.focus == LauncherFocus::ProjectName {
-                        self.project_name_input.push(c);
-                        self.creation_modal.project_name_input = self.project_name_input.clone();
+                        self.creation_modal.project_name_input.push(c);
                         self.creation_modal.revalidate();
                         self.clear_error();
                     } else if self.focus == LauncherFocus::Prompt {
-                        self.prompt_input.push(c);
-                        self.creation_modal.prompt_input = self.prompt_input.clone();
+                        self.creation_modal.prompt_input.push(c);
                         self.clear_error();
                     }
                 }
@@ -494,13 +459,11 @@ impl QuickLauncherState {
             KeyCode::Backspace => {
                 if self.tab == LauncherTab::Create {
                     if self.focus == LauncherFocus::ProjectName {
-                        self.project_name_input.pop();
-                        self.creation_modal.project_name_input = self.project_name_input.clone();
+                        self.creation_modal.project_name_input.pop();
                         self.creation_modal.revalidate();
                         self.clear_error();
                     } else if self.focus == LauncherFocus::Prompt {
-                        self.prompt_input.pop();
-                        self.creation_modal.prompt_input = self.prompt_input.clone();
+                        self.creation_modal.prompt_input.pop();
                         self.clear_error();
                     }
                 }
@@ -508,15 +471,15 @@ impl QuickLauncherState {
             }
             KeyCode::Enter => match self.tab {
                 LauncherTab::Create => {
-                    let trimmed_name = self.project_name_input.trim();
+                    let trimmed_name = self.creation_modal.project_name_input.trim();
                     if trimmed_name.is_empty() {
                         self.set_error("Project name cannot be empty");
                         QuickLauncherAction::None
                     } else if let Some(tpl) = self.selected_template() {
-                        let prompt = if self.prompt_input.trim().is_empty() {
+                        let prompt = if self.creation_modal.prompt_input.trim().is_empty() {
                             None
                         } else {
-                            Some(self.prompt_input.trim().to_string())
+                            Some(self.creation_modal.prompt_input.trim().to_string())
                         };
                         QuickLauncherAction::Create {
                             template: tpl.to_string(),
@@ -748,7 +711,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                 let count_str = format!(
                     " ◀ {} ▶  ({}/{})",
                     tpl_name,
-                    state.selected_template_idx + 1,
+                    state.creation_modal.selected_template_idx + 1,
                     state.templates.len()
                 );
                 Span::styled(
@@ -759,7 +722,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                 )
             };
 
-            let proj_display = if state.project_name_input.is_empty() && !proj_focused {
+            let proj_display = if state.creation_modal.project_name_input.is_empty() && !proj_focused {
                 Span::styled(
                     "<enter project name>",
                     Style::default().fg(theme.input_placeholder),
@@ -767,14 +730,14 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
             } else {
                 let cursor = if proj_focused { " " } else { "" };
                 Span::styled(
-                    format!("{}{}", state.project_name_input, cursor),
+                    format!("{}{}", state.creation_modal.project_name_input, cursor),
                     Style::default()
                         .fg(theme.input_text)
                         .add_modifier(Modifier::BOLD),
                 )
             };
 
-            let prompt_display = if state.prompt_input.is_empty() && !prompt_focused {
+            let prompt_display = if state.creation_modal.prompt_input.is_empty() && !prompt_focused {
                 Span::styled(
                     "<optional initial task prompt>",
                     Style::default().fg(theme.input_placeholder),
@@ -782,24 +745,24 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
             } else {
                 let cursor = if prompt_focused { " " } else { "" };
                 Span::styled(
-                    format!("{}{}", state.prompt_input, cursor),
+                    format!("{}{}", state.creation_modal.prompt_input, cursor),
                     Style::default().fg(theme.input_text),
                 )
             };
 
             let lines = vec![
                 Line::from(vec![
-                    Span::styled(format!("{}Template: ", tpl_prefix), tpl_style),
+                    Span::styled(format!("{tpl_prefix}Template: "), tpl_style),
                     tpl_display,
                 ]),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled(format!("{}Project Name: ", proj_prefix), proj_style),
+                    Span::styled(format!("{proj_prefix}Project Name: "), proj_style),
                     proj_display,
                 ]),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled(format!("{}Initial Prompt: ", prompt_prefix), prompt_style),
+                    Span::styled(format!("{prompt_prefix}Initial Prompt: "), prompt_style),
                     prompt_display,
                 ]),
             ];
@@ -876,7 +839,7 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
     if let Some(err_area) = error_area {
         if let Some(ref err) = state.error_message {
             let err_line = Line::from(Span::styled(
-                format!(" ✖ Error: {}", err),
+                format!(" ✖ Error: {err}"),
                 Style::default()
                     .fg(theme.error_banner_bg)
                     .add_modifier(Modifier::BOLD),
@@ -950,7 +913,6 @@ mod tests {
         assert_eq!(launcher.focus, LauncherFocus::Template);
         assert_eq!(launcher.templates, templates);
         assert_eq!(launcher.local_projects, projects);
-        assert_eq!(launcher.selected_template_idx, 1);
         assert_eq!(launcher.selected_template(), Some("analytics"));
         assert_eq!(launcher.selected_project(), Some("feature-cart"));
         assert!(launcher.error_message.is_none());
@@ -960,7 +922,7 @@ mod tests {
     fn test_quick_launcher_initialization_default_fallback() {
         let templates = vec!["backend".to_string()];
         let launcher = QuickLauncherState::new(templates, vec![], Some("unknown"));
-        assert_eq!(launcher.selected_template_idx, 0);
+        assert_eq!(launcher.creation_modal.selected_template_idx, 0);
         assert_eq!(launcher.selected_template(), Some("backend"));
     }
 
@@ -968,19 +930,19 @@ mod tests {
     fn test_template_cycling() {
         let templates = vec!["ws1".to_string(), "ws2".to_string(), "ws3".to_string()];
         let mut launcher = QuickLauncherState::new(templates, vec![], None);
-        assert_eq!(launcher.selected_template_idx, 0);
+        assert_eq!(launcher.creation_modal.selected_template_idx, 0);
 
         launcher.cycle_template_next();
-        assert_eq!(launcher.selected_template_idx, 1);
+        assert_eq!(launcher.creation_modal.selected_template_idx, 1);
         launcher.cycle_template_next();
-        assert_eq!(launcher.selected_template_idx, 2);
+        assert_eq!(launcher.creation_modal.selected_template_idx, 2);
         launcher.cycle_template_next();
-        assert_eq!(launcher.selected_template_idx, 0);
+        assert_eq!(launcher.creation_modal.selected_template_idx, 0);
 
         launcher.cycle_template_prev();
-        assert_eq!(launcher.selected_template_idx, 2);
+        assert_eq!(launcher.creation_modal.selected_template_idx, 2);
         launcher.cycle_template_prev();
-        assert_eq!(launcher.selected_template_idx, 1);
+        assert_eq!(launcher.creation_modal.selected_template_idx, 1);
     }
 
     #[test]
@@ -988,9 +950,9 @@ mod tests {
         let mut launcher = QuickLauncherState::new(vec![], vec![], None);
         assert_eq!(launcher.selected_template(), None);
         launcher.cycle_template_next();
-        assert_eq!(launcher.selected_template_idx, 0);
+        assert_eq!(launcher.creation_modal.selected_template_idx, 0);
         launcher.cycle_template_prev();
-        assert_eq!(launcher.selected_template_idx, 0);
+        assert_eq!(launcher.creation_modal.selected_template_idx, 0);
     }
 
     #[test]
@@ -1071,13 +1033,13 @@ mod tests {
         for c in "billing-service".chars() {
             launcher.handle_key(key(KeyCode::Char(c)));
         }
-        assert_eq!(launcher.project_name_input, "billing-service");
+        assert_eq!(launcher.creation_modal.project_name_input, "billing-service");
 
         // Backspace
         launcher.handle_key(key(KeyCode::Backspace));
-        assert_eq!(launcher.project_name_input, "billing-servic");
+        assert_eq!(launcher.creation_modal.project_name_input, "billing-servic");
         launcher.handle_key(key(KeyCode::Char('e')));
-        assert_eq!(launcher.project_name_input, "billing-service");
+        assert_eq!(launcher.creation_modal.project_name_input, "billing-service");
 
         // Switch to Prompt
         launcher.handle_key(key(KeyCode::Tab));
@@ -1086,10 +1048,10 @@ mod tests {
         for c in "Implement stripe checkout".chars() {
             launcher.handle_key(key(KeyCode::Char(c)));
         }
-        assert_eq!(launcher.prompt_input, "Implement stripe checkout");
+        assert_eq!(launcher.creation_modal.prompt_input, "Implement stripe checkout");
 
         launcher.handle_key(key(KeyCode::Backspace));
-        assert_eq!(launcher.prompt_input, "Implement stripe checkou");
+        assert_eq!(launcher.creation_modal.prompt_input, "Implement stripe checkou");
     }
 
     #[test]
@@ -1248,7 +1210,7 @@ mod tests {
         let rendered = buffer
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("Quick Project Launcher (Ctrl+Space c)"));
@@ -1272,7 +1234,7 @@ mod tests {
         let rendered = buffer
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("✖ Error: Branch collision: 'test' already exists"));
@@ -1294,7 +1256,7 @@ mod tests {
         let rendered = buffer
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("my-backend"));
@@ -1333,7 +1295,7 @@ mod tests {
         assert_eq!(launcher.cursor_position(area), Some(Position::new(31, 12)));
 
         // Focus on ProjectName, with input "demo-api"
-        launcher.project_name_input = "demo-api".to_string();
+        launcher.creation_modal.project_name_input = "demo-api".to_string();
         assert_eq!(launcher.cursor_position(area), Some(Position::new(39, 12)));
 
         // 3. Focus on Prompt, empty input
@@ -1341,7 +1303,7 @@ mod tests {
         assert_eq!(launcher.cursor_position(area), Some(Position::new(33, 14)));
 
         // Focus on Prompt, with input "hello"
-        launcher.prompt_input = "hello".to_string();
+        launcher.creation_modal.prompt_input = "hello".to_string();
         assert_eq!(launcher.cursor_position(area), Some(Position::new(38, 14)));
 
         // 4. Focus on TabBar -> None
@@ -1409,7 +1371,7 @@ mod tests {
         let rendered = buffer
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("●"));
@@ -1465,7 +1427,7 @@ mod tests {
 
         assert_eq!(state.tab, LauncherTab::Create);
         assert_eq!(state.focus, LauncherFocus::Template);
-        assert_eq!(state.selected_template_idx, 0);
+        assert_eq!(state.creation_modal.selected_template_idx, 0);
 
         let scroll_down = MouseEvent {
             kind: MouseEventKind::ScrollDown,
@@ -1482,11 +1444,11 @@ mod tests {
 
         // ScrollDown cycles template forward
         assert_eq!(state.handle_mouse(scroll_down), QuickLauncherAction::None);
-        assert_eq!(state.selected_template_idx, 1);
+        assert_eq!(state.creation_modal.selected_template_idx, 1);
 
         // ScrollUp cycles template backward
         assert_eq!(state.handle_mouse(scroll_up), QuickLauncherAction::None);
-        assert_eq!(state.selected_template_idx, 0);
+        assert_eq!(state.creation_modal.selected_template_idx, 0);
 
         // Switch to Attach tab
         state.switch_tab(LauncherTab::Attach);

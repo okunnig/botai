@@ -33,7 +33,7 @@ fn create_mock_upstream_repo(base_dir: &TempDir, name: &str) -> PathBuf {
         .current_dir(&repo_path)
         .status();
 
-    fs::write(repo_path.join("README.md"), format!("# {}\n", name)).expect("write file");
+    fs::write(repo_path.join("README.md"), format!("# {name}\n")).expect("write file");
 
     let add = Command::new("git")
         .args(["add", "README.md"])

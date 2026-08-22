@@ -20,9 +20,9 @@ use ratatui::{
 };
 
 use crate::config::Config;
-use crate::context::{generate_agents_md, ProjectContext, RepoMapping};
-use crate::git::{create_worktree, remove_worktree_auto};
+use crate::git::remove_worktree_auto;
 use crate::notify::{ActivityTracker, NotificationService};
+use crate::project::ProjectBuilder;
 use crate::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
 };
@@ -79,8 +79,7 @@ pub fn render_error_banner(exit_code: Option<u32>, area: Rect, buf: &mut Buffer,
         .map(|c| c.to_string())
         .unwrap_or_else(|| "1".to_string());
     let msg = format!(
-        " [Process exited with code {} - Press Enter or Ctrl+Space w to dismiss] ",
-        code_str
+        " [Process exited with code {code_str} - Press Enter or Ctrl+Space w to dismiss] "
     );
     let banner_y = area.bottom().saturating_sub(1);
     let style = Style::default()
@@ -639,8 +638,7 @@ impl TuiApp {
 
         if self.registry.get_by_project(project_name).is_some() {
             let _ = tx.send(SetupProgressEvent::Error(format!(
-                "Project '{}' already has an active session in registry",
-                project_name
+                "Project '{project_name}' already has an active session in registry"
             )));
             if let Some(modal) = &mut self.setup_modal {
                 let _ = modal.poll_events();
@@ -693,7 +691,7 @@ impl TuiApp {
         let project_dir = cwd.join(project_name);
 
         if !project_dir.exists() {
-            anyhow::bail!("Project directory '{}' does not exist in CWD", project_name);
+            anyhow::bail!("Project directory '{project_name}' does not exist in CWD");
         }
         let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
 
@@ -746,109 +744,30 @@ impl TuiApp {
         project_name: &str,
         prompt: Option<&str>,
     ) -> anyhow::Result<()> {
-        if self.registry.get_by_project(project_name).is_some() {
-            anyhow::bail!("Project '{}' already has an active session in registry", project_name);
-        }
-
+        let config = self.config.clone().unwrap_or_else(|| {
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                .unwrap_or_else(|_| Config {
+                    default_agent: "claude".to_string(),
+                    theme: "tokyo-night".to_string(),
+                    repos_dir: PathBuf::from(".botai_repos"),
+                    agents: HashMap::new(),
+                    templates: HashMap::new(),
+                })
+        });
         let cwd = self
             .cwd
             .clone()
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let project_dir = cwd.join(project_name);
-
-        if project_dir.exists() {
-            anyhow::bail!("Project directory '{}' already exists in CWD", project_name);
-        }
-
-        let default_config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
-        let config = self.config.as_ref().or(default_config.as_ref());
-
-        let tpl = config.and_then(|c| c.get_template(template_name));
-        let agent_name = tpl
-            .and_then(|w| w.default_agent.as_deref())
-            .or_else(|| config.map(|c| c.default_agent.as_str()))
-            .unwrap_or("claude");
-
-        let (agent_cmd, agent_args, agent_env) = if let Some(cfg) = config {
-            if let Some(agent) = cfg.get_agent(agent_name) {
-                (agent.command.clone(), agent.args.clone(), agent.env.clone())
-            } else {
-                #[cfg(windows)]
-                let default_shell = "cmd.exe".to_string();
-                #[cfg(not(windows))]
-                let default_shell = "sh".to_string();
-                (default_shell, Vec::new(), HashMap::new())
-            }
-        } else {
-            #[cfg(windows)]
-            let default_shell = "cmd.exe".to_string();
-            #[cfg(not(windows))]
-            let default_shell = "sh".to_string();
-            (default_shell, Vec::new(), HashMap::new())
-        };
-
-        fs::create_dir_all(&project_dir)?;
-        let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
-
-        let mut repo_mappings = Vec::new();
-        if let Some(cfg) = config {
-            if let Ok(resolved_repos) = cfg.resolve_template_repos(template_name) {
-                for repo in resolved_repos {
-                    if !repo.exists_locally() {
-                        if let Some(url) = &repo.clone_url {
-                            let _ = crate::git::clone_repo(url, &repo.local_path);
-                        }
-                    } else {
-                        let _ = crate::git::fetch_repo(&repo.local_path);
-                    }
-                    let worktree_path = project_dir.join(&repo.name);
-                    let _ = create_worktree(&repo.local_path, &worktree_path, project_name);
-                    repo_mappings.push(RepoMapping::new(
-                        repo.name,
-                        repo.local_path,
-                        worktree_path,
-                    ));
-                }
-            }
-        }
-
-        let project_context = ProjectContext {
-            project_name: project_name.to_string(),
-            template_name: template_name.to_string(),
-            description: tpl.and_then(|w| w.description.clone()),
-            agents_md_append: tpl.and_then(|w| w.agents_md_append.clone()),
-            repos: repo_mappings,
-            env: tpl.map(|w| w.env.clone()).unwrap_or_default(),
-            initial_prompt: prompt.map(|s| s.to_string()),
-        };
-
-        let _ = generate_agents_md(&project_dir, &project_context);
-
         let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
 
-        let mut pty_config = PtyConfig::new(&agent_cmd, &project_dir)
-            .with_args(agent_args)
-            .with_dimensions(cols, rows);
-
-        for (k, v) in &agent_env {
-            pty_config = pty_config.with_env(k, v);
-        }
-
-        if let Some(tpl) = tpl {
-            for (k, v) in &tpl.env {
-                pty_config = pty_config.with_env(k, v);
-            }
-        }
-
-        let pty = PtySession::spawn(pty_config)?;
-        let vt = VtScreen::new(cols, rows);
-        let mut ps = ProjectSession::new(project_name, template_name, agent_name);
+        let mut builder = ProjectBuilder::new(config, template_name, project_name)
+            .with_cwd(cwd)
+            .with_viewport(cols, rows);
         if let Some(p) = prompt {
-            ps = ps.with_prompt(p);
+            builder = builder.with_prompt(p);
         }
-
+        let (ps, pty, vt) = builder.build(|_| {})?;
         self.registry.add(ps, pty, vt)?;
         Ok(())
     }
@@ -1141,13 +1060,12 @@ default_agent = "mock"
 repos_dir = "/tmp/repos"
 
 [agents.mock]
-command = "{}"
-args = {}
+command = "{cmd}"
+args = {args}
 
 [templates.backend]
 repos = []
-"#,
-            cmd, args
+"#
         );
         let config = Config::load_from_str(&config_toml).unwrap();
         let registry = SessionRegistry::new();
@@ -1241,13 +1159,12 @@ default_agent = "mock"
 repos_dir = "/tmp/repos"
 
 [agents.mock]
-command = "{}"
-args = {}
+command = "{cmd}"
+args = {args}
 
 [templates.ws1]
 repos = []
-"#,
-            cmd, args
+"#
         );
         let config = Config::load_from_str(&config_toml).unwrap();
 
@@ -1355,13 +1272,12 @@ default_agent = "mock"
 repos_dir = "/tmp/repos"
 
 [agents.mock]
-command = "{}"
-args = {}
+command = "{cmd}"
+args = {args}
 
 [templates.backend]
 repos = []
-"#,
-            cmd, args
+"#
         );
         let config = Config::load_from_str(&config_toml).unwrap();
         let registry = SessionRegistry::new();
@@ -2048,7 +1964,7 @@ repos = []
         let (_tx, rx) = std::sync::mpsc::channel();
         let mut modal = SetupModalState::new("proj-modal", "tpl", None, rx);
         for i in 1..=10 {
-            modal.logs.push(format!("log {}", i));
+            modal.logs.push(format!("log {i}"));
         }
         app.setup_modal = Some(modal);
 

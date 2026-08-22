@@ -100,7 +100,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     let rendered_text = buffer
         .content()
         .iter()
-        .map(|cell| cell.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
 
     assert!(rendered_text.contains("Local Projects"));
@@ -183,7 +183,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         .buffer()
         .content()
         .iter()
-        .map(|cell| cell.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
 
     assert!(modal_rendered.contains("Create New Project"));
@@ -249,7 +249,7 @@ fn test_integration_dashboard_empty_state_rendering() {
         .buffer()
         .content()
         .iter()
-        .map(|c| c.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
 
     assert!(text.contains("Local Projects"));
@@ -449,7 +449,7 @@ repos = []
         .unwrap();
 
     let buffer = terminal.backend().buffer();
-    let rendered = buffer.content().iter().map(|c| c.symbol()).collect::<String>();
+    let rendered = buffer.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
 
     assert!(rendered.contains("svc-running"));
     assert!(rendered.contains("svc-stopped"));

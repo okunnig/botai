@@ -558,7 +558,7 @@ mod tests {
         let rendered = buf
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("botai"));
@@ -585,7 +585,7 @@ mod tests {
         let text_wide = buf_wide
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(text_wide.contains("botai"));
         assert!(text_wide.contains("↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"));
@@ -597,7 +597,7 @@ mod tests {
         let text_med = buf_med
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(text_med.contains("botai"));
         assert!(text_med.contains("Enter: Attach | n: New | d: Destroy | q: Quit"));
@@ -610,7 +610,7 @@ mod tests {
         let text_narrow = buf_narrow
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(text_narrow.contains("botai"));
         assert!(text_narrow.contains("q: Quit"));
@@ -637,7 +637,7 @@ mod tests {
         let rendered = buf
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("Create New Project"));
@@ -662,7 +662,7 @@ mod tests {
         let rendered = buf
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("No local projects found in CWD. Press [n] or [c] to create a new project."));
@@ -683,7 +683,7 @@ mod tests {
         let rendered = buf
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("проект-тест 💻"));
@@ -1044,7 +1044,7 @@ command = "claude"
         let rendered = buf
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("Confirm Destroy Project"));
@@ -1135,7 +1135,7 @@ command = "claude"
         let rendered = buf
             .content()
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         // Check that project names and status dot indicators are rendered
