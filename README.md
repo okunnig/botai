@@ -1,5 +1,3 @@
-# botai
-
 <p align="center">
   <img src="assets/botai_hero.jpg" alt="botai" width="680" />
 </p>
