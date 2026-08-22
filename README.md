@@ -12,8 +12,6 @@
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2021_Edition-orange.svg?logo=rust&style=flat-square" alt="Rust 2021" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg?style=flat-square" alt="License" /></a>
   <a href="#platform-support"><img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg?style=flat-square" alt="Platform Support" /></a>
-  <a href="#embedded-rust-pty-multiplexer"><img src="https://img.shields.io/badge/Dependencies-Zero%20tmux%20requirement-success.svg?style=flat-square" alt="Zero Tmux Dependency" /></a>
-  <a href="https://ratatui.rs/"><img src="https://img.shields.io/badge/Built%20with-Ratatui%20%26%20portable--pty-purple.svg?style=flat-square" alt="Built with Ratatui" /></a>
 </p>
 
 ---
