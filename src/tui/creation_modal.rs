@@ -232,7 +232,7 @@ impl ProjectCreationModal {
             CreationFocus::ProjectName => {
                 let prefix_len = 16u16; // "▶ Project Name: "
                 let cursor_x = inner.x + prefix_len + self.project_name_input.chars().count() as u16;
-                let cursor_y = inner.y + 4;
+                let cursor_y = inner.y + 3;
                 if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                     Some(Position::new(cursor_x, cursor_y))
                 } else {
@@ -245,7 +245,7 @@ impl ProjectCreationModal {
             CreationFocus::Prompt => {
                 let prefix_len = 18u16; // "▶ Initial Prompt: "
                 let cursor_x = inner.x + prefix_len + self.prompt_input.chars().count() as u16;
-                let cursor_y = inner.y + 6;
+                let cursor_y = inner.y + 5;
                 if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                     Some(Position::new(cursor_x, cursor_y))
                 } else {
@@ -864,9 +864,17 @@ mod tests {
         modal.project_name_input = "my-proj".to_string();
 
         let pos = modal.cursor_position(area);
-        assert!(pos.is_some());
+        assert_eq!(pos, Some(Position::new(36, 10)));
+
+        modal.focus = CreationFocus::Prompt;
+        modal.prompt_input = "fix bug".to_string();
+        let pos = modal.cursor_position(area);
+        assert_eq!(pos, Some(Position::new(38, 12)));
 
         modal.focus = CreationFocus::Template;
+        assert_eq!(modal.cursor_position(area), None);
+
+        modal.focus = CreationFocus::Agent;
         assert_eq!(modal.cursor_position(area), None);
     }
 
