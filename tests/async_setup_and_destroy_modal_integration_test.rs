@@ -7,7 +7,7 @@ use tempfile::tempdir;
 
 use botai::config::Config;
 use botai::session::SessionRegistry;
-use botai::tui::dashboard::{ActivePanel, DashboardAction, DashboardState, DestroyModalState};
+use botai::tui::dashboard::{DashboardAction, DashboardState, DestroyModalState};
 use botai::tui::setup_modal::render_setup_modal;
 use botai::tui::theme::Theme;
 use botai::tui::TuiApp;
@@ -34,7 +34,6 @@ fn test_integration_destroy_confirmation_modal_lifecycle() {
         vec!["template-a".into()],
         vec!["service-del".into(), "service-keep".into()],
     );
-    state.active_panel = ActivePanel::Projects;
     state.selected_project_idx = 0; // service-del
 
     // 1. Press 'd' -> Opens destroy confirmation modal without emitting Destroy action

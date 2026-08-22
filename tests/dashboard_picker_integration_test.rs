@@ -1,7 +1,7 @@
 use std::fs;
 
 use botai::config::Config;
-use botai::tui::{render_dashboard, ActivePanel, CreationFocus, DashboardAction, DashboardState};
+use botai::tui::{render_dashboard, CreationFocus, DashboardAction, DashboardState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -83,12 +83,10 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         state.templates,
         vec!["data_pipeline".to_string(), "ecommerce".to_string()]
     );
-    assert_eq!(state.active_panel, ActivePanel::Projects);
     assert_eq!(state.selected_project_idx, 0);
-    assert_eq!(state.selected_template_idx, 0);
     assert!(state.creation_modal.is_none());
 
-    // 4. Test Ratatui TestBackend rendering of initial dashboard
+    // 4. Test Ratatui TestBackend rendering of full-width dashboard
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).expect("Failed to create ratatui test terminal");
 
@@ -105,13 +103,11 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         .map(|cell| cell.symbol())
         .collect::<String>();
 
-    assert!(rendered_text.contains("Local Projects (Existing)"));
-    assert!(rendered_text.contains("Project Templates"));
+    assert!(rendered_text.contains("Local Projects"));
+    assert!(!rendered_text.contains("Project Templates"));
     assert!(rendered_text.contains("payment-gateway"));
     assert!(rendered_text.contains("user-auth-service"));
-    assert!(rendered_text.contains("data_pipeline"));
-    assert!(rendered_text.contains("ecommerce"));
-    assert!(rendered_text.contains("Tab: Switch | ↑/↓: Navigate"));
+    assert!(rendered_text.contains("↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"));
 
     // 5. Navigate to second project and attach
     state.handle_key(key(KeyCode::Down));
@@ -123,25 +119,26 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         DashboardAction::Attach("user-auth-service".to_string())
     );
 
-    // 6. Switch panel to Templates
-    state.handle_key(key(KeyCode::Tab));
-    assert_eq!(state.active_panel, ActivePanel::Templates);
-    assert_eq!(state.selected_template_idx, 0); // "data_pipeline"
-
-    // Navigate to "ecommerce" template
-    state.handle_key(key(KeyCode::Down));
-    assert_eq!(state.selected_template_idx, 1);
-
-    // 7. Open creation modal with 'n' key
+    // 6. Open unified creation modal with 'n' shortcut key
     let action = state.handle_key(key(KeyCode::Char('n')));
     assert_eq!(action, DashboardAction::None);
     assert!(state.creation_modal.is_some());
 
-    let modal = state.creation_modal.as_ref().unwrap();
-    assert_eq!(modal.selected_template(), Some("ecommerce"));
-    assert_eq!(modal.focus, CreationFocus::ProjectName);
+    // 7. Configure template, project name, and prompt in creation modal
+    // Focus starts on ProjectName; switch to Template with BackTab/Up to cycle template
+    state.handle_key(key(KeyCode::BackTab));
+    assert_eq!(state.creation_modal.as_ref().unwrap().focus, CreationFocus::Template);
+    assert_eq!(state.creation_modal.as_ref().unwrap().selected_template(), Some("data_pipeline"));
 
-    // 8. Type project name into modal
+    // Cycle template to "ecommerce"
+    state.handle_key(key(KeyCode::Right));
+    assert_eq!(state.creation_modal.as_ref().unwrap().selected_template(), Some("ecommerce"));
+
+    // Switch focus to ProjectName
+    state.handle_key(key(KeyCode::Tab));
+    assert_eq!(state.creation_modal.as_ref().unwrap().focus, CreationFocus::ProjectName);
+
+    // Type project name into modal
     for c in "stripe-subscriptions".chars() {
         state.handle_key(key(KeyCode::Char(c)));
     }
@@ -156,7 +153,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         state.handle_key(key(KeyCode::Char(c)));
     }
 
-    // 9. Render modal in Ratatui TestBackend and verify visual layout
+    // 8. Render modal in Ratatui TestBackend and verify visual layout
     let theme = config.theme();
     terminal
         .draw(|f| {
@@ -179,7 +176,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     assert!(modal_rendered.contains("Initial Prompt:"));
     assert!(modal_rendered.contains("Build recurring billing engine with webhooks"));
 
-    // 10. Submit modal by pressing Enter
+    // 9. Submit modal by pressing Enter
     let action = state.handle_key(key(KeyCode::Enter));
     assert_eq!(
         action,
@@ -191,9 +188,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     );
     assert!(state.creation_modal.is_none());
 
-    // 11. Test Destroy confirmation modal action on Projects panel
-    state.handle_key(key(KeyCode::Tab)); // Switch back to Projects
-    assert_eq!(state.active_panel, ActivePanel::Projects);
+    // 10. Test Destroy confirmation modal action on selected project
     state.selected_project_idx = 0; // "payment-gateway"
 
     let action = state.handle_key(key(KeyCode::Char('d')));
@@ -210,11 +205,39 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     );
     assert!(state.destroy_modal.is_none());
 
-    // 12. Test Quit action
+    // 11. Test Quit action
     let action = state.handle_key(key(KeyCode::Char('q')));
     assert_eq!(action, DashboardAction::Quit);
 }
 
+#[test]
+fn test_integration_dashboard_empty_state_rendering() {
+    let tmp = tempdir().expect("Failed to create tempdir");
+    let cwd = tmp.path();
+
+    let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \"/repos\"\n").unwrap();
+    let state = DashboardState::from_env(&config, cwd);
+
+    let backend = TestBackend::new(100, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal
+        .draw(|f| {
+            f.render_widget(&state, f.area());
+        })
+        .unwrap();
+
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+
+    assert!(text.contains("Local Projects"));
+    assert!(text.contains("No local projects found in CWD. Press [n] or [c] to create a new project."));
+}
 
 #[test]
 fn test_integration_tui_app_with_dashboard_actions() {
@@ -415,5 +438,3 @@ repos = []
     assert!(rendered.contains("svc-stopped"));
     assert!(rendered.contains("●"));
 }
-
-

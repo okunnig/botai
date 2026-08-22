@@ -18,13 +18,6 @@ use crate::tui::theme::Theme;
 /// Backward compatibility alias for ProjectCreationModal.
 pub type CreationModalState = ProjectCreationModal;
 
-/// Active panel in the two-panel dashboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivePanel {
-    Projects,
-    Templates,
-}
-
 /// Actions emitted by user interactions with the dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DashboardAction {
@@ -67,15 +60,13 @@ impl DestroyModalState {
     }
 }
 
-/// Full state for the interactive two-panel launcher dashboard.
+/// Full state for the interactive full-width project dashboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardState {
     pub templates: Vec<String>,
     pub local_projects: Vec<String>,
     pub running_sessions: HashMap<String, SessionStatus>,
-    pub active_panel: ActivePanel,
     pub selected_project_idx: usize,
-    pub selected_template_idx: usize,
     pub creation_modal: Option<ProjectCreationModal>,
     pub destroy_modal: Option<DestroyModalState>,
     pub config: Config,
@@ -110,9 +101,7 @@ impl DashboardState {
             templates,
             local_projects,
             running_sessions: HashMap::new(),
-            active_panel: ActivePanel::Projects,
             selected_project_idx: 0,
-            selected_template_idx: 0,
             creation_modal: None,
             destroy_modal: None,
             config,
@@ -166,55 +155,36 @@ impl DashboardState {
             .with_cwd(cwd.to_path_buf())
     }
 
-    /// Toggles active panel between Projects and Templates.
-    pub fn switch_panel(&mut self) {
-        self.active_panel = match self.active_panel {
-            ActivePanel::Projects => ActivePanel::Templates,
-            ActivePanel::Templates => ActivePanel::Projects,
-        };
-    }
-
-    /// Moves selection down to the next item in the currently active panel.
+    /// Moves selection down to the next project item.
     pub fn next_item(&mut self) {
-        match self.active_panel {
-            ActivePanel::Projects => {
-                if !self.local_projects.is_empty()
-                    && self.selected_project_idx + 1 < self.local_projects.len()
-                {
-                    self.selected_project_idx += 1;
-                }
-            }
-            ActivePanel::Templates => {
-                if !self.templates.is_empty()
-                    && self.selected_template_idx + 1 < self.templates.len()
-                {
-                    self.selected_template_idx += 1;
-                }
-            }
+        if !self.local_projects.is_empty()
+            && self.selected_project_idx + 1 < self.local_projects.len()
+        {
+            self.selected_project_idx += 1;
         }
     }
 
-    /// Moves selection up to the previous item in the currently active panel.
+    /// Moves selection up to the previous project item.
     pub fn prev_item(&mut self) {
-        match self.active_panel {
-            ActivePanel::Projects => {
-                self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
-            }
-            ActivePanel::Templates => {
-                self.selected_template_idx = self.selected_template_idx.saturating_sub(1);
-            }
+        self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
+    }
+
+    /// Moves selection to the first project item.
+    pub fn first_item(&mut self) {
+        self.selected_project_idx = 0;
+    }
+
+    /// Moves selection to the last project item.
+    pub fn last_item(&mut self) {
+        if !self.local_projects.is_empty() {
+            self.selected_project_idx = self.local_projects.len().saturating_sub(1);
         }
     }
 
-    /// Opens the project creation modal for the currently selected template.
+    /// Opens the project creation modal.
     pub fn open_creation_modal(&mut self) {
-        if !self.templates.is_empty() {
-            let tpl_idx = self
-                .selected_template_idx
-                .min(self.templates.len().saturating_sub(1));
-            let tpl = self.templates[tpl_idx].clone();
-            self.creation_modal = Some(ProjectCreationModal::new(&self.config, &self.cwd, Some(&tpl)));
-        }
+        let default_tpl = self.templates.first().map(|s| s.as_str());
+        self.creation_modal = Some(ProjectCreationModal::new(&self.config, &self.cwd, default_tpl));
     }
 
     /// Closes the project creation modal.
@@ -270,10 +240,6 @@ impl DashboardState {
         }
 
         match key.code {
-            KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
-                self.switch_panel();
-                DashboardAction::None
-            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.prev_item();
                 DashboardAction::None
@@ -282,12 +248,20 @@ impl DashboardState {
                 self.next_item();
                 DashboardAction::None
             }
-            KeyCode::Char('n') => {
+            KeyCode::Home => {
+                self.first_item();
+                DashboardAction::None
+            }
+            KeyCode::End => {
+                self.last_item();
+                DashboardAction::None
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('c') | KeyCode::Char('C') => {
                 self.open_creation_modal();
                 DashboardAction::None
             }
-            KeyCode::Char('d') => {
-                if self.active_panel == ActivePanel::Projects && !self.local_projects.is_empty() {
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if !self.local_projects.is_empty() {
                     let idx = self
                         .selected_project_idx
                         .min(self.local_projects.len().saturating_sub(1));
@@ -295,31 +269,48 @@ impl DashboardState {
                 }
                 DashboardAction::None
             }
-            KeyCode::Enter => match self.active_panel {
-                ActivePanel::Projects => {
-                    if !self.local_projects.is_empty() {
-                        let idx = self
-                            .selected_project_idx
-                            .min(self.local_projects.len().saturating_sub(1));
-                        DashboardAction::Attach(self.local_projects[idx].clone())
-                    } else {
-                        DashboardAction::None
-                    }
-                }
-                ActivePanel::Templates => {
-                    self.open_creation_modal();
+            KeyCode::Enter => {
+                if !self.local_projects.is_empty() {
+                    let idx = self
+                        .selected_project_idx
+                        .min(self.local_projects.len().saturating_sub(1));
+                    DashboardAction::Attach(self.local_projects[idx].clone())
+                } else {
                     DashboardAction::None
                 }
-            },
-            KeyCode::Char('q') | KeyCode::Esc => DashboardAction::Quit,
+            }
+            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => DashboardAction::Quit,
             _ => DashboardAction::None,
         }
     }
 
     /// Handles a mouse event (e.g. scroll wheel) and returns any triggered `DashboardAction`.
     pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> DashboardAction {
-        if self.destroy_modal.is_some() || self.creation_modal.is_some() {
+        if self.destroy_modal.is_some() {
             return DashboardAction::None;
+        }
+
+        if let Some(ref mut modal) = self.creation_modal {
+            match modal.handle_mouse(mouse) {
+                CreationModalAction::Cancel => {
+                    self.creation_modal = None;
+                    return DashboardAction::None;
+                }
+                CreationModalAction::Submit {
+                    template,
+                    project,
+                    prompt,
+                    ..
+                } => {
+                    self.creation_modal = None;
+                    return DashboardAction::CreateProject {
+                        template,
+                        project,
+                        prompt,
+                    };
+                }
+                CreationModalAction::None => return DashboardAction::None,
+            }
         }
 
         match mouse.kind {
@@ -336,8 +327,7 @@ impl DashboardState {
     }
 }
 
-
-/// Renders the full two-panel dashboard, top header status bar, and optional floating creation modal into the given `Buffer`.
+/// Renders the full-width local projects dashboard, top header status bar, and optional floating modals into the given `Buffer`.
 pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, theme: &Theme) {
     if area.height < 3 || area.width < 10 {
         return;
@@ -346,7 +336,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     // Split area into Header status bar and Main area
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
+        .constraints([Constraint::Length(1), Constraint::Min(2)])
         .split(area);
 
     let header_area = chunks[0];
@@ -375,8 +365,8 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     ));
     buf.set_line(header_area.x, header_area.y, &brand_line, header_area.width);
 
-    let full_hints = "Tab: Switch | ↑/↓: Navigate | Enter: Select | n: New | d: Destroy | q: Quit";
-    let compact_hints = "Tab: Switch | Enter: Select | n: New | d: Destroy | q: Quit";
+    let full_hints = "↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit";
+    let compact_hints = "Enter: Attach | n: New | d: Destroy | q: Quit";
     let minimal_hints = "q: Quit";
 
     let full_len = full_hints.chars().count() as u16;
@@ -402,37 +392,24 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
         buf.set_line(start_x, header_area.y, &hint_line, hint_len);
     }
 
-    // Split main area into Left (Projects) and Right (Workspaces)
-    let panel_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(main_area);
+    // 2. Render Full-Width Main Panel (Local Projects)
+    let border_style = Style::default()
+        .fg(theme.border_focused)
+        .add_modifier(Modifier::BOLD);
 
-    let left_area = panel_chunks[0];
-    let right_area = panel_chunks[1];
-
-    // 2. Render Left Panel (Local Projects)
-    let is_left_active = state.active_panel == ActivePanel::Projects;
-    let left_border_style = if is_left_active {
-        Style::default()
-            .fg(theme.border_focused)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.border_unfocused)
-    };
-
-    let left_block = Block::default()
+    let main_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Local Projects (Existing) ")
-        .border_style(left_border_style);
+        .title(" Local Projects ")
+        .border_style(border_style);
 
-    let left_inner = left_block.inner(left_area);
-    left_block.render(left_area, buf);
+    let inner = main_block.inner(main_area);
+    main_block.render(main_area, buf);
 
     if state.local_projects.is_empty() {
-        let msg = Paragraph::new(" (No local projects found in CWD) ")
+        let empty_msg = "No local projects found in CWD. Press [n] or [c] to create a new project.";
+        let msg = Paragraph::new(empty_msg)
             .style(Style::default().fg(theme.input_placeholder));
-        msg.render(left_inner, buf);
+        msg.render(inner, buf);
     } else {
         let items: Vec<ListItem> = state
             .local_projects
@@ -440,7 +417,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
             .enumerate()
             .map(|(i, proj)| {
                 let is_selected = i == state.selected_project_idx;
-                let (prefix, base_style) = if is_selected && is_left_active {
+                let (prefix, base_style) = if is_selected {
                     (
                         " > ",
                         Style::default()
@@ -448,8 +425,6 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
                             .bg(theme.selection_bg)
                             .add_modifier(Modifier::BOLD),
                     )
-                } else if is_selected {
-                    (" > ", Style::default().fg(theme.selection_indicator))
                 } else {
                     ("   ", Style::default().fg(theme.status_bar_fg))
                 };
@@ -459,7 +434,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
                 if let Some(status) = state.running_sessions.get(proj) {
                     let dot_color = status.status_color(theme);
                     let mut dot_style = Style::default().fg(dot_color);
-                    if is_selected && is_left_active {
+                    if is_selected {
                         dot_style = dot_style
                             .bg(theme.selection_bg)
                             .add_modifier(Modifier::BOLD);
@@ -476,60 +451,10 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
             .collect();
 
         let list = List::new(items);
-        list.render(left_inner, buf);
+        list.render(inner, buf);
     }
 
-    // 3. Render Right Panel (Project Templates)
-    let is_right_active = state.active_panel == ActivePanel::Templates;
-    let right_border_style = if is_right_active {
-        Style::default()
-            .fg(theme.border_focused)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.border_unfocused)
-    };
-
-    let right_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Project Templates ")
-        .border_style(right_border_style);
-
-    let right_inner = right_block.inner(right_area);
-    right_block.render(right_area, buf);
-
-    if state.templates.is_empty() {
-        let msg = Paragraph::new(" (No templates found in config) ")
-            .style(Style::default().fg(theme.input_placeholder));
-        msg.render(right_inner, buf);
-    } else {
-        let items: Vec<ListItem> = state
-            .templates
-            .iter()
-            .enumerate()
-            .map(|(i, ws)| {
-                let is_selected = i == state.selected_template_idx;
-                let (prefix, style) = if is_selected && is_right_active {
-                    (
-                        " > ",
-                        Style::default()
-                            .fg(theme.selection_fg)
-                            .bg(theme.selection_bg)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else if is_selected {
-                    (" > ", Style::default().fg(theme.selection_indicator))
-                } else {
-                    ("   ", Style::default().fg(theme.status_bar_fg))
-                };
-                ListItem::new(format!("{}{}", prefix, ws)).style(style)
-            })
-            .collect();
-
-        let list = List::new(items);
-        list.render(right_inner, buf);
-    }
-
-    // 4. Render Floating Destroy Modal or Creation Modal if active
+    // 3. Render Floating Destroy Modal or Creation Modal if active
     if let Some(ref modal) = state.destroy_modal {
         render_destroy_modal(modal, area, buf, theme);
     } else if let Some(ref modal) = state.creation_modal {
@@ -609,17 +534,16 @@ impl Widget for DashboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::CreationFocus;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::fs;
-    use tempfile::{tempdir, TempDir};
+    use tempfile::tempdir;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     #[test]
-    fn test_render_dashboard_panels_and_header() {
+    fn test_render_dashboard_full_width_and_header() {
         let state = DashboardState::new(
             vec!["payments".to_string(), "analytics".to_string()],
             vec!["cart-service".to_string(), "billing-api".to_string()],
@@ -638,13 +562,14 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("botai"));
-        assert!(rendered.contains("Local Projects (Existing)"));
-        assert!(rendered.contains("Project Templates"));
+        assert!(rendered.contains("Local Projects"));
         assert!(rendered.contains("cart-service"));
         assert!(rendered.contains("billing-api"));
-        assert!(rendered.contains("payments"));
-        assert!(rendered.contains("analytics"));
-        assert!(rendered.contains("Tab: Switch"));
+        assert!(!rendered.contains("Project Templates"));
+        assert!(rendered.contains("↑/↓: Navigate"));
+        assert!(rendered.contains("Enter: Attach"));
+        assert!(rendered.contains("n/c: New Project"));
+        assert!(rendered.contains("d: Destroy"));
         assert!(rendered.contains("q: Quit"));
     }
 
@@ -663,10 +588,10 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<String>();
         assert!(text_wide.contains("botai"));
-        assert!(text_wide.contains("Tab: Switch | ↑/↓: Navigate | Enter: Select | n: New | d: Destroy | q: Quit"));
+        assert!(text_wide.contains("↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"));
 
-        // 2. Medium screen (75 cols) -> Compact hints
-        let area_med = Rect::new(0, 0, 75, 20);
+        // 2. Medium screen (60 cols) -> Compact hints
+        let area_med = Rect::new(0, 0, 60, 20);
         let mut buf_med = Buffer::empty(area_med);
         render_dashboard(&state, area_med, &mut buf_med, &theme);
         let text_med = buf_med
@@ -675,7 +600,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<String>();
         assert!(text_med.contains("botai"));
-        assert!(text_med.contains("Tab: Switch | Enter: Select | n: New | d: Destroy | q: Quit"));
+        assert!(text_med.contains("Enter: Attach | n: New | d: Destroy | q: Quit"));
         assert!(!text_med.contains("↑/↓: Navigate"));
 
         // 3. Narrow screen (20 cols) -> Minimal hints
@@ -740,8 +665,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(rendered.contains("(No local projects found in CWD)"));
-        assert!(rendered.contains("(No templates found in config)"));
+        assert!(rendered.contains("No local projects found in CWD. Press [n] or [c] to create a new project."));
     }
 
     #[test]
@@ -762,7 +686,6 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(rendered.contains("воркспейс-1 🚀"));
         assert!(rendered.contains("проект-тест 💻"));
 
         state.open_creation_modal();
@@ -805,11 +728,9 @@ mod tests {
 
         let state = DashboardState::new(templates.clone(), local_projects.clone());
 
-        assert_eq!(state.active_panel, ActivePanel::Projects);
         assert_eq!(state.templates, templates);
         assert_eq!(state.local_projects, local_projects);
         assert_eq!(state.selected_project_idx, 0);
-        assert_eq!(state.selected_template_idx, 0);
         assert!(state.creation_modal.is_none());
     }
 
@@ -888,72 +809,44 @@ command = "claude"
     }
 
     #[test]
-    fn test_panel_switching() {
-        let mut state = DashboardState::new(vec!["ws".into()], vec!["proj".into()]);
-        assert_eq!(state.active_panel, ActivePanel::Projects);
-
-        // Switch via method
-        state.switch_panel();
-        assert_eq!(state.active_panel, ActivePanel::Templates);
-
-        state.switch_panel();
-        assert_eq!(state.active_panel, ActivePanel::Projects);
-
-        // Switch via key events: Tab, Left, Right
-        let action = state.handle_key(key(KeyCode::Tab));
-        assert_eq!(action, DashboardAction::None);
-        assert_eq!(state.active_panel, ActivePanel::Templates);
-
-        let action = state.handle_key(key(KeyCode::Left));
-        assert_eq!(action, DashboardAction::None);
-        assert_eq!(state.active_panel, ActivePanel::Projects);
-
-        let action = state.handle_key(key(KeyCode::Right));
-        assert_eq!(action, DashboardAction::None);
-        assert_eq!(state.active_panel, ActivePanel::Templates);
-    }
-
-    #[test]
     fn test_list_item_navigation_and_boundaries() {
         let mut state = DashboardState::new(
-            vec!["ws1".into(), "ws2".into(), "ws3".into()],
-            vec!["proj1".into(), "proj2".into()],
+            vec!["ws1".into()],
+            vec!["proj1".into(), "proj2".into(), "proj3".into()],
         );
 
-        // Projects navigation (active_panel = Projects)
+        // Initial index 0
         assert_eq!(state.selected_project_idx, 0);
+
+        // Down / j moves down
         state.handle_key(key(KeyCode::Down));
         assert_eq!(state.selected_project_idx, 1);
 
-        // Down at boundary stays at max index
-        state.handle_key(key(KeyCode::Down));
-        assert_eq!(state.selected_project_idx, 1);
+        state.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(state.selected_project_idx, 2);
 
-        // Down at boundary stays at max index
+        // Down at boundary stays at max index (2)
         state.handle_key(key(KeyCode::Down));
-        assert_eq!(state.selected_project_idx, 1);
+        assert_eq!(state.selected_project_idx, 2);
 
-        // Up moves back
+        // Up / k moves up
         state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.selected_project_idx, 1);
+
+        state.handle_key(key(KeyCode::Char('k')));
         assert_eq!(state.selected_project_idx, 0);
 
         // Up at boundary stays at 0
         state.handle_key(key(KeyCode::Up));
         assert_eq!(state.selected_project_idx, 0);
 
-        // Switch to Templates
-        state.switch_panel();
-        assert_eq!(state.selected_template_idx, 0);
+        // End moves to last item
+        state.handle_key(key(KeyCode::End));
+        assert_eq!(state.selected_project_idx, 2);
 
-        state.handle_key(key(KeyCode::Char('j'))); // vim down
-        assert_eq!(state.selected_template_idx, 1);
-        state.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(state.selected_template_idx, 2);
-        state.handle_key(key(KeyCode::Char('j'))); // boundary
-        assert_eq!(state.selected_template_idx, 2);
-
-        state.handle_key(key(KeyCode::Char('k'))); // vim up
-        assert_eq!(state.selected_template_idx, 1);
+        // Home moves to first item
+        state.handle_key(key(KeyCode::Home));
+        assert_eq!(state.selected_project_idx, 0);
     }
 
     #[test]
@@ -963,108 +856,44 @@ command = "claude"
         assert_eq!(state.selected_project_idx, 0);
         state.prev_item();
         assert_eq!(state.selected_project_idx, 0);
-
-        state.switch_panel();
-        state.next_item();
-        assert_eq!(state.selected_template_idx, 0);
-        state.prev_item();
-        assert_eq!(state.selected_template_idx, 0);
+        state.first_item();
+        assert_eq!(state.selected_project_idx, 0);
+        state.last_item();
+        assert_eq!(state.selected_project_idx, 0);
     }
 
     #[test]
-    fn test_modal_opening_and_closing() {
+    fn test_modal_opening_shortcuts_and_closing() {
         let mut state = DashboardState::new(
             vec!["ecommerce".into(), "analytics".into()],
             vec!["proj1".into()],
         );
 
-        // When in Templates panel, pressing Enter or 'n' opens modal
-        state.active_panel = ActivePanel::Templates;
-        state.selected_template_idx = 1;
-
-        let action = state.handle_key(key(KeyCode::Enter));
+        // 1. 'n' opens creation modal
+        let action = state.handle_key(key(KeyCode::Char('n')));
         assert_eq!(action, DashboardAction::None);
         assert!(state.creation_modal.is_some());
-        assert_eq!(
-            state.creation_modal.as_ref().unwrap().selected_template(),
-            Some("analytics")
-        );
 
         // Pressing Esc closes modal
         let action = state.handle_key(key(KeyCode::Esc));
         assert_eq!(action, DashboardAction::None);
         assert!(state.creation_modal.is_none());
 
-        // Pressing 'n' from Projects panel also triggers modal for selected template
-        state.active_panel = ActivePanel::Projects;
-        state.selected_template_idx = 0;
-        let action = state.handle_key(key(KeyCode::Char('n')));
+        // 2. 'c' opens creation modal
+        let action = state.handle_key(key(KeyCode::Char('c')));
         assert_eq!(action, DashboardAction::None);
         assert!(state.creation_modal.is_some());
-        assert_eq!(
-            state.creation_modal.as_ref().unwrap().selected_template(),
-            Some("ecommerce")
-        );
-
         state.close_creation_modal();
         assert!(state.creation_modal.is_none());
-    }
 
-    #[test]
-    fn test_modal_opening_empty_templates() {
-        let mut state = DashboardState::new(vec![], vec!["proj1".into()]);
-        state.open_creation_modal();
-        assert!(state.creation_modal.is_none());
-    }
+        // 3. 'N' and 'C' uppercase shortcuts
+        state.handle_key(key(KeyCode::Char('N')));
+        assert!(state.creation_modal.is_some());
+        state.close_creation_modal();
 
-    #[test]
-    fn test_modal_text_entry_editing_and_field_switching() {
-        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
-        let temp_dir = TempDir::new().unwrap();
-        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("payment-ws"));
-        assert_eq!(modal.focus, CreationFocus::ProjectName);
-        assert_eq!(modal.project_name_input, "");
-        assert_eq!(modal.prompt_input, "");
-
-        // Type characters into project_name
-        for c in "stripe-checkout".chars() {
-            modal.handle_key(key(KeyCode::Char(c)));
-        }
-        assert_eq!(modal.project_name_input, "stripe-checkout");
-
-        // Backspace
-        modal.handle_key(key(KeyCode::Backspace));
-        assert_eq!(modal.project_name_input, "stripe-checkou");
-        modal.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(modal.project_name_input, "stripe-checkout");
-
-        // Switch to Agent field with Tab, then Prompt
-        modal.handle_key(key(KeyCode::Tab));
-        assert_eq!(modal.focus, CreationFocus::Agent);
-        modal.handle_key(key(KeyCode::Tab));
-        assert_eq!(modal.focus, CreationFocus::Prompt);
-
-        // Type prompt
-        for c in "Refactor webhook handlers".chars() {
-            modal.handle_key(key(KeyCode::Char(c)));
-        }
-        assert_eq!(modal.prompt_input, "Refactor webhook handlers");
-
-        // Switch back to Agent with Up arrow
-        modal.handle_key(key(KeyCode::Up));
-        assert_eq!(modal.focus, CreationFocus::Agent);
-
-        // Switch back to Project Name with Up arrow
-        modal.handle_key(key(KeyCode::Up));
-        assert_eq!(modal.focus, CreationFocus::ProjectName);
-
-        // Switch with Down arrow
-        modal.handle_key(key(KeyCode::Down));
-        assert_eq!(modal.focus, CreationFocus::Agent);
-
-        // BackTab
-        modal.handle_key(key(KeyCode::BackTab));
-        assert_eq!(modal.focus, CreationFocus::ProjectName);
+        state.handle_key(key(KeyCode::Char('C')));
+        assert!(state.creation_modal.is_some());
+        state.close_creation_modal();
     }
 
     #[test]
@@ -1123,12 +952,11 @@ command = "claude"
     }
 
     #[test]
-    fn test_attach_action_from_left_panel() {
+    fn test_attach_action_from_project_list() {
         let mut state = DashboardState::new(
             vec!["ws".into()],
             vec!["proj-alpha".into(), "proj-beta".into()],
         );
-        state.active_panel = ActivePanel::Projects;
         state.selected_project_idx = 1;
 
         let action = state.handle_key(key(KeyCode::Enter));
@@ -1138,19 +966,17 @@ command = "claude"
     #[test]
     fn test_attach_action_on_empty_projects_does_nothing() {
         let mut state = DashboardState::new(vec!["ws".into()], vec![]);
-        state.active_panel = ActivePanel::Projects;
 
         let action = state.handle_key(key(KeyCode::Enter));
         assert_eq!(action, DashboardAction::None);
     }
 
     #[test]
-    fn test_destroy_action_from_left_panel_confirmation_flow() {
+    fn test_destroy_action_confirmation_flow() {
         let mut state = DashboardState::new(
             vec!["ws".into()],
             vec!["proj-to-delete".into(), "proj-safe".into()],
         );
-        state.active_panel = ActivePanel::Projects;
         state.selected_project_idx = 0;
 
         // Press 'd' -> opens destroy modal, returns None
@@ -1175,8 +1001,8 @@ command = "claude"
         assert_eq!(action, DashboardAction::None);
         assert!(state.destroy_modal.is_none());
 
-        // Open again and confirm with 'y'
-        state.handle_key(key(KeyCode::Char('d')));
+        // Open again with 'D' and confirm with 'y'
+        state.handle_key(key(KeyCode::Char('D')));
         assert!(state.destroy_modal.is_some());
         let action = state.handle_key(key(KeyCode::Char('y')));
         assert_eq!(
@@ -1195,11 +1021,11 @@ command = "claude"
         );
         assert!(state.destroy_modal.is_none());
 
-        // On Templates panel, 'd' key does nothing and doesn't open modal
-        state.switch_panel();
-        let action = state.handle_key(key(KeyCode::Char('d')));
+        // On empty project list, 'd' does nothing
+        let mut empty_state = DashboardState::new(vec![], vec![]);
+        let action = empty_state.handle_key(key(KeyCode::Char('d')));
         assert_eq!(action, DashboardAction::None);
-        assert!(state.destroy_modal.is_none());
+        assert!(empty_state.destroy_modal.is_none());
     }
 
     #[test]
@@ -1239,33 +1065,16 @@ command = "claude"
             state.handle_key(key(KeyCode::Char('q'))),
             DashboardAction::Quit
         );
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('Q'))),
+            DashboardAction::Quit
+        );
         assert_eq!(state.handle_key(key(KeyCode::Esc)), DashboardAction::Quit);
     }
 
     #[test]
     fn test_creation_modal_and_dashboard_cursor_position() {
-        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
-        let temp_dir = TempDir::new().unwrap();
         let area = Rect::new(0, 0, 100, 30);
-        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("ecommerce"));
-
-        // 1. Focus on ProjectName empty
-        modal.focus = CreationFocus::ProjectName;
-        assert!(modal.cursor_position(area).is_some());
-
-        // Field with text "alpha"
-        modal.project_name_input = "alpha".to_string();
-        assert!(modal.cursor_position(area).is_some());
-
-        // 2. Switch to Prompt
-        modal.focus = CreationFocus::Prompt;
-        assert!(modal.cursor_position(area).is_some());
-
-        // 3. Small area returns None
-        let small_area = Rect::new(0, 0, 15, 5);
-        assert_eq!(modal.cursor_position(small_area), None);
-
-        // 4. DashboardState delegation
         let mut dashboard = DashboardState::new(vec!["ecommerce".into()], vec![]);
         assert_eq!(dashboard.cursor_position(area), None);
 
@@ -1337,10 +1146,8 @@ command = "claude"
         assert!(rendered.contains("proj-err"));
         assert!(rendered.contains("proj-inactive"));
 
-        // Verify the status dot colors on specific rows in the left panel
-        // Left inner area starts at x = 1, y = 2 (inside borders, since header is at y = 0, panel at y = 1..20)
-        // Row 1 (y = 2): proj-busy (selected, active panel) -> prefix is " > ", dot is at x = 4 (index 3 inside inner: 1 + 3 = 4)
-        // Let's verify line content and cell colors:
+        // Inner area starts at x = 1, y = 2 (inside borders, since header is at y = 0, panel at y = 1..20)
+        // Row 1 (y = 2): proj-busy (selected) -> prefix is " > ", dot is at x = 4
         let cell_busy_dot = buf.cell((4, 2)).unwrap();
         assert_eq!(cell_busy_dot.symbol(), "●");
         assert_eq!(cell_busy_dot.fg, theme.status_busy);
@@ -1394,11 +1201,10 @@ command = "claude"
         use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
         let mut state = DashboardState::new(
-            vec!["ws1".to_string(), "ws2".to_string(), "ws3".to_string()],
+            vec!["ws1".to_string()],
             vec!["proj1".to_string(), "proj2".to_string(), "proj3".to_string()],
         );
 
-        assert_eq!(state.active_panel, ActivePanel::Projects);
         assert_eq!(state.selected_project_idx, 0);
 
         let scroll_down = MouseEvent {
@@ -1414,29 +1220,16 @@ command = "claude"
             modifiers: KeyModifiers::empty(),
         };
 
-        // ScrollDown in Projects panel
+        // ScrollDown in project list
         assert_eq!(state.handle_mouse(scroll_down), DashboardAction::None);
         assert_eq!(state.selected_project_idx, 1);
 
         assert_eq!(state.handle_mouse(scroll_down), DashboardAction::None);
         assert_eq!(state.selected_project_idx, 2);
 
-        // ScrollUp in Projects panel
+        // ScrollUp in project list
         assert_eq!(state.handle_mouse(scroll_up), DashboardAction::None);
         assert_eq!(state.selected_project_idx, 1);
-
-        // Switch panel to Templates
-        state.switch_panel();
-        assert_eq!(state.active_panel, ActivePanel::Templates);
-        assert_eq!(state.selected_template_idx, 0);
-
-        // ScrollDown in Templates panel
-        assert_eq!(state.handle_mouse(scroll_down), DashboardAction::None);
-        assert_eq!(state.selected_template_idx, 1);
-
-        // ScrollUp in Templates panel
-        assert_eq!(state.handle_mouse(scroll_up), DashboardAction::None);
-        assert_eq!(state.selected_template_idx, 0);
 
         // Non-scroll mouse event
         let click = MouseEvent {

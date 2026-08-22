@@ -236,17 +236,23 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 9. Interactive TUI Project Picker & Launcher Dashboard
 - **Top Header Status Bar**:
-  - Full-width top header bar (`Constraint::Length(1)`) matching the rest of the application's header styling.
+  - Full-width top header bar (`Constraint::Length(1)`) matching application header styling.
   - Filled with `theme.status_bar_bg` and `theme.status_bar_fg`.
-  - Displays a clean brand title ` botai ` on the left styled with `theme.modal_title` and bold formatting.
-  - Displays right-aligned key navigation hints styled with `theme.key_hint`.
-- **Unified Two-Panel Dashboard**:
-  - Displayed when launching `botai` with no active sessions, positioned below the top header status bar.
-  - **Left Panel (Existing Projects)**: Lists existing local project directories found in CWD with real-time status badges (`●`). Press `Enter` to attach.
-  - **Right Panel (Project Templates)**: Lists all available project templates. Press `n` or `Enter` to open the unified `ProjectCreationModal`.
-- **Destroy Project Confirmation Modal**:
-  - Pressing `d` on the Left Panel opens a confirmation modal (` Confirm Destroy Project `).
-  - Pressing `y`/`Enter` executes clean worktree metadata removal and project directory deletion.
+  - Displays brand title ` botai ` on the left styled with `theme.modal_title` and bold formatting.
+  - Displays right-aligned key navigation hints styled with `theme.key_hint`:
+    - Full hints: `"↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"`
+    - Compact fallback: `"Enter: Attach | n: New | d: Destroy | q: Quit"`
+- **Full-Width Local Projects Dashboard**:
+  - Clean, full-width single-panel interface listing all local project directories found in CWD (directories containing `AGENTS.md`).
+  - **Live Session Indicators**: Running project sessions are distinguished with a leading colored status dot indicator (`●` U+25CF) reflecting live states (`Busy`, `Waiting`, `Done`, `Error`), while inactive/stopped projects display subtle spacing or inactive badges (`○` / `[Inactive]`).
+  - **Friendly Empty State**: When no local projects exist in CWD, renders a clean, centered empty-state card prompt: `"No local projects found in CWD. Press [n] or [c] to create a new project."`
+- **Creation Shortcut (`n` / `c`)**:
+  - Pressing `n` or `c` from anywhere on the dashboard opens the unified `ProjectCreationModal` where templates are selected, previewed, and configured.
+- **Project Selection & Actions**:
+  - `Up` / `Down` / `j` / `k` (or mouse wheel scroll): Navigate between local projects in the list.
+  - `Enter`: Attach/resume focus on the selected project session.
+  - `d`: Open the confirmation modal (` Confirm Destroy Project `) for clean worktree removal and directory deletion.
+  - `q` / `Esc`: Quit `botai`.
 
 ---
 

@@ -11,7 +11,7 @@ pub mod ui;
 pub use app::TuiApp;
 pub use creation_modal::{CreationFocus, CreationModalAction, ProjectCreationModal};
 pub use dashboard::{
-    render_dashboard, ActivePanel, CreationModalState, DashboardAction, DashboardState,
+    render_dashboard, CreationModalState, DashboardAction, DashboardState,
     DestroyModalState,
 };
 pub use events::{
