@@ -1,7 +1,7 @@
 # botai
 
 <p align="center">
-  <img src="assets/botai_hero.jpg" alt="botai - Multi-Repo Workspace Orchestrator & Session Multiplexer for AI Workflows" width="100%" />
+  <img src="assets/botai_hero.jpg" alt="botai" width="680" />
 </p>
 
 <p align="center">
