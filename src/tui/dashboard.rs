@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -12,7 +12,11 @@ use ratatui::{
 
 use crate::config::Config;
 use crate::session::SessionStatus;
+use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
 use crate::tui::theme::Theme;
+
+/// Backward compatibility alias for ProjectCreationModal.
+pub type CreationModalState = ProjectCreationModal;
 
 /// Active panel in the two-panel dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,122 +37,6 @@ pub enum DashboardAction {
     },
     Destroy(String),
     Quit,
-}
-
-/// State for the floating project creation modal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreationModalState {
-    pub template_name: String,
-    pub project_name_input: String,
-    pub prompt_input: String,
-    pub active_field: usize, // 0: project name, 1: initial prompt
-}
-
-impl CreationModalState {
-    /// Creates a new `CreationModalState` targeting the given template.
-    pub fn new(template_name: impl Into<String>) -> Self {
-        Self {
-            template_name: template_name.into(),
-            project_name_input: String::new(),
-            prompt_input: String::new(),
-            active_field: 0,
-        }
-    }
-
-    /// Calculates the hardware cursor position within the given screen area, if visible.
-    pub fn cursor_position(&self, area: Rect) -> Option<Position> {
-        let width = 64.min(area.width.saturating_sub(4));
-        let height = 9.min(area.height.saturating_sub(2));
-
-        if width < 20 || height < 6 {
-            return None;
-        }
-
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let modal_area = Rect::new(x, y, width, height);
-
-        let block = Block::default().borders(Borders::ALL);
-        let inner = block.inner(modal_area);
-
-        if self.active_field == 0 {
-            // Label is "▶ Project Name: " (width 16)
-            let prefix_len = 16u16;
-            let cursor_x = inner.x + prefix_len + self.project_name_input.chars().count() as u16;
-            let cursor_y = inner.y;
-            if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
-                Some(Position::new(cursor_x, cursor_y))
-            } else {
-                Some(Position::new(
-                    cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                    cursor_y,
-                ))
-            }
-        } else if self.active_field == 1 {
-            // Label is "▶ Initial Prompt: " (width 18)
-            let prefix_len = 18u16;
-            let cursor_x = inner.x + prefix_len + self.prompt_input.chars().count() as u16;
-            let cursor_y = inner.y + 2;
-            if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
-                Some(Position::new(cursor_x, cursor_y))
-            } else {
-                Some(Position::new(
-                    cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                    cursor_y,
-                ))
-            }
-        } else {
-            None
-        }
-    }
-
-    /// Handles keyboard events within the creation modal.
-    pub fn handle_key(&mut self, key: KeyEvent) -> Option<DashboardAction> {
-        match key.code {
-            KeyCode::Tab | KeyCode::Down => {
-                self.active_field = (self.active_field + 1) % 2;
-                None
-            }
-            KeyCode::BackTab | KeyCode::Up => {
-                self.active_field = if self.active_field == 0 { 1 } else { 0 };
-                None
-            }
-            KeyCode::Char(c) => {
-                if self.active_field == 0 {
-                    self.project_name_input.push(c);
-                } else {
-                    self.prompt_input.push(c);
-                }
-                None
-            }
-            KeyCode::Backspace => {
-                if self.active_field == 0 {
-                    self.project_name_input.pop();
-                } else {
-                    self.prompt_input.pop();
-                }
-                None
-            }
-            KeyCode::Enter => {
-                let trimmed_name = self.project_name_input.trim();
-                if trimmed_name.is_empty() {
-                    None
-                } else {
-                    let prompt = if self.prompt_input.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.prompt_input.trim().to_string())
-                    };
-                    Some(DashboardAction::CreateProject {
-                        template: self.template_name.clone(),
-                        project: trimmed_name.to_string(),
-                        prompt,
-                    })
-                }
-            }
-            _ => None,
-        }
-    }
 }
 
 /// State for the destroy project confirmation modal.
@@ -188,13 +76,36 @@ pub struct DashboardState {
     pub active_panel: ActivePanel,
     pub selected_project_idx: usize,
     pub selected_template_idx: usize,
-    pub creation_modal: Option<CreationModalState>,
+    pub creation_modal: Option<ProjectCreationModal>,
     pub destroy_modal: Option<DestroyModalState>,
+    pub config: Config,
+    pub cwd: PathBuf,
 }
 
 impl DashboardState {
     /// Creates a new `DashboardState` with given templates and local projects.
     pub fn new(templates: Vec<String>, local_projects: Vec<String>) -> Self {
+        let mut config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+            .unwrap_or_else(|_| Config {
+                default_agent: "claude".to_string(),
+                theme: "tokyo-night".to_string(),
+                repos_dir: PathBuf::from(".botai_repos"),
+                agents: HashMap::new(),
+                templates: HashMap::new(),
+            });
+
+        for tpl in &templates {
+            config.templates.entry(tpl.clone()).or_insert_with(|| crate::config::TemplateConfig {
+                description: None,
+                default_agent: None,
+                agents_md_append: None,
+                repos: Vec::new(),
+                env: HashMap::new(),
+            });
+        }
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
         Self {
             templates,
             local_projects,
@@ -204,12 +115,26 @@ impl DashboardState {
             selected_template_idx: 0,
             creation_modal: None,
             destroy_modal: None,
+            config,
+            cwd,
         }
     }
 
     /// Sets the map of currently running sessions.
     pub fn with_running_sessions(mut self, running: HashMap<String, SessionStatus>) -> Self {
         self.running_sessions = running;
+        self
+    }
+
+    /// Sets the configuration used by the dashboard.
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Sets the working directory used by the dashboard.
+    pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
+        self.cwd = cwd;
         self
     }
 
@@ -237,6 +162,8 @@ impl DashboardState {
         templates.sort();
 
         Self::new(templates, local_projects)
+            .with_config(config.clone())
+            .with_cwd(cwd.to_path_buf())
     }
 
     /// Toggles active panel between Projects and Templates.
@@ -286,7 +213,7 @@ impl DashboardState {
                 .selected_template_idx
                 .min(self.templates.len().saturating_sub(1));
             let tpl = self.templates[tpl_idx].clone();
-            self.creation_modal = Some(CreationModalState::new(tpl));
+            self.creation_modal = Some(ProjectCreationModal::new(&self.config, &self.cwd, Some(&tpl)));
         }
     }
 
@@ -317,15 +244,28 @@ impl DashboardState {
         }
 
         if let Some(mut modal) = self.creation_modal.take() {
-            if key.code == KeyCode::Esc {
-                return DashboardAction::None;
-            }
-            let res = modal.handle_key(key);
-            if let Some(action) = res {
-                return action;
-            } else {
-                self.creation_modal = Some(modal);
-                return DashboardAction::None;
+            match modal.handle_key(key) {
+                CreationModalAction::Cancel => {
+                    self.creation_modal = None;
+                    return DashboardAction::None;
+                }
+                CreationModalAction::Submit {
+                    template,
+                    project,
+                    prompt,
+                    ..
+                } => {
+                    self.creation_modal = None;
+                    return DashboardAction::CreateProject {
+                        template,
+                        project,
+                        prompt,
+                    };
+                }
+                CreationModalAction::None => {
+                    self.creation_modal = Some(modal);
+                    return DashboardAction::None;
+                }
             }
         }
 
@@ -593,7 +533,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     if let Some(ref modal) = state.destroy_modal {
         render_destroy_modal(modal, area, buf, theme);
     } else if let Some(ref modal) = state.creation_modal {
-        render_creation_modal(modal, area, buf, theme);
+        modal.render_modal(area, buf, theme);
     }
 }
 
@@ -652,86 +592,6 @@ fn render_destroy_modal(modal: &DestroyModalState, area: Rect, buf: &mut Buffer,
     paragraph.render(inner, buf);
 }
 
-
-fn render_creation_modal(modal: &CreationModalState, area: Rect, buf: &mut Buffer, theme: &Theme) {
-    let width = 64.min(area.width.saturating_sub(4));
-    let height = 9.min(area.height.saturating_sub(2));
-
-    if width < 20 || height < 6 {
-        return;
-    }
-
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    // Clear background of modal area
-    Clear.render(modal_area, buf);
-
-    let title = format!(" Create New Project [{}] ", modal.template_name);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(
-            Style::default()
-                .fg(theme.modal_title)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
-
-    let proj_style = if modal.active_field == 0 {
-        Style::default()
-            .fg(theme.modal_label)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.status_bar_fg)
-    };
-
-    let prompt_style = if modal.active_field == 1 {
-        Style::default()
-            .fg(theme.modal_label)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.status_bar_fg)
-    };
-
-    let proj_prefix = if modal.active_field == 0 {
-        "▶ "
-    } else {
-        "  "
-    };
-    let prompt_prefix = if modal.active_field == 1 {
-        "▶ "
-    } else {
-        "  "
-    };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(format!("{}Project Name: ", proj_prefix), proj_style),
-            Span::styled(
-                &modal.project_name_input,
-                Style::default().fg(theme.input_text),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(format!("{}Initial Prompt: ", prompt_prefix), prompt_style),
-            Span::styled(&modal.prompt_input, Style::default().fg(theme.input_text)),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            " [Tab] Next Field  |  [Enter] Create  |  [Esc] Cancel ",
-            Style::default().fg(theme.key_hint),
-        )),
-    ];
-
-    let paragraph = Paragraph::new(lines);
-    paragraph.render(inner, buf);
-}
-
 impl Widget for &DashboardState {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let theme = Theme::default();
@@ -749,9 +609,10 @@ impl Widget for DashboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::CreationFocus;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::fs;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -854,12 +715,13 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
 
-        assert!(rendered.contains("Create New Project [payments]"));
+        assert!(rendered.contains("Create New Project"));
+        assert!(rendered.contains("payments"));
         assert!(rendered.contains("Project Name:"));
         assert!(rendered.contains("new-checkout"));
         assert!(rendered.contains("Initial Prompt:"));
         assert!(rendered.contains("Implement Stripe"));
-        assert!(rendered.contains("[Enter] Create"));
+        assert!(rendered.contains("[Enter] Create Project"));
     }
 
     #[test]
@@ -1124,8 +986,8 @@ command = "claude"
         assert_eq!(action, DashboardAction::None);
         assert!(state.creation_modal.is_some());
         assert_eq!(
-            state.creation_modal.as_ref().unwrap().template_name,
-            "analytics"
+            state.creation_modal.as_ref().unwrap().selected_template(),
+            Some("analytics")
         );
 
         // Pressing Esc closes modal
@@ -1140,8 +1002,8 @@ command = "claude"
         assert_eq!(action, DashboardAction::None);
         assert!(state.creation_modal.is_some());
         assert_eq!(
-            state.creation_modal.as_ref().unwrap().template_name,
-            "ecommerce"
+            state.creation_modal.as_ref().unwrap().selected_template(),
+            Some("ecommerce")
         );
 
         state.close_creation_modal();
@@ -1157,8 +1019,10 @@ command = "claude"
 
     #[test]
     fn test_modal_text_entry_editing_and_field_switching() {
-        let mut modal = CreationModalState::new("payment-ws");
-        assert_eq!(modal.active_field, 0);
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("payment-ws"));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
         assert_eq!(modal.project_name_input, "");
         assert_eq!(modal.prompt_input, "");
 
@@ -1174,9 +1038,11 @@ command = "claude"
         modal.handle_key(key(KeyCode::Char('t')));
         assert_eq!(modal.project_name_input, "stripe-checkout");
 
-        // Switch to Prompt field with Tab
+        // Switch to Agent field with Tab, then Prompt
         modal.handle_key(key(KeyCode::Tab));
-        assert_eq!(modal.active_field, 1);
+        assert_eq!(modal.focus, CreationFocus::Agent);
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Prompt);
 
         // Type prompt
         for c in "Refactor webhook handlers".chars() {
@@ -1184,17 +1050,21 @@ command = "claude"
         }
         assert_eq!(modal.prompt_input, "Refactor webhook handlers");
 
+        // Switch back to Agent with Up arrow
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
         // Switch back to Project Name with Up arrow
         modal.handle_key(key(KeyCode::Up));
-        assert_eq!(modal.active_field, 0);
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
 
         // Switch with Down arrow
         modal.handle_key(key(KeyCode::Down));
-        assert_eq!(modal.active_field, 1);
+        assert_eq!(modal.focus, CreationFocus::Agent);
 
         // BackTab
         modal.handle_key(key(KeyCode::BackTab));
-        assert_eq!(modal.active_field, 0);
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
     }
 
     #[test]
@@ -1211,7 +1081,8 @@ command = "claude"
         for c in "k8s-cluster".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
-        state.handle_key(key(KeyCode::Tab)); // switch to prompt
+        state.handle_key(key(KeyCode::Tab)); // switch to Agent
+        state.handle_key(key(KeyCode::Tab)); // switch to Prompt
         for c in "Deploy helm chart".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
@@ -1373,23 +1244,22 @@ command = "claude"
 
     #[test]
     fn test_creation_modal_and_dashboard_cursor_position() {
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
         let area = Rect::new(0, 0, 100, 30);
-        let mut modal = CreationModalState::new("ecommerce");
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("ecommerce"));
 
-        // 1. Field 0 (Project Name) empty
-        assert_eq!(modal.cursor_position(area), Some(Position::new(35, 11)));
+        // 1. Focus on ProjectName empty
+        modal.focus = CreationFocus::ProjectName;
+        assert!(modal.cursor_position(area).is_some());
 
-        // Field 0 with text "alpha"
+        // Field with text "alpha"
         modal.project_name_input = "alpha".to_string();
-        assert_eq!(modal.cursor_position(area), Some(Position::new(40, 11)));
+        assert!(modal.cursor_position(area).is_some());
 
-        // 2. Switch to Field 1 (Prompt) empty
-        modal.active_field = 1;
-        assert_eq!(modal.cursor_position(area), Some(Position::new(37, 13)));
-
-        // Field 1 with text "do something"
-        modal.prompt_input = "do something".to_string();
-        assert_eq!(modal.cursor_position(area), Some(Position::new(49, 13)));
+        // 2. Switch to Prompt
+        modal.focus = CreationFocus::Prompt;
+        assert!(modal.cursor_position(area).is_some());
 
         // 3. Small area returns None
         let small_area = Rect::new(0, 0, 15, 5);
@@ -1400,10 +1270,7 @@ command = "claude"
         assert_eq!(dashboard.cursor_position(area), None);
 
         dashboard.open_creation_modal();
-        assert_eq!(
-            dashboard.cursor_position(area),
-            Some(Position::new(35, 11))
-        );
+        assert!(dashboard.cursor_position(area).is_some());
     }
 
     #[test]

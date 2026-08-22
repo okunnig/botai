@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -9,7 +10,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
 
+use crate::config::Config;
 use crate::session::SessionStatus;
+use crate::tui::creation_modal::ProjectCreationModal;
 use crate::tui::theme::Theme;
 
 /// Active top-level tab in the Quick Launcher modal.
@@ -55,6 +58,7 @@ pub struct QuickLauncherState {
     pub running_sessions: HashMap<String, SessionStatus>,
     pub selected_project_idx: usize,
     pub error_message: Option<String>,
+    pub creation_modal: ProjectCreationModal,
 }
 
 impl QuickLauncherState {
@@ -65,6 +69,27 @@ impl QuickLauncherState {
         local_projects: Vec<String>,
         default_template: Option<&str>,
     ) -> Self {
+        let mut config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+            .unwrap_or_else(|_| Config {
+                default_agent: "claude".to_string(),
+                theme: "tokyo-night".to_string(),
+                repos_dir: PathBuf::from(".botai_repos"),
+                agents: HashMap::new(),
+                templates: HashMap::new(),
+            });
+
+        for tpl in &templates {
+            config.templates.entry(tpl.clone()).or_insert_with(|| crate::config::TemplateConfig {
+                description: None,
+                default_agent: None,
+                agents_md_append: None,
+                repos: Vec::new(),
+                env: HashMap::new(),
+            });
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let creation_modal = ProjectCreationModal::new(&config, &cwd, default_template);
+
         let selected_template_idx = default_template
             .and_then(|target| templates.iter().position(|w| w == target))
             .unwrap_or(0);
@@ -80,6 +105,37 @@ impl QuickLauncherState {
             running_sessions: HashMap::new(),
             selected_project_idx: 0,
             error_message: None,
+            creation_modal,
+        }
+    }
+
+    /// Creates a `QuickLauncherState` directly from an existing `Config` and working directory.
+    pub fn from_config(
+        config: &Config,
+        cwd: &Path,
+        local_projects: Vec<String>,
+        default_template: Option<&str>,
+    ) -> Self {
+        let mut templates: Vec<String> = config.templates.keys().cloned().collect();
+        templates.sort();
+
+        let creation_modal = ProjectCreationModal::new(config, cwd, default_template);
+        let selected_template_idx = default_template
+            .and_then(|target| templates.iter().position(|w| w == target))
+            .unwrap_or(0);
+
+        Self {
+            tab: LauncherTab::Create,
+            focus: LauncherFocus::Template,
+            templates,
+            selected_template_idx,
+            project_name_input: String::new(),
+            prompt_input: String::new(),
+            local_projects,
+            running_sessions: HashMap::new(),
+            selected_project_idx: 0,
+            error_message: None,
+            creation_modal,
         }
     }
 
@@ -219,6 +275,8 @@ impl QuickLauncherState {
         if !self.templates.is_empty() {
             self.selected_template_idx =
                 (self.selected_template_idx + 1) % self.templates.len();
+            self.creation_modal.cycle_template_next();
+            self.selected_template_idx = self.creation_modal.selected_template_idx;
         }
     }
 
@@ -232,6 +290,8 @@ impl QuickLauncherState {
         if !self.templates.is_empty() {
             self.selected_template_idx = (self.selected_template_idx + self.templates.len() - 1)
                 % self.templates.len();
+            self.creation_modal.cycle_template_prev();
+            self.selected_template_idx = self.creation_modal.selected_template_idx;
         }
     }
 
@@ -420,9 +480,12 @@ impl QuickLauncherState {
                 if self.tab == LauncherTab::Create {
                     if self.focus == LauncherFocus::ProjectName {
                         self.project_name_input.push(c);
+                        self.creation_modal.project_name_input = self.project_name_input.clone();
+                        self.creation_modal.revalidate();
                         self.clear_error();
                     } else if self.focus == LauncherFocus::Prompt {
                         self.prompt_input.push(c);
+                        self.creation_modal.prompt_input = self.prompt_input.clone();
                         self.clear_error();
                     }
                 }
@@ -432,9 +495,12 @@ impl QuickLauncherState {
                 if self.tab == LauncherTab::Create {
                     if self.focus == LauncherFocus::ProjectName {
                         self.project_name_input.pop();
+                        self.creation_modal.project_name_input = self.project_name_input.clone();
+                        self.creation_modal.revalidate();
                         self.clear_error();
                     } else if self.focus == LauncherFocus::Prompt {
                         self.prompt_input.pop();
+                        self.creation_modal.prompt_input = self.prompt_input.clone();
                         self.clear_error();
                     }
                 }

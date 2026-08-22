@@ -191,11 +191,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
 ## 7. CLI Commands & Lifecycle Operations
 - **Default (No Arguments)**: Launching `botai` without arguments opens the interactive TUI project switcher / dashboard.
 - **`botai start <template> <project-name> [--agent <agent>] [--prompt <prompt>]`**:
-  - Validates repository states and branch names.
-  - Clones missing remote repositories to `repos_dir` and performs best-effort upstream fetch.
-  - Creates project directory and git worktrees.
-  - Generates multi-repo `AGENTS.md` context file.
-  - Launches the agent CLI (with initial prompt if provided) and drops user into the interactive TUI session.
+  - Uses the unified `ProjectBuilder` pipeline to validate preconditions, clone missing repositories to `repos_dir`, fetch upstreams, create worktrees, synthesize `AGENTS.md`, and spawn the agent PTY process.
+  - Streams real-time step progress (`[1/4]...`, `[2/4]...`) and diagnostic logs to stdout in the host shell.
+  - Once initialized, switches terminal to raw mode and launches the interactive TUI multiplexer focused on the newly created project session.
 - **`botai sync [template]`**:
   - Pre-clones missing repositories and updates existing cached repositories across all or a specific template.
   - Clones missing repositories to `repos_dir` if needed.
@@ -216,63 +214,51 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ---
 
-## 8. Interactive TUI Project Picker & Launcher Dashboard
+## 8. Unified Project Creation Engine & Interactive TUI Creation Modal
+- **Unified Backend Engine (`ProjectBuilder`)**:
+  - Single, centralized project initialization pipeline in `src/project/` used across CLI `botai start`, the TUI Dashboard, and In-Session Quick Launcher.
+  - **Sequential Pipeline Steps**:
+    1. **Pre-Validation**: Live checking of directory non-existence and git branch availability across all constituent template repositories.
+    2. **Repository Resolution & Cloning**: Clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch for existing repos.
+    3. **Worktree Checkout**: Creates a git worktree for each repository checked out to branch `<project_name>` at `<project_dir>/<repo_name>`.
+    4. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md`.
+    5. **PTY Process Spawning**: Spawns the agent CLI process inside a master/slave pseudo-terminal attached to a virtual terminal screen buffer.
+  - **Event & Progress Streaming**: Emits structured `ProjectSetupEvent` (Steps, Logs, Success, Error) consumed by CLI stdout or the TUI setup modal.
+  - **Atomic Rollback**: On any initialization error (e.g. branch collision, clone failure, process crash), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory.
+- **Unified Interactive Project Creation Modal**:
+  - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session Quick Launcher.
+  - **Template Selection & Preview**: Interactive template cycling with real-time repository count, repo names/sources, and default agent preview.
+  - **Live Pre-Validation**: Real-time inline feedback if a project directory already exists in CWD or if branch collisions exist in template repositories.
+  - **Agent Override & Initial Prompt**: Allows selecting an alternative agent tool (`claude`, `agy`, `copilot`, `aider`) and typing an optional initial task prompt.
+  - **Asynchronous Transition**: On submission (`Enter`), transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder`.
+
+---
+
+## 9. Interactive TUI Project Picker & Launcher Dashboard
 - **Top Header Status Bar**:
   - Full-width top header bar (`Constraint::Length(1)`) matching the rest of the application's header styling.
   - Filled with `theme.status_bar_bg` and `theme.status_bar_fg`.
   - Displays a clean brand title ` botai ` on the left styled with `theme.modal_title` and bold formatting.
-  - Displays right-aligned key navigation hints styled with `theme.key_hint`:
-    - Full hints: `"Tab: Switch | ↑/↓: Navigate | Enter: Select | n: New | d: Destroy | q: Quit"`
-    - Responsive compact fallback for narrower screens: `"Tab: Switch | Enter: Select | n: New | d: Destroy | q: Quit"`
-    - Minimal fallback: `"q: Quit"`
+  - Displays right-aligned key navigation hints styled with `theme.key_hint`.
 - **Unified Two-Panel Dashboard**:
   - Displayed when launching `botai` with no active sessions, positioned below the top header status bar.
-  - **Left Panel (Existing Projects)**: Lists existing local project directories found in the current working directory. Running project sessions are distinguished with a leading colored status dot indicator (`●` U+25CF) reflecting the session's live state (e.g. Busy, Waiting, Done, Error) while inactive projects display blank spacing (`  `). Press `Enter` to attach or switch focus to the selected project.
-  - **Right Panel (Project Templates)**: Lists all available project templates from `config.toml`. Press `n` or `Enter` to create and launch a new project.
-- **Interactive Project Creation Modal**:
-  - Floating centered modal triggered by `n` or template selection.
-  - Input fields for `Project Name:` and optional `Initial Prompt:`.
-  - On submission (`Enter`), transitions smoothly into the **Asynchronous Live Setup Progress & Log Modal**.
-- **Asynchronous Live Setup Progress & Log Modal**:
-  - Executes git repository cloning, fetching, worktree initialization, context generation, and PTY process spawning on a background worker thread without blocking the TUI event loop or multiplexer.
-  - Displays real-time step indicators (`Step [1/4]..[4/4]`), status messages, an animated activity spinner, and a scrollable tailing log window streaming stdout/stderr messages.
-  - **Success Transition**: Automatically adds the newly created session to `SessionRegistry`, switches focus to the new project tab, and dismisses the setup modal.
-  - **Error Retention & Rollback**: On failure (e.g. branch collision, network timeout, git clone failure), cleanly rolls back partially created directories and worktrees, keeps the setup modal open displaying the error description and full logs, and prompts `[Esc] / [Enter] Close` so diagnostic details are never lost.
+  - **Left Panel (Existing Projects)**: Lists existing local project directories found in CWD with real-time status badges (`●`). Press `Enter` to attach.
+  - **Right Panel (Project Templates)**: Lists all available project templates. Press `n` or `Enter` to open the unified `ProjectCreationModal`.
 - **Destroy Project Confirmation Modal**:
-  - Pressing `d` on the Left Panel (Existing Projects) opens a dedicated centered confirmation modal (` Confirm Destroy Project `) styled with alert theme colors.
-  - Prompts: `Are you sure you want to destroy project '<project_name>'? This will permanently remove the project directory and its git worktrees.`
-  - **Confirmation**: Pressing `y`, `Y`, or `Enter` closes the modal and executes clean project directory and worktree removal.
-  - **Cancellation**: Pressing `n`, `N`, or `Esc` closes the modal without performing any destructive action.
-  - Hardware cursor is automatically hidden while the confirmation modal is open.
-- **Dashboard Keybindings**:
-  - `Tab` / `Left` / `Right`: Switch active panel focus.
-  - `Up` / `Down`: Navigate list items within the active panel.
-  - `Enter`: Attach/switch to selected project (Left Panel) or open creation modal (Right Panel).
-  - `n`: Trigger new project modal for the selected template.
-  - `d`: Open destroy confirmation modal for the selected project.
-  - `q` / `Esc`: Quit `botai`.
+  - Pressing `d` on the Left Panel opens a confirmation modal (` Confirm Destroy Project `).
+  - Pressing `y`/`Enter` executes clean worktree metadata removal and project directory deletion.
 
 ---
 
-## 9. In-Session Quick Launcher & Project Creator Modal
+## 10. In-Session Quick Launcher & Project Navigation Modal
 - **In-Session Trigger (`Ctrl + Space` then `c` / `n`)**:
   - Can be invoked at any time while working inside an active terminal session.
-  - Renders a floating modal centered over the active terminal view without interrupting background PTY reading or activity tracking.
 - **Tabbed Modal Views**:
-  - **Create New Project Tab**:
-    - **Template Selector**: Defaults to the active project's template (or the first configured template); cycled using `Left` / `Right`.
-    - **Project Name Input**: Text entry field with interactive editing.
-    - **Initial Prompt Input**: Optional text entry field for initial task instruction.
-    - **Submission**: On `Enter`, closes the quick launcher and transitions immediately into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker to execute repository cloning, worktree creation, `AGENTS.md` context synthesis, and agent PTY launching without freezing the active session.
-    - **Inline & Modal Error Feedback**: If creation fails, full diagnostic logs and error banners are retained until dismissed via `[Esc]` or `[Enter]`.
-  - **Attach Existing Project Tab**:
-    - Lists local project directories in CWD (directories with `AGENTS.md`).
-    - Running sessions are visually indicated with a leading colored status dot indicator (`●` U+25CF) reflecting their real-time state (`Busy`, `Waiting`, `Done`, `Error`).
-    - Navigated via `Up` / `Down` / `j` / `k`.
-    - **Submission**: If the project already has an active session tab, switches focus to it; otherwise spawns and attaches the project in a new session tab, adds it to the registry, closes the modal, and switches to it.
+  - **Create New Project Tab**: Embedded unified `ProjectCreationModal`.
+  - **Attach Existing Project Tab**: Lists local projects in CWD with status indicators for quick switching or attaching.
 - **Navigation & Controls**:
-  - `Tab` / `BackTab` (`Shift+Tab`): Move focus between modal tabs and form fields.
-  - `Left` / `Right`: Switch between 'Create New' and 'Attach Existing' tabs when tab bar is focused, or cycle templates when template field is focused.
+  - `Tab` / `BackTab` (`Shift+Tab`): Move focus between tabs and form fields.
+  - `Left` / `Right`: Switch tabs or cycle template/agent choices.
   - `Enter`: Submit create or attach action.
   - `Esc`: Dismiss modal and return focus to active terminal PTY.
 

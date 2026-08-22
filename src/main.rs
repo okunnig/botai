@@ -6,8 +6,8 @@ use std::path::Path;
 
 use botai::cli::{Cli, Commands};
 use botai::config::Config;
-use botai::context::{generate_agents_md, ProjectContext, RepoMapping};
-use botai::git::{create_worktree, has_uncommitted_changes, remove_worktree_auto};
+use botai::git::{has_uncommitted_changes, remove_worktree_auto};
+use botai::project::{ProjectBuilder, ProjectSetupEvent};
 use botai::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen};
 use botai::tui::{DashboardState, TuiApp};
 
@@ -155,140 +155,52 @@ fn cmd_start(
     agent_override: Option<&str>,
     prompt: Option<&str>,
 ) -> Result<()> {
-    let tpl = config
-        .get_template(template_name)
-        .with_context(|| format!("Template '{template_name}' not found in configuration"))?;
-
-    let agent_name = match agent_override {
-        Some(name) => name,
-        None => tpl.default_agent.as_deref().unwrap_or(&config.default_agent),
-    };
-
-    let agent = config
-        .get_agent(agent_name)
-        .with_context(|| format!("Agent '{agent_name}' not found in configuration"))?;
-
-    let resolved_repos = config
-        .resolve_template_repos(template_name)
-        .with_context(|| format!("Failed to resolve repositories for template '{template_name}'"))?;
-
-    // Auto-clone any missing repositories and fetch updates best-effort
-    for repo in &resolved_repos {
-        if !repo.exists_locally() {
-            if let Some(url) = &repo.clone_url {
-                println!(
-                    "Repository '{}' is not cached locally. Auto-cloning from {}...",
-                    repo.name, url
-                );
-                botai::git::clone_repo(url, &repo.local_path).with_context(|| {
-                    format!("Failed to clone repository '{}' from '{}'", repo.name, url)
-                })?;
-                println!("✓ Cloned into {:?}", repo.local_path);
-            } else {
-                bail!(
-                    "Local repository '{}' not found at {:?}. Please verify your configuration.",
-                    repo.name,
-                    repo.local_path
-                );
-            }
-        } else {
-            // Best-effort fetch
-            let _ = botai::git::fetch_repo(&repo.local_path);
-        }
-    }
-
     let cwd = env::current_dir().context("Failed to get current working directory")?;
-    let project_dir = cwd.join(project_name);
-
-    if project_dir.exists() {
-        bail!(
-            "Project directory '{:?}' already exists. Please choose a different project name or remove it.",
-            project_dir
-        );
-    }
-
-    fs::create_dir_all(&project_dir)
-        .with_context(|| format!("Failed to create project directory {:?}", project_dir))?;
-
-    let project_dir = project_dir
-        .canonicalize()
-        .unwrap_or(project_dir);
-
-    let mut repo_mappings: Vec<RepoMapping> = Vec::new();
-
-    // Create worktree for each resolved repo in the template
-    for repo in &resolved_repos {
-        let worktree_path = project_dir.join(&repo.name);
-
-        println!(
-            "Creating worktree for repo '{}' at {:?}",
-            repo.name, worktree_path
-        );
-
-        if let Err(e) = create_worktree(&repo.local_path, &worktree_path, project_name) {
-            // Rollback on failure
-            for mapping in &repo_mappings {
-                let _ = remove_worktree_auto(&mapping.worktree_path, true);
-            }
-            let _ = fs::remove_dir_all(&project_dir);
-            return Err(e).with_context(|| {
-                format!(
-                    "Failed to create git worktree for {:?} checked out to branch '{}'",
-                    repo.local_path, project_name
-                )
-            });
-        }
-
-        repo_mappings.push(RepoMapping::new(
-            repo.name.clone(),
-            repo.local_path.clone(),
-            worktree_path,
-        ));
-    }
-
-    // Synthesize and write AGENTS.md
-    let project_context = ProjectContext {
-        project_name: project_name.to_string(),
-        template_name: template_name.to_string(),
-        description: tpl.description.clone(),
-        agents_md_append: tpl.agents_md_append.clone(),
-        repos: repo_mappings,
-        env: tpl.env.clone(),
-        initial_prompt: prompt.map(|s| s.to_string()),
-    };
-
-    let agents_md_path = generate_agents_md(&project_dir, &project_context)
-        .context("Failed to generate AGENTS.md context file")?;
-    println!("Generated context orientation file at {:?}", agents_md_path);
-
     let (term_cols, term_rows) = crossterm::terminal::size()
         .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
         .unwrap_or((100, 30));
 
-    // Build PTY configuration and spawn agent process
-    let mut pty_config = PtyConfig::new(&agent.command, &project_dir)
-        .with_args(agent.args.clone())
-        .with_dimensions(term_cols, term_rows);
+    let mut builder = ProjectBuilder::new(config.clone(), template_name, project_name)
+        .with_cwd(cwd.clone())
+        .with_viewport(term_cols, term_rows);
 
-    for (k, v) in &agent.env {
-        pty_config = pty_config.with_env(k, v);
+    if let Some(agent) = agent_override {
+        builder = builder.with_agent(agent);
     }
-    for (k, v) in &tpl.env {
-        pty_config = pty_config.with_env(k, v);
-    }
-
-    let pty = PtySession::spawn(pty_config)
-        .with_context(|| format!("Failed to spawn agent command '{}'", agent.command))?;
-    let vt = VtScreen::new(term_cols, term_rows);
-    let mut ps = ProjectSession::new(project_name, template_name, agent_name);
     if let Some(p) = prompt {
-        ps = ps.with_prompt(p);
+        builder = builder.with_prompt(p);
     }
+
+    // Stream step and log progress directly to stdout
+    let progress_sink = |event: ProjectSetupEvent| match event {
+        ProjectSetupEvent::Step {
+            current,
+            total,
+            message,
+        } => {
+            println!("[{}/{}] {}", current, total, message);
+        }
+        ProjectSetupEvent::Log(msg) => {
+            println!("{}", msg);
+        }
+        ProjectSetupEvent::Success => {
+            println!("✓ Project setup completed successfully!");
+        }
+        ProjectSetupEvent::Error(err) => {
+            eprintln!("✗ Error: {}", err);
+        }
+    };
+
+    let (ps, pty, vt) = builder
+        .build(progress_sink)
+        .with_context(|| format!("Failed to create project '{project_name}'"))?;
 
     let mut registry = SessionRegistry::new();
     registry.add(ps, pty, vt)?;
 
-    let mut app = TuiApp::new(registry);
+    let mut app = TuiApp::new(registry)
+        .with_config(config.clone())
+        .with_cwd(cwd);
     let mut stdout = io::stdout();
     app.run(&mut stdout)?;
 

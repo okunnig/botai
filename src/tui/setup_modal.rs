@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -13,9 +12,8 @@ use ratatui::{
 };
 
 use crate::config::Config;
-use crate::context::{generate_agents_md, ProjectContext, RepoMapping};
-use crate::git::{create_worktree, remove_worktree_auto};
-use crate::session::{ProjectSession, PtyConfig, PtySession, VtScreen};
+use crate::project::{ProjectBuilder, ProjectSetupEvent};
+use crate::session::{ProjectSession, PtySession, VtScreen};
 use crate::tui::theme::Theme;
 
 /// Events emitted during asynchronous project creation and setup.
@@ -189,191 +187,49 @@ pub fn run_setup_worker(
     viewport_size: (u16, u16),
     tx: Sender<SetupProgressEvent>,
 ) {
-    let result = (|| -> anyhow::Result<(ProjectSession, PtySession, VtScreen)> {
-        // Step 1: Checking / resolving template repositories
-        let _ = tx.send(SetupProgressEvent::Step {
-            current: 1,
-            total: 4,
-            message: format!("Checking repositories for template '{}'...", template_name),
-        });
-        let _ = tx.send(SetupProgressEvent::Log(format!(
-            "[1/4] Checking repositories for template '{}'...",
-            template_name
-        )));
+    let cfg = config.unwrap_or_else(|| {
+        Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+            .unwrap_or_else(|_| Config {
+                default_agent: "claude".to_string(),
+                theme: "tokyo-night".to_string(),
+                repos_dir: PathBuf::from(".botai_repos"),
+                agents: HashMap::new(),
+                templates: HashMap::new(),
+            })
+    });
 
-        let project_dir = cwd.join(&project_name);
-        if project_dir.exists() {
-            anyhow::bail!("Project directory '{}' already exists in CWD", project_name);
+    let (cols, rows) = viewport_size;
+    let mut builder = ProjectBuilder::new(cfg, &template_name, &project_name)
+        .with_cwd(cwd)
+        .with_viewport(cols, rows);
+
+    if let Some(ref p) = prompt {
+        builder = builder.with_prompt(p);
+    }
+
+    let tx_sink = tx.clone();
+    let progress_sink = move |event: ProjectSetupEvent| match event {
+        ProjectSetupEvent::Step {
+            current,
+            total,
+            message,
+        } => {
+            let _ = tx_sink.send(SetupProgressEvent::Step {
+                current,
+                total,
+                message,
+            });
         }
-
-        let default_config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
-        let config_ref = config.as_ref().or(default_config.as_ref());
-
-        let tpl = config_ref.and_then(|c| c.get_template(&template_name));
-        let agent_name = tpl
-            .and_then(|w| w.default_agent.as_deref())
-            .or_else(|| config_ref.map(|c| c.default_agent.as_str()))
-            .unwrap_or("claude");
-
-        let (agent_cmd, agent_args, agent_env) = if let Some(cfg) = config_ref {
-            if let Some(agent) = cfg.get_agent(agent_name) {
-                (agent.command.clone(), agent.args.clone(), agent.env.clone())
-            } else {
-                #[cfg(windows)]
-                let default_shell = "cmd.exe".to_string();
-                #[cfg(not(windows))]
-                let default_shell = "sh".to_string();
-                (default_shell, Vec::new(), HashMap::new())
-            }
-        } else {
-            #[cfg(windows)]
-            let default_shell = "cmd.exe".to_string();
-            #[cfg(not(windows))]
-            let default_shell = "sh".to_string();
-            (default_shell, Vec::new(), HashMap::new())
-        };
-
-        // Step 2: Auto-cloning missing repos & fetching
-        let _ = tx.send(SetupProgressEvent::Step {
-            current: 2,
-            total: 4,
-            message: "Cloning and updating repositories...".to_string(),
-        });
-
-        let mut resolved_repos_list = Vec::new();
-        if let Some(cfg) = config_ref {
-            match cfg.resolve_template_repos(&template_name) {
-                Ok(repos) => {
-                    resolved_repos_list = repos;
-                }
-                Err(err) => {
-                    anyhow::bail!("Failed to resolve template repositories: {}", err);
-                }
-            }
+        ProjectSetupEvent::Log(msg) => {
+            let _ = tx_sink.send(SetupProgressEvent::Log(msg));
         }
-
-        for repo in &resolved_repos_list {
-            if !repo.exists_locally() {
-                if let Some(url) = &repo.clone_url {
-                    let _ = tx.send(SetupProgressEvent::Log(format!(
-                        "[2/4] Cloning repository '{}' from {}...",
-                        repo.name, url
-                    )));
-                    crate::git::clone_repo(url, &repo.local_path)?;
-                } else {
-                    anyhow::bail!(
-                        "Repository '{}' does not exist locally and has no remote URL configured",
-                        repo.name
-                    );
-                }
-            } else {
-                let _ = tx.send(SetupProgressEvent::Log(format!(
-                    "[2/4] Fetching latest updates for repository '{}'...",
-                    repo.name
-                )));
-                let _ = crate::git::fetch_repo(&repo.local_path);
-            }
+        ProjectSetupEvent::Success => {}
+        ProjectSetupEvent::Error(err) => {
+            let _ = tx_sink.send(SetupProgressEvent::Error(err));
         }
+    };
 
-        // Step 3: Creating project directory and git worktrees
-        let _ = tx.send(SetupProgressEvent::Step {
-            current: 3,
-            total: 4,
-            message: "Creating project directory and git worktrees...".to_string(),
-        });
-        fs::create_dir_all(&project_dir)?;
-        let project_dir_canon = project_dir
-            .canonicalize()
-            .unwrap_or_else(|_| project_dir.clone());
-
-        let mut repo_mappings: Vec<RepoMapping> = Vec::new();
-        for repo in &resolved_repos_list {
-            let worktree_path = project_dir_canon.join(&repo.name);
-            let _ = tx.send(SetupProgressEvent::Log(format!(
-                "[3/4] Creating git worktree for '{}' at {}...",
-                repo.name,
-                worktree_path.display()
-            )));
-            if let Err(err) = create_worktree(&repo.local_path, &worktree_path, &project_name) {
-                // Rollback partially created worktrees & project_dir
-                for mapping in &repo_mappings {
-                    let _ = remove_worktree_auto(&mapping.worktree_path, true);
-                }
-                let _ = fs::remove_dir_all(&project_dir);
-                anyhow::bail!("Failed to create worktree for '{}': {}", repo.name, err);
-            }
-            repo_mappings.push(RepoMapping::new(
-                repo.name.clone(),
-                repo.local_path.clone(),
-                worktree_path,
-            ));
-        }
-
-        // Step 4: Generating AGENTS.md context
-        let _ = tx.send(SetupProgressEvent::Step {
-            current: 4,
-            total: 4,
-            message: "Generating AGENTS.md context orientation file...".to_string(),
-        });
-        let _ = tx.send(SetupProgressEvent::Log(
-            "[4/4] Generating AGENTS.md context orientation file...".to_string(),
-        ));
-
-        let project_context = ProjectContext {
-            project_name: project_name.clone(),
-            template_name: template_name.clone(),
-            description: tpl.and_then(|w| w.description.clone()),
-            agents_md_append: tpl.and_then(|w| w.agents_md_append.clone()),
-            repos: repo_mappings,
-            env: tpl.map(|w| w.env.clone()).unwrap_or_default(),
-            initial_prompt: prompt.clone(),
-        };
-
-        if let Err(err) = generate_agents_md(&project_dir_canon, &project_context) {
-            let _ = fs::remove_dir_all(&project_dir);
-            anyhow::bail!("Failed to generate AGENTS.md: {}", err);
-        }
-
-        // Step 5: Spawning agent CLI in pseudo-terminal
-        let (cols, rows) = viewport_size;
-        let _ = tx.send(SetupProgressEvent::Log(format!(
-            "Spawning AI agent CLI '{}' in pseudo-terminal ({}x{})...",
-            agent_cmd, cols, rows
-        )));
-
-        let mut pty_config = PtyConfig::new(&agent_cmd, &project_dir_canon)
-            .with_args(agent_args)
-            .with_dimensions(cols, rows);
-
-        for (k, v) in &agent_env {
-            pty_config = pty_config.with_env(k, v);
-        }
-
-        if let Some(tpl) = tpl {
-            for (k, v) in &tpl.env {
-                pty_config = pty_config.with_env(k, v);
-            }
-        }
-
-        let pty = match PtySession::spawn(pty_config) {
-            Ok(p) => p,
-            Err(err) => {
-                let _ = fs::remove_dir_all(&project_dir);
-                anyhow::bail!("Failed to spawn agent process '{}': {}", agent_cmd, err);
-            }
-        };
-
-        let vt = VtScreen::new(cols, rows);
-        let mut ps = ProjectSession::new(&project_name, &template_name, agent_name);
-        if let Some(ref p) = prompt {
-            ps = ps.with_prompt(p);
-        }
-
-        Ok((ps, pty, vt))
-    })();
-
-    match result {
+    match builder.build(progress_sink) {
         Ok((ps, pty, vt)) => {
             let _ = tx.send(SetupProgressEvent::Log(
                 "✓ Project setup completed successfully!".to_string(),

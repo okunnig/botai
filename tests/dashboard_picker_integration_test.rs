@@ -1,7 +1,7 @@
 use std::fs;
 
 use botai::config::Config;
-use botai::tui::{render_dashboard, ActivePanel, DashboardAction, DashboardState};
+use botai::tui::{render_dashboard, ActivePanel, CreationFocus, DashboardAction, DashboardState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -138,17 +138,18 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     assert!(state.creation_modal.is_some());
 
     let modal = state.creation_modal.as_ref().unwrap();
-    assert_eq!(modal.template_name, "ecommerce");
-    assert_eq!(modal.active_field, 0);
+    assert_eq!(modal.selected_template(), Some("ecommerce"));
+    assert_eq!(modal.focus, CreationFocus::ProjectName);
 
     // 8. Type project name into modal
     for c in "stripe-subscriptions".chars() {
         state.handle_key(key(KeyCode::Char(c)));
     }
 
-    // Switch to prompt input field using Tab
+    // Switch to agent and then prompt input field using Tab
     state.handle_key(key(KeyCode::Tab));
-    assert_eq!(state.creation_modal.as_ref().unwrap().active_field, 1);
+    state.handle_key(key(KeyCode::Tab));
+    assert_eq!(state.creation_modal.as_ref().unwrap().focus, CreationFocus::Prompt);
 
     // Type prompt into modal
     for c in "Build recurring billing engine with webhooks".chars() {
@@ -171,7 +172,8 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         .map(|cell| cell.symbol())
         .collect::<String>();
 
-    assert!(modal_rendered.contains("Create New Project [ecommerce]"));
+    assert!(modal_rendered.contains("Create New Project"));
+    assert!(modal_rendered.contains("ecommerce"));
     assert!(modal_rendered.contains("Project Name:"));
     assert!(modal_rendered.contains("stripe-subscriptions"));
     assert!(modal_rendered.contains("Initial Prompt:"));
