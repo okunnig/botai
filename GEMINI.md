@@ -1,6 +1,6 @@
-# botai - Agent Orchestrator
+# botai - Multi-Repo Workspace Orchestrator
 
-A cross-platform terminal session orchestrator and multiplexer for AI agent CLI tools (Claude Code, agy, Copilot CLI, etc.) written in idiomatic Rust.
+A cross-platform multi-repo workspace orchestrator and session multiplexer for AI agent workflows (Claude Code, agy, Copilot CLI, etc.) written in idiomatic Rust.
 
 ## AI Agent usage
 

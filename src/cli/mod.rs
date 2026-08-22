@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// botai - Terminal session orchestrator and multiplexer for AI agent CLI tools.
+/// botai - Multi-repo workspace orchestrator and session multiplexer for AI agent workflows.
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
 #[command(name = "botai", author, version, about, long_about = None)]
 pub struct Cli {

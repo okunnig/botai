@@ -44,7 +44,7 @@ pub type WorkspaceNotFound = ConfigError;
 
 /// Default template content for `config.toml` with rich explanatory comments.
 pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# ==============================================================================
-# botai - Agent Orchestrator Configuration File
+# botai - Multi-Repo Workspace Orchestrator Configuration File
 # ==============================================================================
 # Default locations:
 #   - Linux/macOS: ~/.config/botai/config.toml (or $XDG_CONFIG_HOME/botai/config.toml)

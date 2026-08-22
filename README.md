@@ -1,11 +1,11 @@
 # botai
 
 <p align="center">
-  <img src="assets/botai_hero.jpg" alt="botai - AI Agent Orchestrator" width="100%" />
+  <img src="assets/botai_hero.jpg" alt="botai - Multi-Repo Workspace Orchestrator & Session Multiplexer for AI Workflows" width="100%" />
 </p>
 
 <p align="center">
-  <strong>Cross-Platform Terminal Session Orchestrator & Multiplexer for AI Coding Agents</strong>
+  <strong>Multi-Repo Workspace Orchestrator & Session Multiplexer for AI Workflows</strong>
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 
 ## Overview
 
-**`botai`** is an opinionated, high-performance terminal session orchestrator and multiplexer engineered specifically for autonomous AI coding agents (**Google Antigravity / `agy`**, **Claude Code**, **GitHub Copilot CLI**, **Aider**, and custom tools) written in idiomatic Rust.
+**`botai`** is a cross-platform multi-repo workspace orchestrator and session multiplexer for AI agent workflows (**Google Antigravity / `agy`**, **Claude Code**, **GitHub Copilot CLI**, **Aider**, and custom tools) written in idiomatic Rust.
 
 Modern AI coding agents excel at single-directory tasks but struggle when real-world engineering spans multiple microservices, frontend applications, shared libraries, and infrastructure repositories. `botai` eliminates this friction by automating isolated Git worktree provisioning, synthesizing multi-repo context orientation maps (`AGENTS.md`), and multiplexing agent sessions inside a native, dependency-free terminal user interface.
 
@@ -226,7 +226,7 @@ Configuration is stored at:
 
 ```toml
 # ==============================================================================
-# botai - Configuration File
+# botai - Multi-Repo Workspace Orchestrator Configuration File
 # ==============================================================================
 
 # Global default AI agent tool when a template does not specify an override

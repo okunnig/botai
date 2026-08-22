@@ -1,6 +1,6 @@
-# Requirements for botai (Agent Orchestrator)
+# Requirements for botai (Multi-Repo Workspace Orchestrator & Session Multiplexer)
 
-`botai` is an opinionated, cross-platform terminal session orchestrator and multiplexer for AI agent CLI tools (e.g., Claude Code, agy, GitHub Copilot CLI, Aider) written in idiomatic Rust.
+`botai` is a cross-platform multi-repo workspace orchestrator and session multiplexer for AI agent workflows (e.g., Claude Code, agy, GitHub Copilot CLI, Aider) written in idiomatic Rust.
 
 ---
 
@@ -36,7 +36,7 @@
 ### Annotated `config.toml` Template
 ```toml
 # ==============================================================================
-# botai - Configuration File
+# botai - Multi-Repo Workspace Orchestrator Configuration File
 # ==============================================================================
 # Default locations:
 #   - Linux/macOS: ~/.config/botai/config.toml (or $XDG_CONFIG_HOME/botai/config.toml)
