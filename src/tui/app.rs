@@ -338,7 +338,7 @@ impl TuiApp {
                 while event::poll(Duration::from_millis(0))? {
                     match event::read()? {
                         Event::Key(key) => {
-                            if key.kind == KeyEventKind::Press {
+                            if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
                                 if self.setup_modal.is_some() {
                                     self.handle_setup_modal_key(key);
                                 } else if self.quick_launcher.is_some() {

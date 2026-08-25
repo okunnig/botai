@@ -162,10 +162,10 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Automatically positions cursor in active text fields within dialogs/modals and hides the cursor when viewing scrollback history or when appropriate.
 - **Keyboard Enhancement Protocol Negotiation**:
   - Pushes IME-safe keyboard enhancement flags (`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES | KeyboardEnhancementFlags::REPORT_EVENT_TYPES | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS`) via `PushKeyboardEnhancementFlags` on startup to enable progressive keyboard enhancement and unambiguous distinction between modified keys (e.g. distinguishing Shift+Enter from plain Enter, modified arrows, Ctrl+Shift combinations) without interfering with IME composition.
+  - Accepts both `KeyEventKind::Press` and `KeyEventKind::Repeat` so held keystrokes (such as repeated backspace, arrow navigation, or enter) are processed smoothly across all interactive modals and PTY sessions.
   - Dynamically negotiates host terminal environment for xterm `modifyOtherKeys`:
     - Mode 2 (`\x1b[>4;2m`): Enabled when running inside `tmux` (detected via `TMUX` environment variable) to guarantee modifier reporting through tmux's internal terminal multiplexing layer.
-    - Mode 1 (`\x1b[>4;1m`): Enabled when running inside WezTerm (`WEZTERM_PANE` or `TERM_PROGRAM=WezTerm`) or Alacritty (`ALACRITTY_WINDOW_ID` or `TERM_PROGRAM=Alacritty`).
-    - None (no escape sequence emitted): For other host terminals to prevent escape code corruption.
+    - None (no escape sequence emitted): For Alacritty 0.13+, WezTerm, Kitty, Ghostty, and standard terminals, relying on the native Kitty Keyboard Protocol (`\x1b[>1u`) rather than sending `modifyOtherKeys` Mode 1 (`\x1b[>4;1m`) which would override Alacritty/WezTerm's Kitty mode and suppress Shift+Enter escape sequences.
   - Ensures `PopKeyboardEnhancementFlags` and disabling `modifyOtherKeys` (`\x1b[>4;0m`) are executed during teardown and in `TerminalCleanupGuard::drop`, guaranteeing the host terminal's original keyboard state is fully restored even on unexpected exit or error.
 - **Full CSI-u / ANSI Modifier Key Passthrough**:
   - Encodes modified key events using standard Xterm / CSI-u modifier parameter values:

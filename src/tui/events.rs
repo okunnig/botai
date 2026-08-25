@@ -27,20 +27,20 @@ impl ModifyOtherKeysMode {
 }
 
 /// Detects the recommended `modifyOtherKeys` mode based on explicit environment variables.
+///
+/// On Unix, `modifyOtherKeys` is not enabled for Alacritty or standard terminals because
+/// Alacritty 0.13+ and modern terminals natively support the Kitty Keyboard Protocol
+/// (`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`). Sending `\x1b[>4;1m` (`modifyOtherKeys` Mode 1)
+/// overrides Alacritty's Kitty mode and suppresses Shift+Enter escape sequences.
+/// `ModifyOtherKeysMode::Mode2` is only enabled when running inside `tmux` (`in_tmux == true`).
 pub fn host_modify_other_keys_mode_for_env(
     in_tmux: bool,
-    term_program: Option<&str>,
-    wezterm_pane: bool,
-    alacritty_window_id: bool,
+    _term_program: Option<&str>,
+    _wezterm_pane: bool,
+    _alacritty_window_id: bool,
 ) -> Option<ModifyOtherKeysMode> {
     if in_tmux {
         return Some(ModifyOtherKeysMode::Mode2);
-    }
-    if wezterm_pane || term_program.map_or(false, |p| p.eq_ignore_ascii_case("wezterm")) {
-        return Some(ModifyOtherKeysMode::Mode1);
-    }
-    if alacritty_window_id || term_program.map_or(false, |p| p.eq_ignore_ascii_case("alacritty")) {
-        return Some(ModifyOtherKeysMode::Mode1);
     }
     None
 }
@@ -1473,32 +1473,33 @@ mod tests {
             Some(ModifyOtherKeysMode::Mode2)
         );
 
-        // WezTerm yields Mode1 (via TERM_PROGRAM or WEZTERM_PANE)
+        // Alacritty, WezTerm, and other modern/standard terminals yield None on Unix
+        // to preserve native Kitty Keyboard Protocol and Shift+Enter handling
         assert_eq!(
             host_modify_other_keys_mode_for_env(false, Some("WezTerm"), false, false),
-            Some(ModifyOtherKeysMode::Mode1)
+            None
         );
         assert_eq!(
             host_modify_other_keys_mode_for_env(false, Some("wezterm"), false, false),
-            Some(ModifyOtherKeysMode::Mode1)
+            None
         );
         assert_eq!(
             host_modify_other_keys_mode_for_env(false, None, true, false),
-            Some(ModifyOtherKeysMode::Mode1)
+            None
         );
 
-        // Alacritty yields Mode1 (via TERM_PROGRAM or ALACRITTY_WINDOW_ID)
+        // Alacritty yields None
         assert_eq!(
             host_modify_other_keys_mode_for_env(false, Some("Alacritty"), false, false),
-            Some(ModifyOtherKeysMode::Mode1)
+            None
         );
         assert_eq!(
             host_modify_other_keys_mode_for_env(false, Some("alacritty"), false, false),
-            Some(ModifyOtherKeysMode::Mode1)
+            None
         );
         assert_eq!(
             host_modify_other_keys_mode_for_env(false, None, false, true),
-            Some(ModifyOtherKeysMode::Mode1)
+            None
         );
 
         // Other terminals yield None
@@ -1649,7 +1650,7 @@ mod tests {
         );
         assert_eq!(
             KeyHandler::host_modify_other_keys_mode_for_env(false, Some("wezterm"), false, false),
-            Some(ModifyOtherKeysMode::Mode1)
+            None
         );
         assert_eq!(
             KeyHandler::host_modify_other_keys_mode_for_env(false, None, false, false),

@@ -325,19 +325,19 @@ fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
     );
     assert_eq!(
         host_modify_other_keys_mode_for_env(false, Some("WezTerm"), false, false),
-        Some(ModifyOtherKeysMode::Mode1)
+        None
     );
     assert_eq!(
         host_modify_other_keys_mode_for_env(false, None, true, false),
-        Some(ModifyOtherKeysMode::Mode1)
+        None
     );
     assert_eq!(
         host_modify_other_keys_mode_for_env(false, Some("Alacritty"), false, false),
-        Some(ModifyOtherKeysMode::Mode1)
+        None
     );
     assert_eq!(
         host_modify_other_keys_mode_for_env(false, None, false, true),
-        Some(ModifyOtherKeysMode::Mode1)
+        None
     );
     assert_eq!(
         host_modify_other_keys_mode_for_env(false, Some("xterm"), false, false),
