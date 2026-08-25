@@ -56,10 +56,15 @@ pub struct TuiApp {
 }
 
 
-struct TerminalCleanupGuard;
+struct TerminalCleanupGuard {
+    enhanced_keyboard: bool,
+}
 
 impl Drop for TerminalCleanupGuard {
     fn drop(&mut self) {
+        if self.enhanced_keyboard {
+            let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
+        }
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
@@ -175,19 +180,35 @@ impl TuiApp {
     /// Runs the interactive TUI application event loop.
     pub fn run(&mut self, stdout: &mut Stdout) -> io::Result<()> {
         enable_raw_mode()?;
+        let enhanced_keyboard = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+        if enhanced_keyboard {
+            let _ = execute!(
+                stdout,
+                crossterm::event::PushKeyboardEnhancementFlags(
+                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                )
+            );
+        }
         execute!(
             stdout,
             EnterAlternateScreen,
             crossterm::event::EnableMouseCapture,
             crossterm::cursor::Show
         )?;
-        let _guard = TerminalCleanupGuard;
+        let mut _guard = TerminalCleanupGuard { enhanced_keyboard };
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
         let res = self.run_loop(&mut terminal);
 
         // Always restore terminal state even on error
+        if enhanced_keyboard {
+            let _ = execute!(
+                terminal.backend_mut(),
+                crossterm::event::PopKeyboardEnhancementFlags
+            );
+        }
+        _guard.enhanced_keyboard = false;
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),
@@ -286,7 +307,7 @@ impl TuiApp {
                                 f.buffer_mut(),
                                 &theme,
                             );
-                        } else if !active.vt().hide_cursor() {
+                        } else if !active.vt().hide_cursor() && active.vt().scrollback() == 0 {
                             let (col, row) = active.vt().cursor_position();
                             if col < term_area.width && row < term_area.height {
                                 f.set_cursor_position(ratatui::layout::Position::new(
@@ -327,6 +348,17 @@ impl TuiApp {
                                 } else {
                                     self.handle_key_event(key);
                                 }
+                            }
+                        }
+                        Event::Paste(text) => {
+                            if self.setup_modal.is_some() {
+                                self.handle_setup_modal_paste(&text);
+                            } else if self.quick_launcher.is_some() {
+                                self.handle_launcher_paste(&text);
+                            } else if self.is_showing_dashboard() {
+                                self.handle_dashboard_paste(&text);
+                            } else if !self.leader_active {
+                                self.handle_paste_event(&text);
                             }
                         }
                         Event::Mouse(mouse) => {
@@ -900,6 +932,7 @@ impl TuiApp {
             TuiAction::Passthrough(bytes) => {
                 self.leader_active = false;
                 if let Some(active) = self.registry.active_session_mut() {
+                    active.vt_mut().reset_scrollback();
                     let _ = active.pty_mut().write_all(&bytes);
                 }
             }
@@ -907,17 +940,65 @@ impl TuiApp {
         }
     }
 
-    /// Forwards mouse scroll events to the active session's PTY as ANSI escape sequences.
+    /// Forwards pasted text to the active session's PTY formatted as bracketed paste.
+    pub fn handle_paste_event(&mut self, text: &str) {
+        if self.leader_active {
+            return;
+        }
+        let bytes = crate::tui::events::paste_to_bytes(text);
+        if let Some(active) = self.registry.active_session_mut() {
+            active.vt_mut().reset_scrollback();
+            if active.pty_mut().write_all(&bytes).is_ok() {
+                let new_status = self.tracker.record_activity();
+                active.project_session.set_status(new_status);
+            }
+        }
+    }
+
+    /// Forwards pasted text to the quick launcher if active.
+    pub fn handle_launcher_paste(&mut self, text: &str) {
+        if let Some(launcher) = &mut self.quick_launcher {
+            launcher.handle_paste(text);
+        }
+    }
+
+    /// Forwards pasted text to the dashboard if active.
+    pub fn handle_dashboard_paste(&mut self, text: &str) {
+        if let Some(dashboard) = &mut self.dashboard {
+            dashboard.handle_paste(text);
+        }
+    }
+
+    /// Handles pasted text when the setup progress modal is active (no-op).
+    pub fn handle_setup_modal_paste(&mut self, _text: &str) {
+        // Setup progress modal does not take user text input
+    }
+
+    /// Forwards mouse events to the active session:
+    /// - If child process enabled mouse tracking (e.g. SGR mode in htop/vim), sends SGR escape sequences.
+    /// - If child process did not enable mouse tracking (e.g. agy, claude, shell), scrolls the VtScreen scrollback buffer so the user can review past output.
     pub fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
         if self.leader_active {
             return;
         }
-        let bytes = crate::tui::events::mouse_event_to_bytes(&mouse);
-        if !bytes.is_empty() {
-            if let Some(active) = self.registry.active_session_mut() {
-                if active.pty_mut().write_all(&bytes).is_ok() {
-                    let new_status = self.tracker.record_activity();
-                    active.project_session.set_status(new_status);
+        if let Some(active) = self.registry.active_session_mut() {
+            if active.vt().is_mouse_mode_enabled() {
+                let bytes = crate::tui::events::mouse_event_to_sgr_bytes(&mouse);
+                if !bytes.is_empty() {
+                    if active.pty_mut().write_all(&bytes).is_ok() {
+                        let new_status = self.tracker.record_activity();
+                        active.project_session.set_status(new_status);
+                    }
+                }
+            } else {
+                match mouse.kind {
+                    crossterm::event::MouseEventKind::ScrollUp => {
+                        active.vt_mut().scroll_up(3);
+                    }
+                    crossterm::event::MouseEventKind::ScrollDown => {
+                        active.vt_mut().scroll_down(3);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1831,14 +1912,17 @@ repos = []
         let mut registry = SessionRegistry::new();
         let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
         let pty = PtySession::spawn(config).unwrap();
-        let vt = VtScreen::new(80, 24);
+        let mut vt = VtScreen::new(80, 24);
+        for i in 1..=40 {
+            vt.process(format!("line {i}\r\n").as_bytes());
+        }
         let ps = ProjectSession::new("test-pty-scroll", "ws", "mock");
         registry.add(ps, pty, vt).unwrap();
 
         let mut app = TuiApp::new(registry);
         assert_eq!(app.registry.len(), 1);
 
-        // 1. Send ScrollUp event
+        // 1. Without child mouse mode: ScrollUp scrolls the VtScreen scrollback buffer
         let scroll_up = MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 10,
@@ -1847,11 +1931,11 @@ repos = []
         };
         app.handle_mouse_event(scroll_up);
         assert_eq!(
-            app.registry.active_session().unwrap().status(),
-            SessionStatus::Busy
+            app.registry.active_session().unwrap().vt().scrollback(),
+            3
         );
 
-        // 2. Send ScrollDown event
+        // 2. Send ScrollDown event: decrements scrollback back to 0
         let scroll_down = MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 10,
@@ -1859,6 +1943,15 @@ repos = []
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse_event(scroll_down);
+        assert_eq!(
+            app.registry.active_session().unwrap().vt().scrollback(),
+            0
+        );
+
+        // 3. With child mouse mode enabled: sends SGR and marks activity
+        app.registry.active_session_mut().unwrap().vt_mut().process(b"\x1b[?1000h");
+        app.registry.active_session_mut().unwrap().project_session.set_status(SessionStatus::WaitingForInput);
+        app.handle_mouse_event(scroll_up);
         assert_eq!(
             app.registry.active_session().unwrap().status(),
             SessionStatus::Busy
@@ -1978,6 +2071,62 @@ repos = []
         assert_eq!(
             app.setup_modal.as_ref().unwrap().scroll_offset,
             3
+        );
+    }
+
+    #[test]
+    fn test_tui_app_paste_event_and_scrollback_behavior() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let mut vt = VtScreen::new(80, 5);
+        for i in 1..=15 {
+            vt.process(format!("line {i}\r\n").as_bytes());
+        }
+        let ps = ProjectSession::new("test-paste", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        // 1. Scroll up using native scrollback
+        let scroll_up = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 10,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(scroll_up);
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
+
+        // 2. Typing or pasting resets scrollback back to 0
+        app.handle_paste_event("echo 'pasted text'\n");
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
+
+        // 3. Quick launcher paste
+        let mut launcher = QuickLauncherState::new(vec!["tpl1".to_string()], vec![], None);
+        launcher.focus = crate::tui::quick_launcher::LauncherFocus::ProjectName;
+        app.quick_launcher = Some(launcher);
+        app.handle_launcher_paste("pasted-project-name");
+        assert_eq!(
+            app.quick_launcher.as_ref().unwrap().creation_modal.project_name_input,
+            "pasted-project-name"
+        );
+
+        // 4. Dashboard paste
+        app.quick_launcher = None;
+        let mut dashboard = DashboardState::new(vec!["tpl1".to_string()], vec![]);
+        dashboard.open_creation_modal();
+        app.dashboard = Some(dashboard);
+        app.handle_dashboard_paste("dash-project");
+        assert_eq!(
+            app.dashboard.as_ref().unwrap().creation_modal.as_ref().unwrap().project_name_input,
+            "dash-project"
         );
     }
 }

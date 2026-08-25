@@ -158,11 +158,53 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Propagates window size changes (`SIGWINCH` / `ResizePseudoConsole`) so full-screen interactive agent CLIs (`agy`, `claude`, `aider`, etc.) dynamically re-render to the exact available terminal dimensions.
 - **Hardware Cursor Positioning & Visibility**:
   - Accurately tracks cursor coordinates and visibility state (`\x1b[?25h` / `\x1b[?25l`) from the active session's VT parser.
-  - Positions the terminal hardware cursor directly at the active input position during interactive sessions, rendering the native block cursor where user input is focused.
-  - Automatically positions cursor in active text fields within dialogs/modals and hides the cursor when appropriate.
-- **Mouse Event Capture & Mouse Scroll Forwarding**:
+  - Positions the terminal hardware cursor directly at the active input position during interactive sessions, rendering the native block cursor where user input is focused when at live scrollback position.
+  - Automatically positions cursor in active text fields within dialogs/modals and hides the cursor when viewing scrollback history or when appropriate.
+- **Keyboard Enhancement Protocol Negotiation**:
+  - Queries terminal capabilities on startup via `crossterm::terminal::supports_keyboard_enhancement()`.
+  - When supported, pushes `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` via `PushKeyboardEnhancementFlags` to enable progressive keyboard enhancement and unambiguous distinction between modified keys (e.g. distinguishing Shift+Enter from plain Enter, modified arrows, Ctrl+Shift combinations).
+  - Ensures `PopKeyboardEnhancementFlags` is executed during teardown and in `TerminalCleanupGuard::drop`, guaranteeing the host terminal's original keyboard state is fully restored even on unexpected exit or error.
+- **Full CSI-u / ANSI Modifier Key Passthrough**:
+  - Encodes modified key events using standard Xterm / CSI-u modifier parameter values:
+    `modifier_code = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0) + (Super/Meta ? 8 : 0)`.
+  - **Modified Enter**:
+    - Unmodified Enter: `\r` (`0x0D`).
+    - Modified Enter (Shift, Alt, Ctrl, Super, etc.): `\x1b[13;<mod>u` (e.g. `Shift+Enter` -> `\x1b[13;2u` for multiline prompt input in `agy`, Charmbracelet, Bubbletea, and modern TUIs; `Ctrl+Enter` -> `\x1b[13;5u`; `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`).
+  - **Modified Tab & BackTab**:
+    - Unmodified Tab: `\t` (`0x09`).
+    - Shift+Tab / BackTab: `\x1b[Z`.
+    - Other modified Tab (Ctrl+Tab, Alt+Tab, etc.): `\x1b[9;<mod>u`.
+  - **Modified Backspace**:
+    - Unmodified Backspace: `\x7f`.
+    - Modified Backspace: `\x1b[127;<mod>u`.
+  - **Modified Esc**:
+    - Unmodified Esc: `\x1b`.
+    - Modified Esc: `\x1b[27;<mod>u`.
+  - **Arrow Keys (`Up`, `Down`, `Right`, `Left`)**:
+    - Unmodified: `\x1b[A`, `\x1b[B`, `\x1b[C`, `\x1b[D`.
+    - Modified: `\x1b[1;<mod>A`, `\x1b[1;<mod>B`, `\x1b[1;<mod>C`, `\x1b[1;<mod>D`.
+  - **Navigation Keys (`Home`, `End`)**:
+    - Unmodified: `\x1b[H`, `\x1b[F`.
+    - Modified: `\x1b[1;<mod>H`, `\x1b[1;<mod>F`.
+  - **Paging & Edit Keys (`PageUp`, `PageDown`, `Delete`, `Insert`)**:
+    - Unmodified: `\x1b[5~`, `\x1b[6~`, `\x1b[3~`, `\x1b[2~`.
+    - Modified: `\x1b[5;<mod>~`, `\x1b[6;<mod>~`, `\x1b[3;<mod>~`, `\x1b[2;<mod>~`.
+  - **Function Keys (`F1`..`F12`)**:
+    - F1..F4: Unmodified `\x1bOP`..`\x1bOS`; modified `\x1b[1;<mod>P`..`\x1b[1;<mod>S`.
+    - F5..F12: Unmodified `\x1b[<num>~`; modified `\x1b[<num>;<mod>~`.
+  - **Character Keys (`KeyCode::Char(c)`)**:
+    - Single Ctrl: Standard C0 ASCII control byte (`Ctrl+A` -> `0x01` .. `Ctrl+Z` -> `0x1A`, `Ctrl+Space` -> `0x00`).
+    - Single Alt: Prepend ESC (`\x1b` + char UTF-8 bytes).
+    - Multi-modifier (Ctrl+Shift, Ctrl+Alt, Super): CSI-u format `\x1b[<codepoint>;<mod>u`.
+- **Bracketed Paste Event Passthrough**:
+  - Formats pasted clipboard text as standard bracketed paste escape sequence (`\x1b[200~<text>\x1b[201~`) via `paste_to_bytes`.
+  - When an active session is focused and leader mode is inactive, forwarded directly to the active session's PTY master/slave writer, updating activity tracking and resetting scrollback to live output.
+  - When dialogs or modals are active (Project Creation Modal, In-Session Quick Launcher, Dashboard), forwarded to the active text input field or search filter, preserving whitespace and newlines for multiline prompts.
+- **Mouse Event Capture & Dual-Mode Scroll Handling**:
   - Enables terminal mouse capture (`crossterm::event::EnableMouseCapture`) on application startup and cleanly releases it (`crossterm::event::DisableMouseCapture`) on termination / cleanup.
-  - **Active Session Mouse Scrolling**: When an active project session is focused in the viewport, mouse scroll wheel events (`MouseEventKind::ScrollUp`, `MouseEventKind::ScrollDown`) are captured and forwarded directly to the active session's PTY as standard ANSI / VT scroll escape sequences (Up / Down cursor sequences, 3 lines per scroll notch by default) so interactive agent CLIs, pagers, text editors, and TUIs scroll seamlessly.
+  - **Child Process Mouse Protocol (SGR 1006)**: When an active session process explicitly enables mouse reporting (e.g. `\x1b[?1000h` / `\x1b[?1006h` in `htop`, `vim`, `nano`, `mc`), mouse clicks, drags, releases, and scroll events are formatted as standard SGR escape sequences (`\x1b[<{code};{col};{row}{M/m}`) and forwarded to the PTY.
+  - **Native Virtual Terminal Scrollback**: When mouse reporting is not enabled by the child process (such as in standard CLI prompts like `agy`, `claude`, `aider`, and shells), mouse scroll wheel events (`ScrollUp`, `ScrollDown`) navigate the `VtScreen` scrollback buffer directly (3 lines per scroll notch), allowing users to view older output history without erroneously transmitting Up/Down arrow history navigation keys.
+  - **Automatic Live Snapping**: Any keyboard input or paste event automatically resets scrollback offset to `0`, instantly returning the viewport to live output.
   - **Modal & Dashboard Mouse Scrolling**: When floating modals (such as the Asynchronous Setup & Log Modal) or the interactive Dashboard are active, mouse wheel scroll events scroll the active log view or list view appropriately without leaking scroll bytes to background sessions.
 - **Session Termination & Exit Transitions**:
   - **Multi-Session Scenario (Normal Exit)**: When an agent process exits cleanly (exit code 0) and other session tabs remain active, the finished tab is automatically closed and focus transitions immediately to the adjacent active session tab.

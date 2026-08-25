@@ -178,9 +178,9 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
 }
 
 #[test]
-fn test_integration_tui_multiplexer_mouse_scroll_forwarding_end_to_end() {
+fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
     use botai::tui::app::TuiApp;
-    use botai::tui::events::{mouse_event_to_bytes, mouse_scroll_to_bytes};
+    use botai::tui::events::{mouse_event_to_bytes, mouse_event_to_sgr_bytes, mouse_scroll_to_bytes};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let tmp = tempdir().expect("Failed to create tempdir");
@@ -194,15 +194,19 @@ fn test_integration_tui_multiplexer_mouse_scroll_forwarding_end_to_end() {
     // Session 1: backend-api
     let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
     let pty1 = PtySession::spawn(config1).unwrap();
-    let vt1 = VtScreen::new(80, 24);
+    let mut vt1 = VtScreen::new(80, 24);
+    for i in 1..=30 {
+        vt1.process(format!("backend log line {i}\r\n").as_bytes());
+    }
     let mut ps1 = ProjectSession::new("backend-api", "workspace", "claude");
     ps1.set_status(SessionStatus::WaitingForInput);
     registry.add(ps1, pty1, vt1).unwrap();
 
-    // Session 2: frontend-ui
+    // Session 2: frontend-ui (with mouse tracking enabled)
     let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
     let pty2 = PtySession::spawn(config2).unwrap();
-    let vt2 = VtScreen::new(80, 24);
+    let mut vt2 = VtScreen::new(80, 24);
+    vt2.process(b"\x1b[?1000h"); // Enable mouse mode
     let mut ps2 = ProjectSession::new("frontend-ui", "workspace", "agy");
     ps2.set_status(SessionStatus::WaitingForInput);
     registry.add(ps2, pty2, vt2).unwrap();
@@ -229,7 +233,7 @@ fn test_integration_tui_multiplexer_mouse_scroll_forwarding_end_to_end() {
         b"\x1b[C".to_vec()
     );
 
-    // 2. Forward ScrollUp to active session 1
+    // 2. Session 1 (mouse mode disabled): ScrollUp scrolls native VtScreen scrollback buffer
     let scroll_up = MouseEvent {
         kind: MouseEventKind::ScrollUp,
         column: 15,
@@ -238,29 +242,34 @@ fn test_integration_tui_multiplexer_mouse_scroll_forwarding_end_to_end() {
     };
     app.handle_mouse_event(scroll_up);
     assert_eq!(
-        app.registry.active_session().unwrap().status(),
-        SessionStatus::Busy
+        app.registry.active_session().unwrap().vt().scrollback(),
+        3
     );
     assert_eq!(
         app.registry.active_session().unwrap().project_name(),
         "backend-api"
     );
 
-    // 3. Switch to session 2
+    // 3. Switch to session 2 (mouse mode enabled)
     app.registry.set_active_index(1).unwrap();
     assert_eq!(app.registry.active_index(), Some(1));
     assert_eq!(
         app.registry.active_session().unwrap().project_name(),
         "frontend-ui"
     );
+    assert!(app.registry.active_session().unwrap().vt().is_mouse_mode_enabled());
 
-    // Forward ScrollDown to active session 2
+    // Forward ScrollDown to active session 2 (emits SGR and marks activity)
     let scroll_down = MouseEvent {
         kind: MouseEventKind::ScrollDown,
         column: 20,
         row: 12,
         modifiers: KeyModifiers::empty(),
     };
+    assert_eq!(
+        mouse_event_to_sgr_bytes(&scroll_down),
+        b"\x1b[<65;21;13M".to_vec()
+    );
     app.handle_mouse_event(scroll_down);
     assert_eq!(
         app.registry.active_session().unwrap().status(),
@@ -277,7 +286,8 @@ fn test_integration_tui_multiplexer_mouse_scroll_forwarding_end_to_end() {
     );
     app.leader_active = false;
 
-    // 5. Non-scroll events do not produce activity
+    // 5. Non-scroll events in mouse disabled mode do not produce activity
+    app.registry.set_active_index(0).unwrap();
     let click = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 5,
@@ -289,6 +299,45 @@ fn test_integration_tui_multiplexer_mouse_scroll_forwarding_end_to_end() {
     assert_eq!(
         app.registry.active_session().unwrap().status(),
         SessionStatus::WaitingForInput
+    );
+}
+
+#[test]
+fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
+    use botai::tui::events::{key_to_bytes, paste_to_bytes};
+
+    // 1. Shift+Enter multiline input format for agy / modern TUIs
+    let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+    assert_eq!(key_to_bytes(&shift_enter), b"\x1b[13;2u".to_vec());
+
+    // 2. Ctrl+Enter, Alt+Enter, Ctrl+Shift+Enter
+    let ctrl_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
+    assert_eq!(key_to_bytes(&ctrl_enter), b"\x1b[13;5u".to_vec());
+
+    let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+    assert_eq!(key_to_bytes(&alt_enter), b"\x1b[13;3u".to_vec());
+
+    let ctrl_shift_enter = KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    assert_eq!(key_to_bytes(&ctrl_shift_enter), b"\x1b[13;6u".to_vec());
+
+    // 3. Modified arrows and navigation
+    let ctrl_up = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
+    assert_eq!(key_to_bytes(&ctrl_up), b"\x1b[1;5A".to_vec());
+
+    let shift_down = KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT);
+    assert_eq!(key_to_bytes(&shift_down), b"\x1b[1;2B".to_vec());
+
+    let ctrl_home = KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL);
+    assert_eq!(key_to_bytes(&ctrl_home), b"\x1b[1;5H".to_vec());
+
+    // 4. Bracketed paste encoding
+    let pasted = paste_to_bytes("def test():\n    return 42\n");
+    assert_eq!(
+        pasted,
+        b"\x1b[200~def test():\n    return 42\n\x1b[201~".to_vec()
     );
 }
 

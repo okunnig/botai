@@ -584,6 +584,45 @@ impl ProjectCreationModal {
         }
     }
 
+    /// Handles pasted text into the active focused text input field or search filter.
+    pub fn handle_paste(&mut self, text: &str) {
+        match self.step {
+            CreationStep::SelectTemplate => {
+                for c in text.chars() {
+                    if !c.is_control() {
+                        self.template_search_query.push(c);
+                    }
+                }
+                let matching = self.matching_template_indices();
+                if matching.is_empty() {
+                    self.selected_template_idx = 0;
+                } else if self.selected_template_idx >= matching.len() {
+                    self.selected_template_idx = matching.len() - 1;
+                }
+                self.sync_agent_with_template();
+                self.revalidate();
+            }
+            CreationStep::ConfigureDetails => match self.focus {
+                CreationFocus::ProjectName => {
+                    for c in text.chars() {
+                        if !c.is_control() {
+                            self.project_name_input.push(c);
+                        }
+                    }
+                    self.revalidate();
+                }
+                CreationFocus::Prompt => {
+                    for c in text.chars() {
+                        if c == '\n' || c == '\r' || !c.is_control() {
+                            self.prompt_input.push(c);
+                        }
+                    }
+                }
+                CreationFocus::Agent | CreationFocus::Template => {}
+            },
+        }
+    }
+
     /// Handles mouse events (e.g. scroll wheel) and returns any triggered `CreationModalAction`.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> CreationModalAction {
         match mouse.kind {

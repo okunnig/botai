@@ -507,6 +507,32 @@ impl QuickLauncherState {
         }
     }
 
+    /// Handles pasted text forwarded from the TUI event loop.
+    pub fn handle_paste(&mut self, text: &str) {
+        if self.tab == LauncherTab::Create {
+            match self.focus {
+                LauncherFocus::ProjectName => {
+                    for c in text.chars() {
+                        if !c.is_control() {
+                            self.creation_modal.project_name_input.push(c);
+                        }
+                    }
+                    self.creation_modal.revalidate();
+                    self.clear_error();
+                }
+                LauncherFocus::Prompt => {
+                    for c in text.chars() {
+                        if c == '\n' || c == '\r' || !c.is_control() {
+                            self.creation_modal.prompt_input.push(c);
+                        }
+                    }
+                    self.clear_error();
+                }
+                LauncherFocus::Template | LauncherFocus::TabBar | LauncherFocus::ProjectList => {}
+            }
+        }
+    }
+
     /// Handles a mouse event (e.g. scroll wheel) and returns any triggered `QuickLauncherAction`.
     pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> QuickLauncherAction {
         match mouse.kind {

@@ -48,6 +48,16 @@ impl KeyHandler {
         key_to_bytes(event)
     }
 
+    /// Formats a text slice as a standard bracketed paste escape sequence (`\x1b[200~<text>\x1b[201~`).
+    pub fn paste_to_bytes(text: &str) -> Vec<u8> {
+        paste_to_bytes(text)
+    }
+
+    /// Computes the CSI-u / Xterm modifier parameter value (1..16).
+    pub fn modifier_code(modifiers: KeyModifiers) -> u8 {
+        modifier_code(modifiers)
+    }
+
     /// Converts a crossterm `MouseEventKind` into standard ANSI / VT escape sequences for scrolling.
     pub fn mouse_scroll_to_bytes(kind: MouseEventKind) -> Vec<u8> {
         mouse_scroll_to_bytes(kind)
@@ -57,6 +67,42 @@ impl KeyHandler {
     pub fn mouse_event_to_bytes(event: &MouseEvent) -> Vec<u8> {
         mouse_event_to_bytes(event)
     }
+
+    /// Converts a crossterm `MouseEvent` into standard SGR (1006) ANSI escape sequences for child processes with mouse reporting enabled.
+    pub fn mouse_event_to_sgr_bytes(event: &MouseEvent) -> Vec<u8> {
+        mouse_event_to_sgr_bytes(event)
+    }
+}
+
+/// Computes the CSI-u / Xterm modifier parameter value:
+/// `1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0) + (Super/Meta ? 8 : 0)`.
+pub fn modifier_code(modifiers: KeyModifiers) -> u8 {
+    let mut val = 1u8;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        val += 1;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        val += 2;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        val += 4;
+    }
+    if modifiers.contains(KeyModifiers::SUPER)
+        || modifiers.contains(KeyModifiers::META)
+        || modifiers.contains(KeyModifiers::HYPER)
+    {
+        val += 8;
+    }
+    val
+}
+
+/// Formats a text slice as a standard bracketed paste escape sequence (`\x1b[200~<text>\x1b[201~`).
+pub fn paste_to_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len() + 12);
+    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
 }
 
 /// Checks if a crossterm `KeyEvent` represents `Ctrl+Space` across various terminal encodings.
@@ -103,13 +149,21 @@ pub fn map_key_event(event: KeyEvent, leader_active: bool) -> TuiAction {
     }
 }
 
-/// Converts a crossterm `KeyEvent` into standard ANSI / VT byte sequences for PTY passthrough.
+/// Converts a crossterm `KeyEvent` into standard ANSI / VT / CSI-u byte sequences for PTY passthrough.
 pub fn key_to_bytes(event: &KeyEvent) -> Vec<u8> {
-    let has_ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
-    let has_alt = event.modifiers.contains(KeyModifiers::ALT);
+    if event.code == KeyCode::Null || event.code == KeyCode::Char('\0') {
+        return vec![0x00];
+    }
 
-    if has_ctrl {
-        if let KeyCode::Char(c) = event.code {
+    let m = modifier_code(event.modifiers);
+
+    // Handle character keys
+    if let KeyCode::Char(c) = event.code {
+        if event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT {
+            return c.to_string().into_bytes();
+        }
+
+        if event.modifiers == KeyModifiers::CONTROL {
             let lower = c.to_ascii_lowercase();
             if lower.is_ascii_alphabetic() {
                 return vec![lower as u8 - b'a' + 1];
@@ -124,55 +178,210 @@ pub fn key_to_bytes(event: &KeyEvent) -> Vec<u8> {
                 _ => c.to_string().into_bytes(),
             };
         }
+
+        if event.modifiers == KeyModifiers::ALT {
+            let mut alt_seq = vec![0x1b];
+            alt_seq.extend(c.to_string().into_bytes());
+            return alt_seq;
+        }
+
+        // Multi-modifier combinations (e.g. Ctrl+Shift, Ctrl+Alt, Super) -> CSI-u format
+        return format!("\x1b[{};{m}u", c as u32).into_bytes();
     }
 
-    if event.code == KeyCode::Null || event.code == KeyCode::Char('\0') {
-        return vec![0x00];
-    }
-
-    let bytes = match event.code {
-        KeyCode::Char(c) => c.to_string().into_bytes(),
-        KeyCode::Enter => b"\r".to_vec(),
-        KeyCode::Backspace => vec![0x7f],
-        KeyCode::Tab => b"\t".to_vec(),
+    // Handle non-character keys
+    match event.code {
+        KeyCode::Enter => {
+            if m == 1 {
+                b"\r".to_vec()
+            } else {
+                format!("\x1b[13;{m}u").into_bytes()
+            }
+        }
+        KeyCode::Tab => {
+            if m == 1 {
+                b"\t".to_vec()
+            } else if m == 2 {
+                // Shift only -> BackTab
+                b"\x1b[Z".to_vec()
+            } else {
+                format!("\x1b[9;{m}u").into_bytes()
+            }
+        }
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Esc => vec![0x1b],
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-        KeyCode::PageDown => b"\x1b[6~".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::Backspace => {
+            if m == 1 {
+                vec![0x7f]
+            } else {
+                format!("\x1b[127;{m}u").into_bytes()
+            }
+        }
+        KeyCode::Esc => {
+            if m == 1 {
+                vec![0x1b]
+            } else {
+                format!("\x1b[27;{m}u").into_bytes()
+            }
+        }
+        KeyCode::Up => {
+            if m == 1 {
+                b"\x1b[A".to_vec()
+            } else {
+                format!("\x1b[1;{m}A").into_bytes()
+            }
+        }
+        KeyCode::Down => {
+            if m == 1 {
+                b"\x1b[B".to_vec()
+            } else {
+                format!("\x1b[1;{m}B").into_bytes()
+            }
+        }
+        KeyCode::Right => {
+            if m == 1 {
+                b"\x1b[C".to_vec()
+            } else {
+                format!("\x1b[1;{m}C").into_bytes()
+            }
+        }
+        KeyCode::Left => {
+            if m == 1 {
+                b"\x1b[D".to_vec()
+            } else {
+                format!("\x1b[1;{m}D").into_bytes()
+            }
+        }
+        KeyCode::Home => {
+            if m == 1 {
+                b"\x1b[H".to_vec()
+            } else {
+                format!("\x1b[1;{m}H").into_bytes()
+            }
+        }
+        KeyCode::End => {
+            if m == 1 {
+                b"\x1b[F".to_vec()
+            } else {
+                format!("\x1b[1;{m}F").into_bytes()
+            }
+        }
+        KeyCode::PageUp => {
+            if m == 1 {
+                b"\x1b[5~".to_vec()
+            } else {
+                format!("\x1b[5;{m}~").into_bytes()
+            }
+        }
+        KeyCode::PageDown => {
+            if m == 1 {
+                b"\x1b[6~".to_vec()
+            } else {
+                format!("\x1b[6;{m}~").into_bytes()
+            }
+        }
+        KeyCode::Delete => {
+            if m == 1 {
+                b"\x1b[3~".to_vec()
+            } else {
+                format!("\x1b[3;{m}~").into_bytes()
+            }
+        }
+        KeyCode::Insert => {
+            if m == 1 {
+                b"\x1b[2~".to_vec()
+            } else {
+                format!("\x1b[2;{m}~").into_bytes()
+            }
+        }
         KeyCode::F(n) => match n {
-            1 => b"\x1bOP".to_vec(),
-            2 => b"\x1bOQ".to_vec(),
-            3 => b"\x1bOR".to_vec(),
-            4 => b"\x1bOS".to_vec(),
-            5 => b"\x1b[15~".to_vec(),
-            6 => b"\x1b[17~".to_vec(),
-            7 => b"\x1b[18~".to_vec(),
-            8 => b"\x1b[19~".to_vec(),
-            9 => b"\x1b[20~".to_vec(),
-            10 => b"\x1b[21~".to_vec(),
-            11 => b"\x1b[23~".to_vec(),
-            12 => b"\x1b[24~".to_vec(),
+            1 => {
+                if m == 1 {
+                    b"\x1bOP".to_vec()
+                } else {
+                    format!("\x1b[1;{m}P").into_bytes()
+                }
+            }
+            2 => {
+                if m == 1 {
+                    b"\x1bOQ".to_vec()
+                } else {
+                    format!("\x1b[1;{m}Q").into_bytes()
+                }
+            }
+            3 => {
+                if m == 1 {
+                    b"\x1bOR".to_vec()
+                } else {
+                    format!("\x1b[1;{m}R").into_bytes()
+                }
+            }
+            4 => {
+                if m == 1 {
+                    b"\x1bOS".to_vec()
+                } else {
+                    format!("\x1b[1;{m}S").into_bytes()
+                }
+            }
+            5 => {
+                if m == 1 {
+                    b"\x1b[15~".to_vec()
+                } else {
+                    format!("\x1b[15;{m}~").into_bytes()
+                }
+            }
+            6 => {
+                if m == 1 {
+                    b"\x1b[17~".to_vec()
+                } else {
+                    format!("\x1b[17;{m}~").into_bytes()
+                }
+            }
+            7 => {
+                if m == 1 {
+                    b"\x1b[18~".to_vec()
+                } else {
+                    format!("\x1b[18;{m}~").into_bytes()
+                }
+            }
+            8 => {
+                if m == 1 {
+                    b"\x1b[19~".to_vec()
+                } else {
+                    format!("\x1b[19;{m}~").into_bytes()
+                }
+            }
+            9 => {
+                if m == 1 {
+                    b"\x1b[20~".to_vec()
+                } else {
+                    format!("\x1b[20;{m}~").into_bytes()
+                }
+            }
+            10 => {
+                if m == 1 {
+                    b"\x1b[21~".to_vec()
+                } else {
+                    format!("\x1b[21;{m}~").into_bytes()
+                }
+            }
+            11 => {
+                if m == 1 {
+                    b"\x1b[23~".to_vec()
+                } else {
+                    format!("\x1b[23;{m}~").into_bytes()
+                }
+            }
+            12 => {
+                if m == 1 {
+                    b"\x1b[24~".to_vec()
+                } else {
+                    format!("\x1b[24;{m}~").into_bytes()
+                }
+            }
             _ => Vec::new(),
         },
         _ => Vec::new(),
-    };
-
-    // If Alt modifier is active on a regular key, prepend ESC (0x1b)
-    if has_alt && !has_ctrl && !bytes.is_empty() {
-        let mut alt_seq = vec![0x1b];
-        alt_seq.extend(bytes);
-        return alt_seq;
     }
-
-    bytes
 }
 
 /// Converts a crossterm `MouseEventKind` into standard ANSI / VT escape sequences for scrolling.
@@ -189,6 +398,47 @@ pub fn mouse_scroll_to_bytes(kind: MouseEventKind) -> Vec<u8> {
 /// Converts a crossterm `MouseEvent` into standard ANSI / VT escape sequences for scrolling.
 pub fn mouse_event_to_bytes(event: &MouseEvent) -> Vec<u8> {
     mouse_scroll_to_bytes(event.kind)
+}
+
+/// Converts a crossterm `MouseEvent` into standard SGR (1006) ANSI escape sequences for child processes with mouse reporting enabled.
+pub fn mouse_event_to_sgr_bytes(event: &MouseEvent) -> Vec<u8> {
+    let mut modifier_flag = 0u8;
+    if event.modifiers.contains(KeyModifiers::SHIFT) {
+        modifier_flag += 4;
+    }
+    if event.modifiers.contains(KeyModifiers::ALT) {
+        modifier_flag += 8;
+    }
+    if event.modifiers.contains(KeyModifiers::CONTROL) {
+        modifier_flag += 16;
+    }
+
+    let (btn_code, release) = match event.kind {
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => (0 + modifier_flag, false),
+        MouseEventKind::Down(crossterm::event::MouseButton::Middle) => (1 + modifier_flag, false),
+        MouseEventKind::Down(crossterm::event::MouseButton::Right) => (2 + modifier_flag, false),
+        MouseEventKind::Up(crossterm::event::MouseButton::Left) => (0 + modifier_flag, true),
+        MouseEventKind::Up(crossterm::event::MouseButton::Middle) => (1 + modifier_flag, true),
+        MouseEventKind::Up(crossterm::event::MouseButton::Right) => (2 + modifier_flag, true),
+        MouseEventKind::Drag(crossterm::event::MouseButton::Left) => (32 + modifier_flag, false),
+        MouseEventKind::Drag(crossterm::event::MouseButton::Middle) => (33 + modifier_flag, false),
+        MouseEventKind::Drag(crossterm::event::MouseButton::Right) => (34 + modifier_flag, false),
+        MouseEventKind::Moved => (35 + modifier_flag, false),
+        MouseEventKind::ScrollUp => (64 + modifier_flag, false),
+        MouseEventKind::ScrollDown => (65 + modifier_flag, false),
+        MouseEventKind::ScrollLeft => (66 + modifier_flag, false),
+        MouseEventKind::ScrollRight => (67 + modifier_flag, false),
+    };
+
+    let suffix = if release { 'm' } else { 'M' };
+    format!(
+        "\x1b[<{};{};{}{}",
+        btn_code,
+        event.column.saturating_add(1),
+        event.row.saturating_add(1),
+        suffix
+    )
+    .into_bytes()
 }
 
 #[cfg(test)]
@@ -502,6 +752,370 @@ mod tests {
     }
 
     #[test]
+    fn test_modifier_code_calculation() {
+        assert_eq!(modifier_code(KeyModifiers::empty()), 1);
+        assert_eq!(modifier_code(KeyModifiers::SHIFT), 2);
+        assert_eq!(modifier_code(KeyModifiers::ALT), 3);
+        assert_eq!(modifier_code(KeyModifiers::SHIFT | KeyModifiers::ALT), 4);
+        assert_eq!(modifier_code(KeyModifiers::CONTROL), 5);
+        assert_eq!(modifier_code(KeyModifiers::CONTROL | KeyModifiers::SHIFT), 6);
+        assert_eq!(modifier_code(KeyModifiers::CONTROL | KeyModifiers::ALT), 7);
+        assert_eq!(
+            modifier_code(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT),
+            8
+        );
+        assert_eq!(modifier_code(KeyModifiers::SUPER), 9);
+        assert_eq!(modifier_code(KeyModifiers::META), 9);
+        assert_eq!(modifier_code(KeyModifiers::CONTROL | KeyModifiers::SUPER), 13);
+        assert_eq!(
+            KeyHandler::modifier_code(KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+            6
+        );
+    }
+
+    #[test]
+    fn test_key_to_bytes_modified_enter_csi_u() {
+        // Shift+Enter -> \x1b[13;2u (crucial for multiline in agy / Bubbletea)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            b"\x1b[13;2u".to_vec()
+        );
+        // Alt+Enter -> \x1b[13;3u
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::ALT)),
+            b"\x1b[13;3u".to_vec()
+        );
+        // Ctrl+Enter -> \x1b[13;5u
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::CONTROL)),
+            b"\x1b[13;5u".to_vec()
+        );
+        // Ctrl+Shift+Enter -> \x1b[13;6u
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Enter,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            b"\x1b[13;6u".to_vec()
+        );
+        // Super+Enter -> \x1b[13;9u
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::SUPER)),
+            b"\x1b[13;9u".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_key_to_bytes_modified_tab_and_backtab() {
+        // Tab no modifiers -> \t
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Tab, KeyModifiers::empty())),
+            b"\t".to_vec()
+        );
+        // Shift+Tab -> \x1b[Z (BackTab)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Tab, KeyModifiers::SHIFT)),
+            b"\x1b[Z".to_vec()
+        );
+        // BackTab -> \x1b[Z
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            b"\x1b[Z".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::BackTab, KeyModifiers::empty())),
+            b"\x1b[Z".to_vec()
+        );
+        // Alt+Tab -> \x1b[9;3u
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Tab, KeyModifiers::ALT)),
+            b"\x1b[9;3u".to_vec()
+        );
+        // Ctrl+Tab -> \x1b[9;5u
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Tab, KeyModifiers::CONTROL)),
+            b"\x1b[9;5u".to_vec()
+        );
+        // Ctrl+Shift+Tab -> \x1b[9;6u
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            b"\x1b[9;6u".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_key_to_bytes_modified_backspace_and_esc() {
+        // Backspace
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Backspace, KeyModifiers::empty())),
+            vec![0x7f]
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Backspace, KeyModifiers::SHIFT)),
+            b"\x1b[127;2u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Backspace, KeyModifiers::ALT)),
+            b"\x1b[127;3u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Backspace, KeyModifiers::CONTROL)),
+            b"\x1b[127;5u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Backspace,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            b"\x1b[127;6u".to_vec()
+        );
+
+        // Esc
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Esc, KeyModifiers::empty())),
+            vec![0x1b]
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Esc, KeyModifiers::SHIFT)),
+            b"\x1b[27;2u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Esc, KeyModifiers::ALT)),
+            b"\x1b[27;3u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Esc, KeyModifiers::CONTROL)),
+            b"\x1b[27;5u".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_key_to_bytes_modified_arrows() {
+        // Up
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Up, KeyModifiers::empty())),
+            b"\x1b[A".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Up, KeyModifiers::SHIFT)),
+            b"\x1b[1;2A".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Up, KeyModifiers::ALT)),
+            b"\x1b[1;3A".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Up, KeyModifiers::CONTROL)),
+            b"\x1b[1;5A".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Up,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            b"\x1b[1;6A".to_vec()
+        );
+
+        // Down
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Down, KeyModifiers::SHIFT)),
+            b"\x1b[1;2B".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Down, KeyModifiers::CONTROL)),
+            b"\x1b[1;5B".to_vec()
+        );
+
+        // Right
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Right, KeyModifiers::SHIFT)),
+            b"\x1b[1;2C".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Right, KeyModifiers::CONTROL)),
+            b"\x1b[1;5C".to_vec()
+        );
+
+        // Left
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Left, KeyModifiers::SHIFT)),
+            b"\x1b[1;2D".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Left, KeyModifiers::CONTROL)),
+            b"\x1b[1;5D".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_key_to_bytes_modified_navigation_paging_edit() {
+        // Home & End
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Home, KeyModifiers::CONTROL)),
+            b"\x1b[1;5H".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Home, KeyModifiers::SHIFT)),
+            b"\x1b[1;2H".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::End, KeyModifiers::CONTROL)),
+            b"\x1b[1;5F".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::End, KeyModifiers::SHIFT)),
+            b"\x1b[1;2F".to_vec()
+        );
+
+        // PageUp & PageDown
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::PageUp, KeyModifiers::SHIFT)),
+            b"\x1b[5;2~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::PageUp, KeyModifiers::CONTROL)),
+            b"\x1b[5;5~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::PageDown, KeyModifiers::SHIFT)),
+            b"\x1b[6;2~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::PageDown, KeyModifiers::CONTROL)),
+            b"\x1b[6;5~".to_vec()
+        );
+
+        // Delete & Insert
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Delete, KeyModifiers::SHIFT)),
+            b"\x1b[3;2~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Delete, KeyModifiers::CONTROL)),
+            b"\x1b[3;5~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Insert, KeyModifiers::SHIFT)),
+            b"\x1b[2;2~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Insert, KeyModifiers::CONTROL)),
+            b"\x1b[2;5~".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_key_to_bytes_modified_function_keys() {
+        // F1..F4
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(1), KeyModifiers::SHIFT)),
+            b"\x1b[1;2P".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(1), KeyModifiers::CONTROL)),
+            b"\x1b[1;5P".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(2), KeyModifiers::ALT)),
+            b"\x1b[1;3Q".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(3), KeyModifiers::SHIFT)),
+            b"\x1b[1;2R".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(4), KeyModifiers::CONTROL)),
+            b"\x1b[1;5S".to_vec()
+        );
+
+        // F5..F12
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(5), KeyModifiers::SHIFT)),
+            b"\x1b[15;2~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(6), KeyModifiers::CONTROL)),
+            b"\x1b[17;5~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(7), KeyModifiers::ALT)),
+            b"\x1b[18;3~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(8), KeyModifiers::SHIFT)),
+            b"\x1b[19;2~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(9), KeyModifiers::CONTROL)),
+            b"\x1b[20;5~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(10), KeyModifiers::SHIFT)),
+            b"\x1b[21;2~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(11), KeyModifiers::CONTROL)),
+            b"\x1b[23;5~".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::F(12), KeyModifiers::ALT)),
+            b"\x1b[24;3~".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_key_to_bytes_modified_chars_and_combos() {
+        // Alt + char -> ESC + char
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('x'), KeyModifiers::ALT)),
+            b"\x1bx".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('A'), KeyModifiers::ALT)),
+            b"\x1bA".to_vec()
+        );
+
+        // Ctrl + Shift + char -> CSI-u format
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            format!("\x1b[{};6u", 'c' as u32).into_bytes()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            format!("\x1b[{};7u", 'k' as u32).into_bytes()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('z'), KeyModifiers::SUPER)),
+            format!("\x1b[{};9u", 'z' as u32).into_bytes()
+        );
+    }
+
+    #[test]
+    fn test_bracketed_paste_formatting() {
+        assert_eq!(
+            paste_to_bytes("echo 'hello world'"),
+            b"\x1b[200~echo 'hello world'\x1b[201~".to_vec()
+        );
+        assert_eq!(
+            paste_to_bytes("multiline\nline 2\r\n"),
+            b"\x1b[200~multiline\nline 2\r\n\x1b[201~".to_vec()
+        );
+        assert_eq!(
+            KeyHandler::paste_to_bytes("botai paste"),
+            b"\x1b[200~botai paste\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
     fn test_key_handler_passthrough_action() {
         let key = make_key(KeyCode::Char('k'), KeyModifiers::empty());
         let action = KeyHandler::map_key_event(key, false);
@@ -620,5 +1234,71 @@ mod tests {
                 "Expected empty byte sequence from KeyHandler for non-scroll event {event:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_mouse_event_to_sgr_bytes() {
+        // ScrollUp at col 10, row 5 (0-indexed -> 11, 6 1-indexed)
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(
+            mouse_event_to_sgr_bytes(&scroll_up),
+            b"\x1b[<64;11;6M".to_vec()
+        );
+        assert_eq!(
+            KeyHandler::mouse_event_to_sgr_bytes(&scroll_up),
+            b"\x1b[<64;11;6M".to_vec()
+        );
+
+        // ScrollDown at col 0, row 0
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(
+            mouse_event_to_sgr_bytes(&scroll_down),
+            b"\x1b[<65;1;1M".to_vec()
+        );
+
+        // Left button down and up (release)
+        let left_down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 20,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(
+            mouse_event_to_sgr_bytes(&left_down),
+            b"\x1b[<0;21;11M".to_vec()
+        );
+
+        let left_up = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 20,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(
+            mouse_event_to_sgr_bytes(&left_up),
+            b"\x1b[<0;21;11m".to_vec()
+        );
+
+        // With Shift modifier (+4)
+        let shift_scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::SHIFT,
+        };
+        assert_eq!(
+            mouse_event_to_sgr_bytes(&shift_scroll_up),
+            b"\x1b[<68;6;6M".to_vec()
+        );
     }
 }

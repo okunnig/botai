@@ -284,6 +284,13 @@ impl DashboardState {
         }
     }
 
+    /// Handles pasted text into the dashboard or any active creation modal.
+    pub fn handle_paste(&mut self, text: &str) {
+        if let Some(modal) = &mut self.creation_modal {
+            modal.handle_paste(text);
+        }
+    }
+
     /// Handles a mouse event (e.g. scroll wheel) and returns any triggered `DashboardAction`.
     pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> DashboardAction {
         if self.destroy_modal.is_some() {
