@@ -27,7 +27,10 @@ use crate::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
 };
 use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
-use crate::tui::events::{map_key_event, TuiAction};
+use crate::tui::events::{
+    host_modify_other_keys_mode, keyboard_enhancement_flags, map_key_event, ModifyOtherKeysMode,
+    TuiAction,
+};
 use crate::tui::quick_launcher::{
     render_quick_launcher, QuickLauncherAction, QuickLauncherState,
 };
@@ -61,7 +64,7 @@ struct TerminalCleanupGuard;
 impl Drop for TerminalCleanupGuard {
     fn drop(&mut self) {
         let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
-        let _ = io::stdout().write_all(b"\x1b[>4;0m");
+        let _ = io::stdout().write_all(ModifyOtherKeysMode::reset_sequence());
         let _ = io::stdout().flush();
         let _ = disable_raw_mode();
         let _ = execute!(
@@ -180,12 +183,12 @@ impl TuiApp {
         enable_raw_mode()?;
         let _ = execute!(
             stdout,
-            crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-            )
+            crossterm::event::PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
         );
-        let _ = stdout.write_all(b"\x1b[>4;2m");
-        let _ = stdout.flush();
+        if let Some(mode) = host_modify_other_keys_mode() {
+            let _ = stdout.write_all(mode.enable_sequence());
+            let _ = stdout.flush();
+        }
 
         execute!(
             stdout,
@@ -204,7 +207,7 @@ impl TuiApp {
             terminal.backend_mut(),
             crossterm::event::PopKeyboardEnhancementFlags
         );
-        let _ = terminal.backend_mut().write_all(b"\x1b[>4;0m");
+        let _ = terminal.backend_mut().write_all(ModifyOtherKeysMode::reset_sequence());
         let _ = terminal.backend_mut().flush();
         disable_raw_mode()?;
         execute!(

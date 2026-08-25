@@ -161,16 +161,21 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Positions the terminal hardware cursor directly at the active input position during interactive sessions, rendering the native block cursor where user input is focused when at live scrollback position.
   - Automatically positions cursor in active text fields within dialogs/modals and hides the cursor when viewing scrollback history or when appropriate.
 - **Keyboard Enhancement Protocol Negotiation**:
-  - Unconditionally pushes `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` via `PushKeyboardEnhancementFlags` on startup to enable progressive keyboard enhancement and unambiguous distinction between modified keys (e.g. distinguishing Shift+Enter from plain Enter, modified arrows, Ctrl+Shift combinations).
-  - Unconditionally enables xterm `modifyOtherKeys` mode 2 via `\x1b[>4;2m` to guarantee modifier reporting across all modern terminal emulators.
+  - Pushes IME-safe keyboard enhancement flags (`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES | KeyboardEnhancementFlags::REPORT_EVENT_TYPES | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS`) via `PushKeyboardEnhancementFlags` on startup to enable progressive keyboard enhancement and unambiguous distinction between modified keys (e.g. distinguishing Shift+Enter from plain Enter, modified arrows, Ctrl+Shift combinations) without interfering with IME composition.
+  - Dynamically negotiates host terminal environment for xterm `modifyOtherKeys`:
+    - Mode 2 (`\x1b[>4;2m`): Enabled when running inside `tmux` (detected via `TMUX` environment variable) to guarantee modifier reporting through tmux's internal terminal multiplexing layer.
+    - Mode 1 (`\x1b[>4;1m`): Enabled when running inside WezTerm (`WEZTERM_PANE` or `TERM_PROGRAM=WezTerm`) or Alacritty (`ALACRITTY_WINDOW_ID` or `TERM_PROGRAM=Alacritty`).
+    - None (no escape sequence emitted): For other host terminals to prevent escape code corruption.
   - Ensures `PopKeyboardEnhancementFlags` and disabling `modifyOtherKeys` (`\x1b[>4;0m`) are executed during teardown and in `TerminalCleanupGuard::drop`, guaranteeing the host terminal's original keyboard state is fully restored even on unexpected exit or error.
 - **Full CSI-u / ANSI Modifier Key Passthrough**:
   - Encodes modified key events using standard Xterm / CSI-u modifier parameter values:
     `modifier_code = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0) + (Super/Meta ? 8 : 0)`.
-  - **Modified Enter and Newlines**:
-    - Unmodified Enter: `\r` (`0x0D`).
-    - Unmodified Newline (`KeyCode::Char('\n')`): `\n` (`0x0A` / Ctrl+J).
-    - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Shift+Enter` -> `\x1b[13;2u` for multiline prompt input in `agy`, Charmbracelet, Bubbletea, and modern TUIs; `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`).
+  - **Modified Enter, Shift+Enter, and Newlines**:
+    - Unmodified Enter (`KeyCode::Enter` with no modifiers): `\r` (`0x0D`, CR).
+    - Unmodified Newline (`KeyCode::Char('\n')` with no modifiers): `\n` (`0x0A`, LF / Ctrl+J).
+    - Unmodified Carriage Return (`KeyCode::Char('\r')` with no modifiers): `\r` (`0x0D`, CR).
+    - Ctrl+J (`KeyCode::Char('j')` with Ctrl, or unmodified `\n`): `0x0A` (LF).
+    - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Shift+Enter` / `Shift + '\n'` / `Shift + '\r'` -> `\x1b[13;2u` for multiline prompt input in `agy`, Charmbracelet, Bubbletea, and modern TUIs; `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`; `Super+Enter` -> `\x1b[13;9u`).
   - **Modified Tab & BackTab**:
     - Unmodified Tab: `\t` (`0x09`).
     - Shift+Tab / BackTab: `\x1b[Z`.

@@ -304,9 +304,51 @@ fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
 
 #[test]
 fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
-    use botai::tui::events::{key_to_bytes, paste_to_bytes};
+    use botai::tui::events::{
+        host_modify_other_keys_mode_for_env, keyboard_enhancement_flags, key_to_bytes,
+        paste_to_bytes, KeyHandler, ModifyOtherKeysMode,
+    };
+    use crossterm::event::KeyboardEnhancementFlags;
 
-    // 1. Shift+Enter multiline input format for agy / modern TUIs
+    // 1. Verify keyboard enhancement flags
+    let flags = keyboard_enhancement_flags();
+    assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+    assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+    assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+    assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
+    assert_eq!(KeyHandler::keyboard_enhancement_flags(), flags);
+
+    // 2. Verify modifyOtherKeys host terminal environment detection
+    assert_eq!(
+        host_modify_other_keys_mode_for_env(true, None, false, false),
+        Some(ModifyOtherKeysMode::Mode2)
+    );
+    assert_eq!(
+        host_modify_other_keys_mode_for_env(false, Some("WezTerm"), false, false),
+        Some(ModifyOtherKeysMode::Mode1)
+    );
+    assert_eq!(
+        host_modify_other_keys_mode_for_env(false, None, true, false),
+        Some(ModifyOtherKeysMode::Mode1)
+    );
+    assert_eq!(
+        host_modify_other_keys_mode_for_env(false, Some("Alacritty"), false, false),
+        Some(ModifyOtherKeysMode::Mode1)
+    );
+    assert_eq!(
+        host_modify_other_keys_mode_for_env(false, None, false, true),
+        Some(ModifyOtherKeysMode::Mode1)
+    );
+    assert_eq!(
+        host_modify_other_keys_mode_for_env(false, Some("xterm"), false, false),
+        None
+    );
+
+    assert_eq!(ModifyOtherKeysMode::Mode1.enable_sequence(), b"\x1b[>4;1m");
+    assert_eq!(ModifyOtherKeysMode::Mode2.enable_sequence(), b"\x1b[>4;2m");
+    assert_eq!(ModifyOtherKeysMode::reset_sequence(), b"\x1b[>4;0m");
+
+    // 3. Shift+Enter multiline input format for agy / modern TUIs
     let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
     assert_eq!(key_to_bytes(&shift_enter), b"\x1b[13;2u".to_vec());
 
@@ -316,7 +358,7 @@ fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
     let shift_char_cr = KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::SHIFT);
     assert_eq!(key_to_bytes(&shift_char_cr), b"\x1b[13;2u".to_vec());
 
-    // 2. Ctrl+Enter, Alt+Enter, Ctrl+Shift+Enter
+    // 4. Ctrl+Enter, Alt+Enter, Ctrl+Shift+Enter, Super+Enter, Ctrl+J
     let ctrl_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
     assert_eq!(key_to_bytes(&ctrl_enter), b"\x1b[13;5u".to_vec());
 
@@ -335,14 +377,23 @@ fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
     );
     assert_eq!(key_to_bytes(&ctrl_shift_enter), b"\x1b[13;6u".to_vec());
 
-    // Plain LF / CR
+    let super_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SUPER);
+    assert_eq!(key_to_bytes(&super_enter), b"\x1b[13;9u".to_vec());
+
+    let ctrl_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+    assert_eq!(key_to_bytes(&ctrl_j), vec![0x0a]);
+
+    // Plain LF / CR / Enter
+    let plain_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(key_to_bytes(&plain_enter), b"\r".to_vec());
+
     let plain_char_lf = KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::NONE);
     assert_eq!(key_to_bytes(&plain_char_lf), b"\n".to_vec());
 
     let plain_char_cr = KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::NONE);
     assert_eq!(key_to_bytes(&plain_char_cr), b"\r".to_vec());
 
-    // 3. Modified arrows and navigation
+    // 5. Modified arrows and navigation
     let ctrl_up = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
     assert_eq!(key_to_bytes(&ctrl_up), b"\x1b[1;5A".to_vec());
 
@@ -352,7 +403,7 @@ fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
     let ctrl_home = KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL);
     assert_eq!(key_to_bytes(&ctrl_home), b"\x1b[1;5H".to_vec());
 
-    // 4. Bracketed paste encoding
+    // 6. Bracketed paste encoding
     let pasted = paste_to_bytes("def test():\n    return 42\n");
     assert_eq!(
         pasted,

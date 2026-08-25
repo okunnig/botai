@@ -1,4 +1,71 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags, MouseEvent, MouseEventKind,
+};
+
+/// modifyOtherKeys mode configuration for host terminal compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModifyOtherKeysMode {
+    /// Mode 1 (`\x1b[>4;1m`): reports modified keys for WezTerm / Alacritty.
+    Mode1,
+    /// Mode 2 (`\x1b[>4;2m`): reports all modified keys including within tmux.
+    Mode2,
+}
+
+impl ModifyOtherKeysMode {
+    /// Returns the ANSI escape sequence to enable this `modifyOtherKeys` mode.
+    pub fn enable_sequence(&self) -> &'static [u8] {
+        match self {
+            ModifyOtherKeysMode::Mode1 => b"\x1b[>4;1m",
+            ModifyOtherKeysMode::Mode2 => b"\x1b[>4;2m",
+        }
+    }
+
+    /// Returns the ANSI escape sequence to reset / disable `modifyOtherKeys` mode.
+    pub fn reset_sequence() -> &'static [u8] {
+        b"\x1b[>4;0m"
+    }
+}
+
+/// Detects the recommended `modifyOtherKeys` mode based on explicit environment variables.
+pub fn host_modify_other_keys_mode_for_env(
+    in_tmux: bool,
+    term_program: Option<&str>,
+    wezterm_pane: bool,
+    alacritty_window_id: bool,
+) -> Option<ModifyOtherKeysMode> {
+    if in_tmux {
+        return Some(ModifyOtherKeysMode::Mode2);
+    }
+    if wezterm_pane || term_program.map_or(false, |p| p.eq_ignore_ascii_case("wezterm")) {
+        return Some(ModifyOtherKeysMode::Mode1);
+    }
+    if alacritty_window_id || term_program.map_or(false, |p| p.eq_ignore_ascii_case("alacritty")) {
+        return Some(ModifyOtherKeysMode::Mode1);
+    }
+    None
+}
+
+/// Detects the recommended `modifyOtherKeys` mode for the current process environment.
+pub fn host_modify_other_keys_mode() -> Option<ModifyOtherKeysMode> {
+    let in_tmux = std::env::var("TMUX").is_ok();
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let wezterm_pane = std::env::var("WEZTERM_PANE").is_ok();
+    let alacritty_window_id = std::env::var("ALACRITTY_WINDOW_ID").is_ok();
+
+    host_modify_other_keys_mode_for_env(
+        in_tmux,
+        term_program.as_deref(),
+        wezterm_pane,
+        alacritty_window_id,
+    )
+}
+
+/// Returns the IME-safe progressive keyboard enhancement flags.
+pub fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+}
 
 /// High-level actions triggered by user keyboard events or internal TUI timers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +138,31 @@ impl KeyHandler {
     /// Converts a crossterm `MouseEvent` into standard SGR (1006) ANSI escape sequences for child processes with mouse reporting enabled.
     pub fn mouse_event_to_sgr_bytes(event: &MouseEvent) -> Vec<u8> {
         mouse_event_to_sgr_bytes(event)
+    }
+
+    /// Returns the IME-safe progressive keyboard enhancement flags.
+    pub fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+        keyboard_enhancement_flags()
+    }
+
+    /// Detects the recommended `modifyOtherKeys` mode for the current process environment.
+    pub fn host_modify_other_keys_mode() -> Option<ModifyOtherKeysMode> {
+        host_modify_other_keys_mode()
+    }
+
+    /// Detects the recommended `modifyOtherKeys` mode based on explicit environment variables.
+    pub fn host_modify_other_keys_mode_for_env(
+        in_tmux: bool,
+        term_program: Option<&str>,
+        wezterm_pane: bool,
+        alacritty_window_id: bool,
+    ) -> Option<ModifyOtherKeysMode> {
+        host_modify_other_keys_mode_for_env(
+            in_tmux,
+            term_program,
+            wezterm_pane,
+            alacritty_window_id,
+        )
     }
 }
 
@@ -1355,6 +1447,213 @@ mod tests {
         assert_eq!(
             mouse_event_to_sgr_bytes(&shift_scroll_up),
             b"\x1b[<68;6;6M".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_modify_other_keys_mode_sequences() {
+        assert_eq!(ModifyOtherKeysMode::Mode1.enable_sequence(), b"\x1b[>4;1m");
+        assert_eq!(ModifyOtherKeysMode::Mode2.enable_sequence(), b"\x1b[>4;2m");
+        assert_eq!(ModifyOtherKeysMode::reset_sequence(), b"\x1b[>4;0m");
+    }
+
+    #[test]
+    fn test_host_modify_other_keys_mode_for_env() {
+        // tmux always yields Mode2, regardless of other flags
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(true, None, false, false),
+            Some(ModifyOtherKeysMode::Mode2)
+        );
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(true, Some("WezTerm"), true, true),
+            Some(ModifyOtherKeysMode::Mode2)
+        );
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(true, Some("alacritty"), false, true),
+            Some(ModifyOtherKeysMode::Mode2)
+        );
+
+        // WezTerm yields Mode1 (via TERM_PROGRAM or WEZTERM_PANE)
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, Some("WezTerm"), false, false),
+            Some(ModifyOtherKeysMode::Mode1)
+        );
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, Some("wezterm"), false, false),
+            Some(ModifyOtherKeysMode::Mode1)
+        );
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, None, true, false),
+            Some(ModifyOtherKeysMode::Mode1)
+        );
+
+        // Alacritty yields Mode1 (via TERM_PROGRAM or ALACRITTY_WINDOW_ID)
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, Some("Alacritty"), false, false),
+            Some(ModifyOtherKeysMode::Mode1)
+        );
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, Some("alacritty"), false, false),
+            Some(ModifyOtherKeysMode::Mode1)
+        );
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, None, false, true),
+            Some(ModifyOtherKeysMode::Mode1)
+        );
+
+        // Other terminals yield None
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, Some("xterm-256color"), false, false),
+            None
+        );
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, Some("Apple_Terminal"), false, false),
+            None
+        );
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, Some("iTerm.app"), false, false),
+            None
+        );
+        assert_eq!(
+            host_modify_other_keys_mode_for_env(false, None, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn test_keyboard_enhancement_flags() {
+        let flags = keyboard_enhancement_flags();
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
+    }
+
+    #[test]
+    fn test_key_to_bytes_enter_newlines_and_ctrl_j() {
+        // Plain unmodified Enter -> CR (\r, 0x0D)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::empty())),
+            b"\r".to_vec()
+        );
+        // Plain unmodified LF -> \n (0x0A)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\n'), KeyModifiers::empty())),
+            b"\n".to_vec()
+        );
+        // Plain unmodified CR -> \r (0x0D)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\r'), KeyModifiers::empty())),
+            b"\r".to_vec()
+        );
+
+        // Ctrl+J -> ASCII 0x0A (LF)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+            vec![0x0a]
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('J'), KeyModifiers::CONTROL)),
+            vec![0x0a]
+        );
+
+        // Shift+Enter (CSI-u modifier 2)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::SHIFT)),
+            b"\x1b[13;2u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\n'), KeyModifiers::SHIFT)),
+            b"\x1b[13;2u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\r'), KeyModifiers::SHIFT)),
+            b"\x1b[13;2u".to_vec()
+        );
+
+        // Alt+Enter (CSI-u modifier 3)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::ALT)),
+            b"\x1b[13;3u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\n'), KeyModifiers::ALT)),
+            b"\x1b[13;3u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\r'), KeyModifiers::ALT)),
+            b"\x1b[13;3u".to_vec()
+        );
+
+        // Ctrl+Enter (CSI-u modifier 5)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::CONTROL)),
+            b"\x1b[13;5u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\n'), KeyModifiers::CONTROL)),
+            b"\x1b[13;5u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\r'), KeyModifiers::CONTROL)),
+            b"\x1b[13;5u".to_vec()
+        );
+
+        // Ctrl+Shift+Enter (CSI-u modifier 6)
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Enter,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            b"\x1b[13;6u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Char('\n'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            b"\x1b[13;6u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Char('\r'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            b"\x1b[13;6u".to_vec()
+        );
+
+        // Super+Enter (CSI-u modifier 9)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::SUPER)),
+            b"\x1b[13;9u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\n'), KeyModifiers::SUPER)),
+            b"\x1b[13;9u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\r'), KeyModifiers::SUPER)),
+            b"\x1b[13;9u".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_key_handler_keyboard_and_modify_other_keys_delegation() {
+        assert_eq!(
+            KeyHandler::keyboard_enhancement_flags(),
+            keyboard_enhancement_flags()
+        );
+        assert_eq!(
+            KeyHandler::host_modify_other_keys_mode_for_env(true, None, false, false),
+            Some(ModifyOtherKeysMode::Mode2)
+        );
+        assert_eq!(
+            KeyHandler::host_modify_other_keys_mode_for_env(false, Some("wezterm"), false, false),
+            Some(ModifyOtherKeysMode::Mode1)
+        );
+        assert_eq!(
+            KeyHandler::host_modify_other_keys_mode_for_env(false, None, false, false),
+            None
         );
     }
 }
