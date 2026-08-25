@@ -308,7 +308,14 @@ env = { PORT = "8080", NODE_ENV = "development" }
        - **Form Fields**:
          - `Project Name:` Text input with real-time pre-validation badges (`[✓ Ready]`, `[✗ Collision]`, `[Required]`).
          - `Agent CLI:` Interactive tool selector (`claude`, `agy`, `copilot`, `aider`, etc. cycled via `Left`/`Right`).
-         - `Initial Prompt:` Optional task instruction prompt.
+         - `Initial Prompt:` Optional task instruction prompt rendered in a dedicated multi-line box (3–4 visible lines) with:
+           - **Word Wrapping & Sizing**: Automatic line wrapping according to available modal width, preserving line breaks.
+           - **Internal Vertical Scrolling**: Automatic vertical scrolling keeping the active line and cursor in view when text exceeds visible lines.
+           - **In-Line Cursor Navigation**: Full cursor positioning (`Left`/`Right` character movement, `Home`/`End` to line/prompt boundaries, `Backspace`/`Delete` at cursor position).
+           - **Vertical Navigation**: `Up`/`Down` arrows move the cursor vertically across lines within the prompt (with top-line `Up` / bottom-line `Down` transitioning focus between form fields).
+           - **Newline Insertion**: `Shift+Enter` or `Alt+Enter` inserts a newline (`\n`) at the cursor position without triggering submission.
+           - **Bracketed / Multi-line Paste**: Pasting multi-line content preserves newlines cleanly without premature form submission.
+           - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
          - Live pre-validation status banner at the bottom.
        - **Back-Navigation**: Pressing `Esc` (or `Backspace` when project name input is empty) returns to Step 1 without losing configuration.
        - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder`.

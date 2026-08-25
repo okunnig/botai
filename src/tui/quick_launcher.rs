@@ -203,16 +203,23 @@ impl QuickLauncherState {
                     }
                 }
                 LauncherFocus::Prompt => {
-                    let prefix_len = 18u16;
-                    let cursor_x = body_area.x + prefix_len + self.creation_modal.prompt_input.chars().count() as u16;
-                    let cursor_y = body_area.y + 4;
-                    if cursor_x < body_area.x + body_area.width && cursor_y < body_area.y + body_area.height {
-                        Some(Position::new(cursor_x, cursor_y))
+                    let prompt_text_width = (body_area.width.saturating_sub(18) as usize).max(10);
+                    let (line_idx, col_idx) = self.creation_modal.cursor_to_line_col(prompt_text_width);
+                    let scroll_offset = self.creation_modal.prompt_scroll_offset.min(line_idx);
+                    let visible_line = line_idx.saturating_sub(scroll_offset);
+                    if visible_line < crate::tui::creation_modal::PROMPT_VISIBLE_LINES {
+                        let cursor_x = body_area.x + 18 + col_idx as u16;
+                        let cursor_y = body_area.y + 4 + visible_line as u16;
+                        if cursor_x < body_area.x + body_area.width && cursor_y < body_area.y + body_area.height {
+                            Some(Position::new(cursor_x, cursor_y))
+                        } else {
+                            Some(Position::new(
+                                cursor_x.min(body_area.x + body_area.width.saturating_sub(1)),
+                                cursor_y.min(body_area.y + body_area.height.saturating_sub(1)),
+                            ))
+                        }
                     } else {
-                        Some(Position::new(
-                            cursor_x.min(body_area.x + body_area.width.saturating_sub(1)),
-                            cursor_y,
-                        ))
+                        None
                     }
                 }
                 _ => None,
@@ -332,6 +339,7 @@ impl QuickLauncherState {
 
     /// Handles a keyboard event and returns any triggered `QuickLauncherAction`.
     pub fn handle_key(&mut self, key: KeyEvent) -> QuickLauncherAction {
+        let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let has_alt = key.modifiers.contains(KeyModifiers::ALT);
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -340,6 +348,110 @@ impl QuickLauncherState {
             || (has_ctrl && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('C')))
         {
             return QuickLauncherAction::Cancel;
+        }
+
+        // Special handling when Prompt input is focused on Create tab
+        if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Prompt {
+            match key.code {
+                KeyCode::Tab => {
+                    self.next_focus();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::BackTab => {
+                    self.prev_focus();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Left => {
+                    self.creation_modal.move_prompt_cursor_left();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Right => {
+                    self.creation_modal.move_prompt_cursor_right();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Home => {
+                    self.creation_modal.move_prompt_cursor_home();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::End => {
+                    self.creation_modal.move_prompt_cursor_end();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Up => {
+                    if !self.creation_modal.move_prompt_cursor_up() {
+                        self.prev_focus();
+                    }
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Down => {
+                    if !self.creation_modal.move_prompt_cursor_down() {
+                        self.next_focus();
+                    }
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Backspace => {
+                    self.creation_modal.delete_prompt_char_before_cursor();
+                    self.clear_error();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Delete => {
+                    self.creation_modal.delete_prompt_char_at_cursor();
+                    self.clear_error();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') if has_shift || has_alt => {
+                    self.creation_modal.insert_newline_prompt();
+                    self.clear_error();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') if !has_shift && !has_alt => {
+                    let trimmed_name = self.creation_modal.project_name_input.trim();
+                    if trimmed_name.is_empty() {
+                        self.set_error("Project name cannot be empty");
+                        return QuickLauncherAction::None;
+                    } else if let Some(tpl) = self.selected_template() {
+                        let prompt = if self.creation_modal.prompt_input.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.creation_modal.prompt_input.trim().to_string())
+                        };
+                        return QuickLauncherAction::Create {
+                            template: tpl.to_string(),
+                            project: trimmed_name.to_string(),
+                            prompt,
+                        };
+                    } else {
+                        self.set_error("No template available");
+                        return QuickLauncherAction::None;
+                    }
+                }
+                KeyCode::Char(c) if has_ctrl => {
+                    match c {
+                        'a' | 'A' => self.creation_modal.move_prompt_cursor_home(),
+                        'e' | 'E' => self.creation_modal.move_prompt_cursor_end(),
+                        'w' | 'W' => {
+                            self.creation_modal.delete_prompt_word_before_cursor();
+                            self.clear_error();
+                        }
+                        'k' | 'K' => {
+                            self.creation_modal.kill_to_end_of_prompt_line();
+                            self.clear_error();
+                        }
+                        'u' | 'U' => {
+                            self.creation_modal.clear_prompt_line_or_all();
+                            self.clear_error();
+                        }
+                        _ => {}
+                    }
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                    self.creation_modal.insert_char_prompt(c);
+                    self.clear_error();
+                    return QuickLauncherAction::None;
+                }
+                _ => return QuickLauncherAction::None,
+            }
         }
 
         match key.code {
@@ -444,28 +556,18 @@ impl QuickLauncherState {
                 QuickLauncherAction::None
             }
             KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                if self.tab == LauncherTab::Create {
-                    if self.focus == LauncherFocus::ProjectName {
-                        self.creation_modal.project_name_input.push(c);
-                        self.creation_modal.revalidate();
-                        self.clear_error();
-                    } else if self.focus == LauncherFocus::Prompt {
-                        self.creation_modal.prompt_input.push(c);
-                        self.clear_error();
-                    }
+                if self.tab == LauncherTab::Create && self.focus == LauncherFocus::ProjectName {
+                    self.creation_modal.project_name_input.push(c);
+                    self.creation_modal.revalidate();
+                    self.clear_error();
                 }
                 QuickLauncherAction::None
             }
             KeyCode::Backspace => {
-                if self.tab == LauncherTab::Create {
-                    if self.focus == LauncherFocus::ProjectName {
-                        self.creation_modal.project_name_input.pop();
-                        self.creation_modal.revalidate();
-                        self.clear_error();
-                    } else if self.focus == LauncherFocus::Prompt {
-                        self.creation_modal.prompt_input.pop();
-                        self.clear_error();
-                    }
+                if self.tab == LauncherTab::Create && self.focus == LauncherFocus::ProjectName {
+                    self.creation_modal.project_name_input.pop();
+                    self.creation_modal.revalidate();
+                    self.clear_error();
                 }
                 QuickLauncherAction::None
             }
@@ -521,11 +623,7 @@ impl QuickLauncherState {
                     self.clear_error();
                 }
                 LauncherFocus::Prompt => {
-                    for c in text.chars() {
-                        if c == '\n' || c == '\r' || !c.is_control() {
-                            self.creation_modal.prompt_input.push(c);
-                        }
-                    }
+                    self.creation_modal.insert_str_prompt(text);
                     self.clear_error();
                 }
                 LauncherFocus::Template | LauncherFocus::TabBar | LauncherFocus::ProjectList => {}
@@ -541,6 +639,10 @@ impl QuickLauncherState {
                     self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
                 } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template {
                     self.cycle_template_prev();
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Prompt {
+                    if !self.creation_modal.move_prompt_cursor_up() {
+                        self.prev_focus();
+                    }
                 }
                 QuickLauncherAction::None
             }
@@ -553,6 +655,10 @@ impl QuickLauncherState {
                     }
                 } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template {
                     self.cycle_template_next();
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Prompt {
+                    if !self.creation_modal.move_prompt_cursor_down() {
+                        self.next_focus();
+                    }
                 }
                 QuickLauncherAction::None
             }
@@ -763,20 +869,46 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                 )
             };
 
-            let prompt_display = if state.creation_modal.prompt_input.is_empty() && !prompt_focused {
-                Span::styled(
-                    "<optional initial task prompt>",
-                    Style::default().fg(theme.input_placeholder),
-                )
-            } else {
-                let cursor = if prompt_focused { " " } else { "" };
-                Span::styled(
-                    format!("{}{}", state.creation_modal.prompt_input, cursor),
-                    Style::default().fg(theme.input_text),
-                )
-            };
+            let prompt_text_width = (body_area.width.saturating_sub(18) as usize).max(10);
+            let prompt_lines = state.creation_modal.compute_wrapped_prompt_lines(prompt_text_width);
+            let visible_count = crate::tui::creation_modal::PROMPT_VISIBLE_LINES;
+            let scroll_offset = state.creation_modal.prompt_scroll_offset.min(prompt_lines.len().saturating_sub(1));
+            let is_empty_and_unfocused = state.creation_modal.prompt_input.is_empty() && !prompt_focused;
 
-            let lines = vec![
+            let mut prompt_row_spans = Vec::new();
+            for i in 0..visible_count {
+                let line_idx = scroll_offset + i;
+                if i == 0 {
+                    let content_span = if is_empty_and_unfocused {
+                        Span::styled(
+                            "<optional task instruction prompt>",
+                            Style::default().fg(theme.input_placeholder),
+                        )
+                    } else if line_idx < prompt_lines.len() {
+                        Span::styled(&prompt_lines[line_idx].text, Style::default().fg(theme.input_text))
+                    } else {
+                        Span::raw("")
+                    };
+                    prompt_row_spans.push(Line::from(vec![
+                        Span::styled(format!("{prompt_prefix}Initial Prompt: "), prompt_style),
+                        content_span,
+                    ]));
+                } else {
+                    let content_span = if is_empty_and_unfocused {
+                        Span::raw("")
+                    } else if line_idx < prompt_lines.len() {
+                        Span::styled(&prompt_lines[line_idx].text, Style::default().fg(theme.input_text))
+                    } else {
+                        Span::raw("")
+                    };
+                    prompt_row_spans.push(Line::from(vec![
+                        Span::raw("                  "),
+                        content_span,
+                    ]));
+                }
+            }
+
+            let mut lines = vec![
                 Line::from(vec![
                     Span::styled(format!("{tpl_prefix}Template: "), tpl_style),
                     tpl_display,
@@ -787,11 +919,8 @@ pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut B
                     proj_display,
                 ]),
                 Line::from(""),
-                Line::from(vec![
-                    Span::styled(format!("{prompt_prefix}Initial Prompt: "), prompt_style),
-                    prompt_display,
-                ]),
             ];
+            lines.extend(prompt_row_spans);
 
             let paragraph = Paragraph::new(lines);
             paragraph.render(body_area, buf);
@@ -1330,7 +1459,11 @@ mod tests {
 
         // Focus on Prompt, with input "hello"
         launcher.creation_modal.prompt_input = "hello".to_string();
+        launcher.creation_modal.prompt_cursor = 5;
         assert_eq!(launcher.cursor_position(area), Some(Position::new(38, 14)));
+
+        launcher.creation_modal.prompt_cursor = 0;
+        assert_eq!(launcher.cursor_position(area), Some(Position::new(33, 14)));
 
         // 4. Focus on TabBar -> None
         launcher.focus = LauncherFocus::TabBar;
@@ -1498,5 +1631,96 @@ mod tests {
             modifiers: KeyModifiers::empty(),
         };
         assert_eq!(state.handle_mouse(click), QuickLauncherAction::None);
+    }
+
+    #[test]
+    fn test_quick_launcher_prompt_cursor_navigation_and_editing() {
+        let mut state = QuickLauncherState::new(
+            vec!["tpl1".to_string()],
+            vec!["proj1".to_string()],
+            None,
+        );
+
+        state.focus = LauncherFocus::Prompt;
+        state.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt;
+
+        // 1. Type characters
+        state.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert_eq!(state.creation_modal.prompt_input, "abc");
+        assert_eq!(state.creation_modal.prompt_cursor, 3);
+
+        // 2. Cursor Left, Right, Home, End
+        state.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(state.creation_modal.prompt_cursor, 2);
+        state.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(state.creation_modal.prompt_cursor, 0);
+        state.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(state.creation_modal.prompt_cursor, 3);
+        state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(state.creation_modal.prompt_cursor, 3);
+
+        // 3. Shift+Enter / Alt+Enter inserts newline
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(state.creation_modal.prompt_input, "abc\n");
+        assert_eq!(state.creation_modal.prompt_cursor, 4);
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(state.creation_modal.prompt_input, "abc\nd\n");
+
+        // 4. Vertical Up/Down navigation within prompt
+        assert_eq!(state.creation_modal.cursor_to_line_col(56), (2, 0));
+        state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.creation_modal.cursor_to_line_col(56), (1, 0));
+        state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.creation_modal.cursor_to_line_col(56), (0, 0));
+
+        // Up on top line transitions focus to ProjectName (prev_focus)
+        state.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(state.focus, LauncherFocus::ProjectName);
+
+        // Down from ProjectName goes to Prompt
+        state.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(state.focus, LauncherFocus::Prompt);
+
+        // 5. Emacs shortcuts: Ctrl+A, Ctrl+E, Ctrl+W, Ctrl+K, Ctrl+U
+        state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(state.creation_modal.prompt_cursor, 3); // end of first line
+        state.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(state.creation_modal.prompt_cursor, 0); // start of first line
+
+        // 6. Delete & Backspace
+        state.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(state.creation_modal.prompt_input, "bc\nd\n");
+        state.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(state.creation_modal.prompt_input, "c\nd\n");
+    }
+
+    #[test]
+    fn test_quick_launcher_prompt_paste_and_multiline_render() {
+        let mut state = QuickLauncherState::new(
+            vec!["tpl1".to_string()],
+            vec!["proj1".to_string()],
+            None,
+        );
+
+        state.focus = LauncherFocus::Prompt;
+        state.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt;
+
+        // Paste multiline text
+        state.handle_paste("First line of instructions\r\nSecond line of instructions");
+        assert_eq!(state.creation_modal.prompt_input, "First line of instructions\nSecond line of instructions");
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+
+        render_quick_launcher(&state, area, &mut buf, &theme);
+        let content = buf.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
+        assert!(content.contains("First line of instructions"));
+        assert!(content.contains("Second line of instructions"));
     }
 }

@@ -43,6 +43,16 @@ pub enum CreationModalAction {
     Cancel,
 }
 
+pub const PROMPT_VISIBLE_LINES: usize = 3;
+
+/// A wrapped line of prompt text with its character offsets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptLine {
+    pub text: String,
+    pub start_char_idx: usize,
+    pub char_count: usize,
+}
+
 /// Unified interactive project creation modal with two-step searchable template workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectCreationModal {
@@ -56,6 +66,8 @@ pub struct ProjectCreationModal {
     pub agent_list: Vec<String>,
     pub selected_agent_idx: usize,
     pub prompt_input: String,
+    pub prompt_cursor: usize,
+    pub prompt_scroll_offset: usize,
     pub focus: CreationFocus,
     pub validation: ProjectValidation,
 }
@@ -114,6 +126,8 @@ impl ProjectCreationModal {
             agent_list,
             selected_agent_idx,
             prompt_input: String::new(),
+            prompt_cursor: 0,
+            prompt_scroll_offset: 0,
             focus: CreationFocus::ProjectName,
             validation: ProjectValidation::valid(),
         };
@@ -320,6 +334,359 @@ impl ProjectCreationModal {
         self.validation = builder.validate_detailed();
     }
 
+    /// Default inner width for initial prompt wrapping.
+    pub fn prompt_width(&self) -> usize {
+        56
+    }
+
+    /// Computes wrapped lines of prompt text according to the given width,
+    /// preserving explicit newlines (`\n`) and word-wrapping long lines.
+    pub fn compute_wrapped_prompt_lines(&self, width: usize) -> Vec<PromptLine> {
+        let width = width.max(1);
+        let chars: Vec<char> = self.prompt_input.chars().collect();
+
+        let mut logical_lines: Vec<(usize, Vec<char>, bool)> = Vec::new();
+        let mut current_line = Vec::new();
+        let mut line_start = 0;
+
+        for (i, &c) in chars.iter().enumerate() {
+            if c == '\n' {
+                logical_lines.push((line_start, current_line, true));
+                current_line = Vec::new();
+                line_start = i + 1;
+            } else {
+                current_line.push(c);
+            }
+        }
+        logical_lines.push((line_start, current_line, false));
+
+        let mut result = Vec::new();
+
+        for (start_idx, line_chars, has_trailing_newline) in logical_lines {
+            if line_chars.is_empty() {
+                let char_count = if has_trailing_newline { 1 } else { 0 };
+                result.push(PromptLine {
+                    text: String::new(),
+                    start_char_idx: start_idx,
+                    char_count,
+                });
+                continue;
+            }
+
+            let mut i = 0;
+            while i < line_chars.len() {
+                let line_start = i;
+                let remaining = line_chars.len() - line_start;
+                if remaining <= width {
+                    let text: String = line_chars[line_start..].iter().collect();
+                    let char_count = remaining + if has_trailing_newline { 1 } else { 0 };
+                    result.push(PromptLine {
+                        text,
+                        start_char_idx: start_idx + line_start,
+                        char_count,
+                    });
+                    break;
+                } else {
+                    let search_end = line_start + width;
+                    let mut split_at = None;
+                    for pos in (line_start + 1..=search_end).rev() {
+                        if line_chars[pos] == ' ' {
+                            split_at = Some(pos);
+                            break;
+                        }
+                    }
+
+                    if let Some(space_pos) = split_at {
+                        let text: String = line_chars[line_start..space_pos].iter().collect();
+                        let char_count = space_pos - line_start + 1;
+                        result.push(PromptLine {
+                            text,
+                            start_char_idx: start_idx + line_start,
+                            char_count,
+                        });
+                        i = space_pos + 1;
+                    } else {
+                        let text: String = line_chars[line_start..line_start + width].iter().collect();
+                        result.push(PromptLine {
+                            text,
+                            start_char_idx: start_idx + line_start,
+                            char_count: width,
+                        });
+                        i = line_start + width;
+                    }
+                }
+            }
+        }
+
+        if result.is_empty() {
+            result.push(PromptLine {
+                text: String::new(),
+                start_char_idx: 0,
+                char_count: 0,
+            });
+        }
+
+        result
+    }
+
+    /// Converts the current `prompt_cursor` (character index) into `(line_idx, col_idx)` in wrapped coordinates.
+    pub fn cursor_to_line_col(&self, width: usize) -> (usize, usize) {
+        let lines = self.compute_wrapped_prompt_lines(width);
+        if lines.is_empty() {
+            return (0, 0);
+        }
+        let total_chars = self.prompt_input.chars().count();
+        let cursor = self.prompt_cursor.min(total_chars);
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            if cursor >= line.start_char_idx && cursor < line.start_char_idx + line.char_count {
+                let col = cursor - line.start_char_idx;
+                let max_col = line.text.chars().count();
+                return (line_idx, col.min(max_col));
+            }
+        }
+
+        let last_idx = lines.len() - 1;
+        let col = cursor.saturating_sub(lines[last_idx].start_char_idx);
+        let max_col = lines[last_idx].text.chars().count();
+        (last_idx, col.min(max_col))
+    }
+
+    /// Converts wrapped coordinates `(line_idx, col_idx)` back into a `prompt_cursor` character index.
+    pub fn line_col_to_cursor(&self, line_idx: usize, col_idx: usize, width: usize) -> usize {
+        let lines = self.compute_wrapped_prompt_lines(width);
+        if lines.is_empty() {
+            return 0;
+        }
+        let line_idx = line_idx.min(lines.len() - 1);
+        let line = &lines[line_idx];
+        let line_len = line.text.chars().count();
+        let col = col_idx.min(line_len);
+        line.start_char_idx + col
+    }
+
+    /// Synchronizes `prompt_scroll_offset` so that the line containing `prompt_cursor` is visible.
+    pub fn sync_prompt_scroll(&mut self, visible_lines: usize, width: usize) {
+        let lines = self.compute_wrapped_prompt_lines(width);
+        if self.prompt_scroll_offset >= lines.len() {
+            self.prompt_scroll_offset = lines.len().saturating_sub(1);
+        }
+        let (line_idx, _) = self.cursor_to_line_col(width);
+        if line_idx < self.prompt_scroll_offset {
+            self.prompt_scroll_offset = line_idx;
+        } else if line_idx >= self.prompt_scroll_offset + visible_lines {
+            self.prompt_scroll_offset = line_idx.saturating_sub(visible_lines.saturating_sub(1));
+        }
+    }
+
+    /// Inserts a single character into `prompt_input` at `prompt_cursor`.
+    pub fn insert_char_prompt(&mut self, c: char) {
+        let mut chars: Vec<char> = self.prompt_input.chars().collect();
+        let idx = self.prompt_cursor.min(chars.len());
+        chars.insert(idx, c);
+        self.prompt_input = chars.into_iter().collect();
+        self.prompt_cursor = idx + 1;
+        self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+    }
+
+    /// Inserts a string into `prompt_input` at `prompt_cursor`, normalizing `\r\n` and `\r` to `\n` and stripping unwanted control characters.
+    pub fn insert_str_prompt(&mut self, s: &str) {
+        let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
+        let mut cleaned = String::new();
+        for c in normalized.chars() {
+            if c == '\n' || c == '\t' || !c.is_control() {
+                cleaned.push(c);
+            }
+        }
+        if cleaned.is_empty() {
+            return;
+        }
+        let mut chars: Vec<char> = self.prompt_input.chars().collect();
+        let idx = self.prompt_cursor.min(chars.len());
+        let insert_chars: Vec<char> = cleaned.chars().collect();
+        let count = insert_chars.len();
+        chars.splice(idx..idx, insert_chars);
+        self.prompt_input = chars.into_iter().collect();
+        self.prompt_cursor = idx + count;
+        self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+    }
+
+    /// Inserts a newline character (`\n`) into `prompt_input` at `prompt_cursor`.
+    pub fn insert_newline_prompt(&mut self) {
+        self.insert_char_prompt('\n');
+    }
+
+    /// Deletes the character before `prompt_cursor` (Backspace).
+    pub fn delete_prompt_char_before_cursor(&mut self) {
+        if self.prompt_cursor > 0 {
+            let mut chars: Vec<char> = self.prompt_input.chars().collect();
+            let idx = self.prompt_cursor.min(chars.len());
+            if idx > 0 {
+                chars.remove(idx - 1);
+                self.prompt_input = chars.into_iter().collect();
+                self.prompt_cursor = idx - 1;
+                self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+            }
+        }
+    }
+
+    /// Deletes the character at `prompt_cursor` (Delete).
+    pub fn delete_prompt_char_at_cursor(&mut self) {
+        let mut chars: Vec<char> = self.prompt_input.chars().collect();
+        let idx = self.prompt_cursor;
+        if idx < chars.len() {
+            chars.remove(idx);
+            self.prompt_input = chars.into_iter().collect();
+            self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+        }
+    }
+
+    /// Moves `prompt_cursor` left by one character.
+    pub fn move_prompt_cursor_left(&mut self) {
+        self.prompt_cursor = self.prompt_cursor.saturating_sub(1);
+        self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+    }
+
+    /// Moves `prompt_cursor` right by one character.
+    pub fn move_prompt_cursor_right(&mut self) {
+        let total = self.prompt_input.chars().count();
+        if self.prompt_cursor < total {
+            self.prompt_cursor += 1;
+        }
+        self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+    }
+
+    /// Moves `prompt_cursor` up one line in the wrapped prompt. Returns `true` if moved, `false` if already on the top line.
+    pub fn move_prompt_cursor_up(&mut self) -> bool {
+        self.move_prompt_cursor_up_with_width(self.prompt_width())
+    }
+
+    /// Moves `prompt_cursor` up one line using the specified wrapping width.
+    pub fn move_prompt_cursor_up_with_width(&mut self, width: usize) -> bool {
+        let (line_idx, col_idx) = self.cursor_to_line_col(width);
+        if line_idx == 0 {
+            false
+        } else {
+            self.prompt_cursor = self.line_col_to_cursor(line_idx - 1, col_idx, width);
+            self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, width);
+            true
+        }
+    }
+
+    /// Moves `prompt_cursor` down one line in the wrapped prompt. Returns `true` if moved, `false` if already on the bottom line.
+    pub fn move_prompt_cursor_down(&mut self) -> bool {
+        self.move_prompt_cursor_down_with_width(self.prompt_width())
+    }
+
+    /// Moves `prompt_cursor` down one line using the specified wrapping width.
+    pub fn move_prompt_cursor_down_with_width(&mut self, width: usize) -> bool {
+        let (line_idx, col_idx) = self.cursor_to_line_col(width);
+        let lines = self.compute_wrapped_prompt_lines(width);
+        if line_idx + 1 >= lines.len() {
+            false
+        } else {
+            self.prompt_cursor = self.line_col_to_cursor(line_idx + 1, col_idx, width);
+            self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, width);
+            true
+        }
+    }
+
+    /// Moves `prompt_cursor` to the start of the current wrapped line.
+    pub fn move_prompt_cursor_home(&mut self) {
+        let (line_idx, _) = self.cursor_to_line_col(self.prompt_width());
+        self.prompt_cursor = self.line_col_to_cursor(line_idx, 0, self.prompt_width());
+        self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+    }
+
+    /// Moves `prompt_cursor` to the end of the current wrapped line.
+    pub fn move_prompt_cursor_end(&mut self) {
+        let lines = self.compute_wrapped_prompt_lines(self.prompt_width());
+        let (line_idx, _) = self.cursor_to_line_col(self.prompt_width());
+        if line_idx < lines.len() {
+            let line_len = lines[line_idx].text.chars().count();
+            self.prompt_cursor = self.line_col_to_cursor(line_idx, line_len, self.prompt_width());
+        } else {
+            self.prompt_cursor = self.prompt_input.chars().count();
+        }
+        self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+    }
+
+    /// Deletes the word before `prompt_cursor` (Ctrl+W).
+    pub fn delete_prompt_word_before_cursor(&mut self) {
+        let chars: Vec<char> = self.prompt_input.chars().collect();
+        let idx = self.prompt_cursor.min(chars.len());
+        if idx == 0 {
+            return;
+        }
+        let mut pos = idx;
+        while pos > 0 && chars[pos - 1].is_whitespace() {
+            pos -= 1;
+        }
+        while pos > 0 && !chars[pos - 1].is_whitespace() {
+            pos -= 1;
+        }
+        let mut new_chars = Vec::new();
+        new_chars.extend_from_slice(&chars[..pos]);
+        new_chars.extend_from_slice(&chars[idx..]);
+        self.prompt_input = new_chars.into_iter().collect();
+        self.prompt_cursor = pos;
+        self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+    }
+
+    /// Kills text from `prompt_cursor` to the end of the logical line (Ctrl+K).
+    pub fn kill_to_end_of_prompt_line(&mut self) {
+        let chars: Vec<char> = self.prompt_input.chars().collect();
+        let idx = self.prompt_cursor.min(chars.len());
+        if idx >= chars.len() {
+            return;
+        }
+        if chars[idx] == '\n' {
+            let mut new_chars = Vec::new();
+            new_chars.extend_from_slice(&chars[..idx]);
+            new_chars.extend_from_slice(&chars[idx + 1..]);
+            self.prompt_input = new_chars.into_iter().collect();
+        } else {
+            let next_newline = chars[idx..]
+                .iter()
+                .position(|&c| c == '\n')
+                .map(|p| idx + p)
+                .unwrap_or(chars.len());
+            let mut new_chars = Vec::new();
+            new_chars.extend_from_slice(&chars[..idx]);
+            new_chars.extend_from_slice(&chars[next_newline..]);
+            self.prompt_input = new_chars.into_iter().collect();
+        }
+        self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+    }
+
+    /// Clears text before `prompt_cursor` on the current logical line, or the entire line/prompt (Ctrl+U).
+    pub fn clear_prompt_line_or_all(&mut self) {
+        let chars: Vec<char> = self.prompt_input.chars().collect();
+        let idx = self.prompt_cursor.min(chars.len());
+        let start_pos = chars[..idx]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        if start_pos < idx {
+            let mut new_chars = Vec::new();
+            new_chars.extend_from_slice(&chars[..start_pos]);
+            new_chars.extend_from_slice(&chars[idx..]);
+            self.prompt_input = new_chars.into_iter().collect();
+            self.prompt_cursor = start_pos;
+        } else if start_pos == 0 && idx == 0 {
+            self.prompt_input.clear();
+            self.prompt_cursor = 0;
+        } else if start_pos > 0 {
+            let mut new_chars = Vec::new();
+            new_chars.extend_from_slice(&chars[..start_pos - 1]);
+            new_chars.extend_from_slice(&chars[idx..]);
+            self.prompt_input = new_chars.into_iter().collect();
+            self.prompt_cursor = start_pos - 1;
+        }
+        self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
+    }
+
     /// Calculates the hardware cursor position within the modal area when an editable text input is focused.
     pub fn cursor_position(&self, area: Rect) -> Option<Position> {
         let width = 76.min(area.width.saturating_sub(4));
@@ -365,16 +732,23 @@ impl ProjectCreationModal {
                     }
                 }
                 CreationFocus::Prompt => {
-                    let prefix_len = 18u16; // "▶ Initial Prompt: "
-                    let cursor_x = inner.x + prefix_len + self.prompt_input.chars().count() as u16;
-                    let cursor_y = inner.y + 5;
-                    if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
-                        Some(Position::new(cursor_x, cursor_y))
+                    let prompt_text_width = (inner.width.saturating_sub(18) as usize).max(10);
+                    let (line_idx, col_idx) = self.cursor_to_line_col(prompt_text_width);
+                    let scroll_offset = self.prompt_scroll_offset.min(line_idx);
+                    let visible_line = line_idx.saturating_sub(scroll_offset);
+                    if visible_line < PROMPT_VISIBLE_LINES {
+                        let cursor_x = inner.x + 18 + col_idx as u16;
+                        let cursor_y = inner.y + 5 + visible_line as u16;
+                        if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
+                            Some(Position::new(cursor_x, cursor_y))
+                        } else {
+                            Some(Position::new(
+                                cursor_x.min(inner.x + inner.width.saturating_sub(1)),
+                                cursor_y.min(inner.y + inner.height.saturating_sub(1)),
+                            ))
+                        }
                     } else {
-                        Some(Position::new(
-                            cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                            cursor_y,
-                        ))
+                        None
                     }
                 }
                 _ => None,
@@ -384,6 +758,7 @@ impl ProjectCreationModal {
 
     /// Handles keyboard events and returns any triggered `CreationModalAction`.
     pub fn handle_key(&mut self, key: KeyEvent) -> CreationModalAction {
+        let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let has_alt = key.modifiers.contains(KeyModifiers::ALT);
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -457,76 +832,180 @@ impl ProjectCreationModal {
                 }
                 _ => CreationModalAction::None,
             },
-            CreationStep::ConfigureDetails => match key.code {
-                KeyCode::Esc => {
-                    if self.templates.len() > 1 {
-                        let cur_tpl = self.selected_template().map(str::to_string);
-                        self.step = CreationStep::SelectTemplate;
-                        let matching = self.matching_template_indices();
-                        if let Some(tpl) = cur_tpl {
-                            self.selected_template_idx = matching
-                                .iter()
-                                .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
-                                .unwrap_or(0);
-                        } else {
-                            self.selected_template_idx = 0;
-                        }
-                        CreationModalAction::None
-                    } else {
-                        CreationModalAction::Cancel
-                    }
-                }
-                KeyCode::Tab => {
-                    self.next_focus();
-                    CreationModalAction::None
-                }
-                KeyCode::BackTab => {
-                    self.prev_focus();
-                    CreationModalAction::None
-                }
-                KeyCode::Up => {
-                    self.prev_focus();
-                    CreationModalAction::None
-                }
-                KeyCode::Down => {
-                    self.next_focus();
-                    CreationModalAction::None
-                }
-                KeyCode::Left => {
-                    if self.focus == CreationFocus::Agent {
-                        self.cycle_agent_prev();
-                    }
-                    CreationModalAction::None
-                }
-                KeyCode::Right => {
-                    if self.focus == CreationFocus::Agent {
-                        self.cycle_agent_next();
-                    }
-                    CreationModalAction::None
-                }
-                KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                    match self.focus {
-                        CreationFocus::ProjectName => {
-                            self.project_name_input.push(c);
-                            self.revalidate();
-                        }
-                        CreationFocus::Prompt => {
-                            self.prompt_input.push(c);
-                        }
-                        CreationFocus::Agent => {
-                            if c == 'h' || c == 'k' {
-                                self.cycle_agent_prev();
-                            } else if c == 'l' || c == 'j' {
-                                self.cycle_agent_next();
+            CreationStep::ConfigureDetails => {
+                if self.focus == CreationFocus::Prompt {
+                    match key.code {
+                        KeyCode::Esc => {
+                            if self.templates.len() > 1 {
+                                let cur_tpl = self.selected_template().map(str::to_string);
+                                self.step = CreationStep::SelectTemplate;
+                                let matching = self.matching_template_indices();
+                                if let Some(tpl) = cur_tpl {
+                                    self.selected_template_idx = matching
+                                        .iter()
+                                        .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
+                                        .unwrap_or(0);
+                                } else {
+                                    self.selected_template_idx = 0;
+                                }
+                                return CreationModalAction::None;
+                            } else {
+                                return CreationModalAction::Cancel;
                             }
                         }
-                        CreationFocus::Template => {}
+                        KeyCode::Tab => {
+                            self.next_focus();
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::BackTab => {
+                            self.prev_focus();
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Up => {
+                            if !self.move_prompt_cursor_up() {
+                                self.prev_focus();
+                            }
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Down => {
+                            if !self.move_prompt_cursor_down() {
+                                self.next_focus();
+                            }
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Left => {
+                            self.move_prompt_cursor_left();
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Right => {
+                            self.move_prompt_cursor_right();
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Home => {
+                            self.move_prompt_cursor_home();
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::End => {
+                            self.move_prompt_cursor_end();
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Backspace => {
+                            self.delete_prompt_char_before_cursor();
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Delete => {
+                            self.delete_prompt_char_at_cursor();
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') if has_shift || has_alt => {
+                            self.insert_newline_prompt();
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') if !has_shift && !has_alt => {
+                            self.revalidate();
+                            if self.validation.is_valid {
+                                let trimmed = self.project_name_input.trim();
+                                if let Some(tpl) = self.selected_template() {
+                                    let prompt = if self.prompt_input.trim().is_empty() {
+                                        None
+                                    } else {
+                                        Some(self.prompt_input.trim().to_string())
+                                    };
+                                    return CreationModalAction::Submit {
+                                        template: tpl.to_string(),
+                                        project: trimmed.to_string(),
+                                        agent_override: Some(self.selected_agent().to_string()),
+                                        prompt,
+                                    };
+                                }
+                            }
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Char(c) if has_ctrl => {
+                            match c {
+                                'a' | 'A' => self.move_prompt_cursor_home(),
+                                'e' | 'E' => self.move_prompt_cursor_end(),
+                                'w' | 'W' => self.delete_prompt_word_before_cursor(),
+                                'k' | 'K' => self.kill_to_end_of_prompt_line(),
+                                'u' | 'U' => self.clear_prompt_line_or_all(),
+                                _ => {}
+                            }
+                            return CreationModalAction::None;
+                        }
+                        KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                            self.insert_char_prompt(c);
+                            return CreationModalAction::None;
+                        }
+                        _ => return CreationModalAction::None,
                     }
-                    CreationModalAction::None
                 }
-                KeyCode::Backspace => {
-                    match self.focus {
-                        CreationFocus::ProjectName => {
+
+                match key.code {
+                    KeyCode::Esc => {
+                        if self.templates.len() > 1 {
+                            let cur_tpl = self.selected_template().map(str::to_string);
+                            self.step = CreationStep::SelectTemplate;
+                            let matching = self.matching_template_indices();
+                            if let Some(tpl) = cur_tpl {
+                                self.selected_template_idx = matching
+                                    .iter()
+                                    .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
+                                    .unwrap_or(0);
+                            } else {
+                                self.selected_template_idx = 0;
+                            }
+                            CreationModalAction::None
+                        } else {
+                            CreationModalAction::Cancel
+                        }
+                    }
+                    KeyCode::Tab => {
+                        self.next_focus();
+                        CreationModalAction::None
+                    }
+                    KeyCode::BackTab => {
+                        self.prev_focus();
+                        CreationModalAction::None
+                    }
+                    KeyCode::Up => {
+                        self.prev_focus();
+                        CreationModalAction::None
+                    }
+                    KeyCode::Down => {
+                        self.next_focus();
+                        CreationModalAction::None
+                    }
+                    KeyCode::Left => {
+                        if self.focus == CreationFocus::Agent {
+                            self.cycle_agent_prev();
+                        }
+                        CreationModalAction::None
+                    }
+                    KeyCode::Right => {
+                        if self.focus == CreationFocus::Agent {
+                            self.cycle_agent_next();
+                        }
+                        CreationModalAction::None
+                    }
+                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                        match self.focus {
+                            CreationFocus::ProjectName => {
+                                self.project_name_input.push(c);
+                                self.revalidate();
+                            }
+                            CreationFocus::Agent => {
+                                if c == 'h' || c == 'k' {
+                                    self.cycle_agent_prev();
+                                } else if c == 'l' || c == 'j' {
+                                    self.cycle_agent_next();
+                                }
+                            }
+                            CreationFocus::Template | CreationFocus::Prompt => {}
+                        }
+                        CreationModalAction::None
+                    }
+                    KeyCode::Backspace => {
+                        if self.focus == CreationFocus::ProjectName {
                             if self.project_name_input.is_empty() {
                                 if self.templates.len() > 1 {
                                     let cur_tpl = self.selected_template().map(str::to_string);
@@ -549,38 +1028,34 @@ impl ProjectCreationModal {
                                 self.revalidate();
                             }
                         }
-                        CreationFocus::Prompt => {
-                            self.prompt_input.pop();
-                        }
-                        _ => {}
+                        CreationModalAction::None
                     }
-                    CreationModalAction::None
-                }
-                KeyCode::Enter => {
-                    self.revalidate();
-                    if self.validation.is_valid {
-                        let trimmed = self.project_name_input.trim();
-                        if let Some(tpl) = self.selected_template() {
-                            let prompt = if self.prompt_input.trim().is_empty() {
-                                None
+                    KeyCode::Enter => {
+                        self.revalidate();
+                        if self.validation.is_valid {
+                            let trimmed = self.project_name_input.trim();
+                            if let Some(tpl) = self.selected_template() {
+                                let prompt = if self.prompt_input.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(self.prompt_input.trim().to_string())
+                                };
+                                CreationModalAction::Submit {
+                                    template: tpl.to_string(),
+                                    project: trimmed.to_string(),
+                                    agent_override: Some(self.selected_agent().to_string()),
+                                    prompt,
+                                }
                             } else {
-                                Some(self.prompt_input.trim().to_string())
-                            };
-                            CreationModalAction::Submit {
-                                template: tpl.to_string(),
-                                project: trimmed.to_string(),
-                                agent_override: Some(self.selected_agent().to_string()),
-                                prompt,
+                                CreationModalAction::None
                             }
                         } else {
                             CreationModalAction::None
                         }
-                    } else {
-                        CreationModalAction::None
                     }
+                    _ => CreationModalAction::None,
                 }
-                _ => CreationModalAction::None,
-            },
+            }
         }
     }
 
@@ -612,11 +1087,7 @@ impl ProjectCreationModal {
                     self.revalidate();
                 }
                 CreationFocus::Prompt => {
-                    for c in text.chars() {
-                        if c == '\n' || c == '\r' || !c.is_control() {
-                            self.prompt_input.push(c);
-                        }
-                    }
+                    self.insert_str_prompt(text);
                 }
                 CreationFocus::Agent | CreationFocus::Template => {}
             },
@@ -634,6 +1105,10 @@ impl ProjectCreationModal {
                     CreationStep::ConfigureDetails => {
                         if self.focus == CreationFocus::Agent {
                             self.cycle_agent_prev();
+                        } else if self.focus == CreationFocus::Prompt {
+                            if !self.move_prompt_cursor_up() {
+                                self.prev_focus();
+                            }
                         } else {
                             self.prev_focus();
                         }
@@ -649,6 +1124,10 @@ impl ProjectCreationModal {
                     CreationStep::ConfigureDetails => {
                         if self.focus == CreationFocus::Agent {
                             self.cycle_agent_next();
+                        } else if self.focus == CreationFocus::Prompt {
+                            if !self.move_prompt_cursor_down() {
+                                self.next_focus();
+                            }
                         } else {
                             self.next_focus();
                         }
@@ -1074,19 +1553,45 @@ impl ProjectCreationModal {
                 .add_modifier(Modifier::BOLD),
         );
 
-        // 4. Initial Prompt
-        let prompt_display = if self.prompt_input.is_empty() && !prompt_focused {
-            Span::styled(
-                "<optional task instruction prompt>",
-                Style::default().fg(theme.input_placeholder),
-            )
-        } else {
-            let cursor = if prompt_focused { " " } else { "" };
-            Span::styled(
-                format!("{}{}", self.prompt_input, cursor),
-                Style::default().fg(theme.input_text),
-            )
-        };
+        // 4. Initial Prompt (multi-line box with visible lines)
+        let prompt_text_width = (inner.width.saturating_sub(18) as usize).max(10);
+        let prompt_lines = self.compute_wrapped_prompt_lines(prompt_text_width);
+        let visible_count = PROMPT_VISIBLE_LINES;
+        let scroll_offset = self.prompt_scroll_offset.min(prompt_lines.len().saturating_sub(1));
+        let is_empty_and_unfocused = self.prompt_input.is_empty() && !prompt_focused;
+
+        let mut prompt_row_spans = Vec::new();
+        for i in 0..visible_count {
+            let line_idx = scroll_offset + i;
+            if i == 0 {
+                let content_span = if is_empty_and_unfocused {
+                    Span::styled(
+                        "<optional task instruction prompt>",
+                        Style::default().fg(theme.input_placeholder),
+                    )
+                } else if line_idx < prompt_lines.len() {
+                    Span::styled(&prompt_lines[line_idx].text, Style::default().fg(theme.input_text))
+                } else {
+                    Span::raw("")
+                };
+                prompt_row_spans.push(Line::from(vec![
+                    Span::styled(format!("{prompt_prefix}Initial Prompt: "), prompt_label_style),
+                    content_span,
+                ]));
+            } else {
+                let content_span = if is_empty_and_unfocused {
+                    Span::raw("")
+                } else if line_idx < prompt_lines.len() {
+                    Span::styled(&prompt_lines[line_idx].text, Style::default().fg(theme.input_text))
+                } else {
+                    Span::raw("")
+                };
+                prompt_row_spans.push(Line::from(vec![
+                    Span::raw("                  "),
+                    content_span,
+                ]));
+            }
+        }
 
         // 5. Validation Status Banner
         let banner_line = if let Some(msg) = self.validation.primary_message() {
@@ -1162,11 +1667,8 @@ impl ProjectCreationModal {
             agent_display,
         ]));
 
-        // Row 5: Prompt
-        lines.push(Line::from(vec![
-            Span::styled(format!("{prompt_prefix}Initial Prompt: "), prompt_label_style),
-            prompt_display,
-        ]));
+        // Rows 5..=7: Prompt
+        lines.extend(prompt_row_spans);
 
         lines.push(Line::from(""));
         lines.push(banner_line);
@@ -1607,13 +2109,276 @@ mod tests {
 
         modal.focus = CreationFocus::Prompt;
         modal.prompt_input = "fix bug".to_string();
+        modal.prompt_cursor = 7;
         let pos = modal.cursor_position(area);
         assert_eq!(pos, Some(Position::new(38, 12)));
+
+        modal.prompt_cursor = 0;
+        let pos = modal.cursor_position(area);
+        assert_eq!(pos, Some(Position::new(31, 12)));
 
         modal.focus = CreationFocus::Template;
         assert_eq!(modal.cursor_position(area), None);
 
         modal.focus = CreationFocus::Agent;
         assert_eq!(modal.cursor_position(area), None);
+    }
+
+    #[test]
+    fn test_prompt_helper_methods_cursor_editing() {
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+
+        // 1. Insert characters
+        modal.insert_char_prompt('h');
+        modal.insert_char_prompt('i');
+        assert_eq!(modal.prompt_input, "hi");
+        assert_eq!(modal.prompt_cursor, 2);
+
+        // 2. Move cursor and insert in middle
+        modal.move_prompt_cursor_left();
+        assert_eq!(modal.prompt_cursor, 1);
+        modal.insert_char_prompt('e');
+        assert_eq!(modal.prompt_input, "hei");
+        assert_eq!(modal.prompt_cursor, 2);
+
+        // 3. Insert string with \r\n normalization and control characters
+        modal.insert_str_prompt("llo\r\nworld\x07!");
+        assert_eq!(modal.prompt_input, "hello\nworld!i");
+        assert_eq!(modal.prompt_cursor, 12);
+
+        // 4. Backspace before cursor (deletes '!')
+        modal.delete_prompt_char_before_cursor();
+        assert_eq!(modal.prompt_input, "hello\nworldi");
+        assert_eq!(modal.prompt_cursor, 11);
+
+        // 5. Delete at cursor
+        modal.move_prompt_cursor_home();
+        assert_eq!(modal.prompt_cursor, 6); // start of 2nd line
+        modal.delete_prompt_char_at_cursor(); // deletes 'w'
+        assert_eq!(modal.prompt_input, "hello\norldi");
+        assert_eq!(modal.prompt_cursor, 6);
+
+        // 6. Home and End
+        modal.move_prompt_cursor_end();
+        assert_eq!(modal.prompt_cursor, 11);
+        modal.move_prompt_cursor_home();
+        assert_eq!(modal.prompt_cursor, 6);
+
+        // 7. Word deletion (Ctrl+W)
+        modal.move_prompt_cursor_end();
+        modal.insert_str_prompt(" test case");
+        assert_eq!(modal.prompt_input, "hello\norldi test case");
+        modal.delete_prompt_word_before_cursor();
+        assert_eq!(modal.prompt_input, "hello\norldi test ");
+        modal.delete_prompt_word_before_cursor();
+        assert_eq!(modal.prompt_input, "hello\norldi ");
+
+        // 8. Kill to end of line (Ctrl+K)
+        modal.prompt_cursor = 6;
+        modal.kill_to_end_of_prompt_line();
+        assert_eq!(modal.prompt_input, "hello\n");
+        modal.prompt_cursor = 5; // positioned at '\n'
+        modal.kill_to_end_of_prompt_line(); // kill newline
+        assert_eq!(modal.prompt_input, "hello");
+
+        // 9. Clear line / prompt (Ctrl+U)
+        modal.insert_str_prompt("\nsecond line");
+        modal.clear_prompt_line_or_all();
+        assert_eq!(modal.prompt_input, "hello\n");
+        modal.clear_prompt_line_or_all();
+        assert_eq!(modal.prompt_input, "hello");
+        modal.move_prompt_cursor_home();
+        modal.clear_prompt_line_or_all();
+        assert_eq!(modal.prompt_input, "");
+        assert_eq!(modal.prompt_cursor, 0);
+    }
+
+    #[test]
+    fn test_prompt_word_wrapping_and_coordinate_mapping() {
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+
+        // 1. Empty input
+        let lines = modal.compute_wrapped_prompt_lines(20);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "");
+        assert_eq!(modal.cursor_to_line_col(20), (0, 0));
+        assert_eq!(modal.line_col_to_cursor(0, 0, 20), 0);
+
+        // 2. Explicit newlines
+        modal.prompt_input = "first\nsecond\nthird".to_string();
+        modal.prompt_cursor = 8; // 'e' in second
+        let lines = modal.compute_wrapped_prompt_lines(20);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "first");
+        assert_eq!(lines[1].text, "second");
+        assert_eq!(lines[2].text, "third");
+        assert_eq!(modal.cursor_to_line_col(20), (1, 2));
+        assert_eq!(modal.line_col_to_cursor(1, 2, 20), 8);
+
+        // 3. Word wrapping with spaces
+        modal.prompt_input = "the quick brown fox jumps".to_string();
+        let lines = modal.compute_wrapped_prompt_lines(10);
+        // "the quick" (9), "brown fox" (9), "jumps" (5)
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "the quick");
+        assert_eq!(lines[1].text, "brown fox");
+        assert_eq!(lines[2].text, "jumps");
+
+        // 4. Hard break without spaces
+        modal.prompt_input = "abcdefghijklmnopqrst".to_string();
+        let lines = modal.compute_wrapped_prompt_lines(8);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].text, "abcdefgh");
+        assert_eq!(lines[1].text, "ijklmnop");
+        assert_eq!(lines[2].text, "qrst");
+    }
+
+    #[test]
+    fn test_prompt_vertical_cursor_navigation_and_focus_transitions() {
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.focus = CreationFocus::Prompt;
+        modal.prompt_input = "line 1\nline 2\nline 3".to_string();
+        modal.prompt_cursor = 0;
+
+        // On top line, move_prompt_cursor_up returns false
+        assert!(!modal.move_prompt_cursor_up());
+
+        // Pressing Up when on top line transitions focus to prev field (Agent)
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        // Down from Agent returns to Prompt
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Prompt);
+
+        // Down within prompt moves across lines
+        let moved = modal.move_prompt_cursor_down();
+        assert!(moved);
+        assert_eq!(modal.cursor_to_line_col(56), (1, 0));
+
+        let moved = modal.move_prompt_cursor_down();
+        assert!(moved);
+        assert_eq!(modal.cursor_to_line_col(56), (2, 0));
+
+        // On bottom line, move_prompt_cursor_down returns false
+        assert!(!modal.move_prompt_cursor_down());
+
+        // Pressing Down when on bottom line transitions focus to next field (ProjectName)
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+    }
+
+    #[test]
+    fn test_prompt_vertical_scrolling_and_scroll_offset_sync() {
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.focus = CreationFocus::Prompt;
+        modal.prompt_input = "1\n2\n3\n4\n5\n6".to_string();
+        modal.prompt_cursor = 0;
+
+        assert_eq!(modal.prompt_scroll_offset, 0);
+
+        // Move down line by line
+        modal.move_prompt_cursor_down(); // Line 1
+        assert_eq!(modal.prompt_scroll_offset, 0);
+        modal.move_prompt_cursor_down(); // Line 2
+        assert_eq!(modal.prompt_scroll_offset, 0);
+        modal.move_prompt_cursor_down(); // Line 3 (exceeds 3 visible lines [0, 1, 2])
+        assert_eq!(modal.prompt_scroll_offset, 1);
+        modal.move_prompt_cursor_down(); // Line 4
+        assert_eq!(modal.prompt_scroll_offset, 2);
+        modal.move_prompt_cursor_down(); // Line 5
+        assert_eq!(modal.prompt_scroll_offset, 3);
+
+        // Move up line by line
+        modal.move_prompt_cursor_up(); // Line 4
+        assert_eq!(modal.prompt_scroll_offset, 3);
+        modal.move_prompt_cursor_up(); // Line 3
+        assert_eq!(modal.prompt_scroll_offset, 3);
+        modal.move_prompt_cursor_up(); // Line 2
+        assert_eq!(modal.prompt_scroll_offset, 2);
+        modal.move_prompt_cursor_up(); // Line 1
+        assert_eq!(modal.prompt_scroll_offset, 1);
+        modal.move_prompt_cursor_up(); // Line 0
+        assert_eq!(modal.prompt_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_prompt_shift_alt_enter_and_emacs_shortcuts() {
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.focus = CreationFocus::Prompt;
+
+        // Shift+Enter inserts newline without submitting
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        let action = modal.handle_key(shift_enter);
+        assert_eq!(action, CreationModalAction::None);
+        assert_eq!(modal.prompt_input, "\n");
+        assert_eq!(modal.prompt_cursor, 1);
+
+        // Alt+Enter inserts newline without submitting
+        let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        let action = modal.handle_key(alt_enter);
+        assert_eq!(action, CreationModalAction::None);
+        assert_eq!(modal.prompt_input, "\n\n");
+        assert_eq!(modal.prompt_cursor, 2);
+
+        // Type text
+        modal.handle_key(key(KeyCode::Char('t')));
+        modal.handle_key(key(KeyCode::Char('e')));
+        modal.handle_key(key(KeyCode::Char('s')));
+        modal.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(modal.prompt_input, "\n\ntest");
+
+        // Ctrl+A (Home)
+        modal.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(modal.prompt_cursor, 2);
+
+        // Ctrl+E (End)
+        modal.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(modal.prompt_cursor, 6);
+
+        // Ctrl+W (Delete word)
+        modal.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(modal.prompt_input, "\n\n");
+
+        // Paste multiline
+        modal.handle_paste("line A\r\nline B");
+        assert_eq!(modal.prompt_input, "\n\nline A\nline B");
+    }
+
+    #[test]
+    fn test_prompt_multiline_rendering_and_placeholder() {
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+
+        // 1. Render empty & unfocused -> shows placeholder
+        modal.focus = CreationFocus::ProjectName;
+        modal.render_modal(area, &mut buf, &theme);
+        let content = buf.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
+        assert!(content.contains("<optional task instruction prompt>"));
+
+        // 2. Render multi-line prompt
+        modal.focus = CreationFocus::Prompt;
+        modal.insert_str_prompt("First instruction line\nSecond instruction line\nThird instruction line");
+        let mut buf2 = Buffer::empty(area);
+        modal.render_modal(area, &mut buf2, &theme);
+        let content2 = buf2.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
+        assert!(content2.contains("First instruction line"));
+        assert!(content2.contains("Second instruction line"));
+        assert!(content2.contains("Third instruction line"));
     }
 }
