@@ -42,6 +42,15 @@ impl RawLeaderDecoder {
     /// Kitty keyboard protocol escape sequence for Ctrl+Space (`\x1b[32;5u`).
     pub const KITTY_CTRL_SPACE: &'static [u8] = b"\x1b[32;5u";
 
+    /// Kitty keyboard protocol escape sequence for Shift+Enter (`\x1b[13;2u`).
+    pub const KITTY_SHIFT_ENTER: &'static [u8] = b"\x1b[13;2u";
+
+    /// Kitty keyboard protocol alternate key sequence for Shift+Enter (`\x1b[13:10;2u`).
+    pub const KITTY_SHIFT_ENTER_ALT: &'static [u8] = b"\x1b[13:10;2u";
+
+    /// Xterm modifyOtherKeys escape sequence for Shift+Enter (`\x1b[27;2;13~`).
+    pub const XTERM_SHIFT_ENTER: &'static [u8] = b"\x1b[27;2;13~";
+
     /// Creates a new `RawLeaderDecoder` with leader mode inactive.
     pub fn new() -> Self {
         Self {
@@ -83,11 +92,30 @@ impl RawLeaderDecoder {
                         actions.push(RawAction::Passthrough(vec![0x00]));
                         i += Self::KITTY_CTRL_SPACE.len();
                         continue;
-                    } else if rest.starts_with(b"\x1b[") && Self::KITTY_CTRL_SPACE.starts_with(rest) {
+                    } else if rest.starts_with(b"\x1b[") && Self::KITTY_CTRL_SPACE.starts_with(rest)
+                    {
                         // Incomplete prefix of Kitty Ctrl+Space at the end of input
                         self.flush_passthrough(&mut actions, &mut passthrough_buf);
                         self.pending_escape.extend_from_slice(rest);
                         break;
+                    } else if rest.starts_with(b"\x1b[") {
+                        // Consume the entire CSI sequence to cancel leader
+                        let csi_len = rest[2..]
+                            .iter()
+                            .position(|&b| (0x40..=0x7e).contains(&b))
+                            .map(|pos| 2 + pos + 1)
+                            .unwrap_or(rest.len());
+                        self.flush_passthrough(&mut actions, &mut passthrough_buf);
+                        self.leader_active = false;
+                        actions.push(RawAction::CancelLeader);
+                        i += csi_len;
+                        continue;
+                    } else if rest.starts_with(b"\x1bO") && rest.len() >= 3 {
+                        self.flush_passthrough(&mut actions, &mut passthrough_buf);
+                        self.leader_active = false;
+                        actions.push(RawAction::CancelLeader);
+                        i += 3;
+                        continue;
                     }
                 }
 
@@ -139,7 +167,8 @@ impl RawLeaderDecoder {
                         self.leader_active = true;
                         actions.push(RawAction::EnterLeader);
                         i += Self::KITTY_CTRL_SPACE.len();
-                    } else if rest.starts_with(b"\x1b[") && Self::KITTY_CTRL_SPACE.starts_with(rest) {
+                    } else if rest.starts_with(b"\x1b[") && Self::KITTY_CTRL_SPACE.starts_with(rest)
+                    {
                         // Could be start of Kitty Ctrl+Space
                         self.flush_passthrough(&mut actions, &mut passthrough_buf);
                         self.pending_escape.extend_from_slice(rest);
@@ -178,6 +207,13 @@ impl RawLeaderDecoder {
             vec![RawAction::Passthrough(pending)]
         }
     }
+}
+
+/// Returns whether the given raw byte sequence represents a Shift+Enter key event.
+pub fn is_shift_enter(bytes: &[u8]) -> bool {
+    bytes == RawLeaderDecoder::KITTY_SHIFT_ENTER
+        || bytes == RawLeaderDecoder::KITTY_SHIFT_ENTER_ALT
+        || bytes == RawLeaderDecoder::XTERM_SHIFT_ENTER
 }
 
 fn make_key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -338,36 +374,62 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             // CSI ~ sequences: \x1b[1~ (Home), \x1b[2~ (Insert), \x1b[3~ (Delete), \x1b[4~ (End),
             // \x1b[5~ (PageUp), \x1b[6~ (PageDown), \x1b[7~ (Home), \x1b[8~ (End),
             // \x1b[15~ (F5), \x1b[17~ (F6), \x1b[18~ (F7), \x1b[19~ (F8), \x1b[20~ (F9), \x1b[21~ (F10), \x1b[23~ (F11), \x1b[24~ (F12)
+            // modifyOtherKeys format: \x1b[27;<mod>;<codepoint>~
             if let Some(tilde_pos) = rest.iter().position(|&b| b == b'~') {
                 if let Ok(param_str) = std::str::from_utf8(&rest[..tilde_pos]) {
                     let parts: Vec<&str> = param_str.split(';').collect();
-                    let key_num = parts[0].parse::<u32>().ok();
-                    let mod_num = parts.get(1).and_then(|s| s.parse::<u8>().ok()).unwrap_or(1);
-                    let modifiers = decode_csi_modifiers(mod_num);
-
-                    if let Some(num) = key_num {
-                        let code = match num {
-                            1 | 7 => Some(KeyCode::Home),
-                            2 => Some(KeyCode::Insert),
-                            3 => Some(KeyCode::Delete),
-                            4 | 8 => Some(KeyCode::End),
-                            5 => Some(KeyCode::PageUp),
-                            6 => Some(KeyCode::PageDown),
-                            11..=14 => Some(KeyCode::F((num - 10) as u8)),
-                            15 => Some(KeyCode::F(5)),
-                            17 => Some(KeyCode::F(6)),
-                            18 => Some(KeyCode::F(7)),
-                            19 => Some(KeyCode::F(8)),
-                            20 => Some(KeyCode::F(9)),
-                            21 => Some(KeyCode::F(10)),
-                            23 => Some(KeyCode::F(11)),
-                            24 => Some(KeyCode::F(12)),
-                            _ => None,
-                        };
-                        if let Some(c) = code {
-                            events.push(make_key_event(c, modifiers));
+                    if parts.len() == 3 && parts[0] == "27" {
+                        let mod_num = parts[1].parse::<u8>().unwrap_or(1);
+                        let modifiers = decode_csi_modifiers(mod_num);
+                        if let Ok(cp) = parts[2].parse::<u32>() {
+                            let code = match cp {
+                                13 => KeyCode::Enter,
+                                9 => {
+                                    if modifiers.contains(KeyModifiers::SHIFT) {
+                                        KeyCode::BackTab
+                                    } else {
+                                        KeyCode::Tab
+                                    }
+                                }
+                                27 => KeyCode::Esc,
+                                127 => KeyCode::Backspace,
+                                ch => char::from_u32(ch)
+                                    .map(KeyCode::Char)
+                                    .unwrap_or(KeyCode::Null),
+                            };
+                            events.push(make_key_event(code, modifiers));
                             i += 2 + tilde_pos + 1;
                             continue;
+                        }
+                    } else {
+                        let key_num = parts[0].parse::<u32>().ok();
+                        let mod_num = parts.get(1).and_then(|s| s.parse::<u8>().ok()).unwrap_or(1);
+                        let modifiers = decode_csi_modifiers(mod_num);
+
+                        if let Some(num) = key_num {
+                            let code = match num {
+                                1 | 7 => Some(KeyCode::Home),
+                                2 => Some(KeyCode::Insert),
+                                3 => Some(KeyCode::Delete),
+                                4 | 8 => Some(KeyCode::End),
+                                5 => Some(KeyCode::PageUp),
+                                6 => Some(KeyCode::PageDown),
+                                11..=14 => Some(KeyCode::F((num - 10) as u8)),
+                                15 => Some(KeyCode::F(5)),
+                                17 => Some(KeyCode::F(6)),
+                                18 => Some(KeyCode::F(7)),
+                                19 => Some(KeyCode::F(8)),
+                                20 => Some(KeyCode::F(9)),
+                                21 => Some(KeyCode::F(10)),
+                                23 => Some(KeyCode::F(11)),
+                                24 => Some(KeyCode::F(12)),
+                                _ => None,
+                            };
+                            if let Some(c) = code {
+                                events.push(make_key_event(c, modifiers));
+                                i += 2 + tilde_pos + 1;
+                                continue;
+                            }
                         }
                     }
                 }
@@ -394,7 +456,9 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
                             }
                             27 => KeyCode::Esc,
                             127 => KeyCode::Backspace,
-                            ch => char::from_u32(ch).map(KeyCode::Char).unwrap_or(KeyCode::Null),
+                            ch => char::from_u32(ch)
+                                .map(KeyCode::Char)
+                                .unwrap_or(KeyCode::Null),
                         };
                         events.push(make_key_event(code, modifiers));
                         i += 2 + u_pos + 1;
@@ -631,7 +695,10 @@ mod tests {
 
         // Plain text
         let actions = decoder.decode(b"cargo build\r");
-        assert_eq!(actions, vec![RawAction::Passthrough(b"cargo build\r".to_vec())]);
+        assert_eq!(
+            actions,
+            vec![RawAction::Passthrough(b"cargo build\r".to_vec())]
+        );
         assert!(!decoder.is_leader_active());
 
         // ANSI escape sequences
@@ -712,7 +779,10 @@ mod tests {
 
         // Chunk 2: 9u (not 5u -> not Kitty Ctrl+Space) -> flushes complete \x1b[32;9u as passthrough
         let actions2 = decoder.decode(b"9u");
-        assert_eq!(actions2, vec![RawAction::Passthrough(b"\x1b[32;9u".to_vec())]);
+        assert_eq!(
+            actions2,
+            vec![RawAction::Passthrough(b"\x1b[32;9u".to_vec())]
+        );
         assert!(!decoder.is_leader_active());
     }
 
@@ -757,7 +827,7 @@ mod tests {
         assert!(!decoder.is_leader_active());
 
         // w / W / x / X -> CloseSession
-        for b in &[b'w', b'W', b'x', b'X'] {
+        for b in b"wWxX" {
             decoder.set_leader_active(true);
             assert_eq!(decoder.decode(&[*b]), vec![RawAction::CloseSession]);
             assert!(!decoder.is_leader_active());
@@ -783,11 +853,17 @@ mod tests {
 
         // 0x00 / Space -> Passthrough 0x00 (literal Ctrl+Space forwarding)
         decoder.set_leader_active(true);
-        assert_eq!(decoder.decode(&[0x00]), vec![RawAction::Passthrough(vec![0x00])]);
+        assert_eq!(
+            decoder.decode(&[0x00]),
+            vec![RawAction::Passthrough(vec![0x00])]
+        );
         assert!(!decoder.is_leader_active());
 
         decoder.set_leader_active(true);
-        assert_eq!(decoder.decode(b" "), vec![RawAction::Passthrough(vec![0x00])]);
+        assert_eq!(
+            decoder.decode(b" "),
+            vec![RawAction::Passthrough(vec![0x00])]
+        );
         assert!(!decoder.is_leader_active());
 
         // Kitty Ctrl+Space in leader mode -> Passthrough 0x00
@@ -830,33 +906,125 @@ mod tests {
         // Plain ascii
         let events = parse_raw_events(b"hello");
         assert_eq!(events.len(), 5);
-        assert_eq!(events[0], make_key_event(KeyCode::Char('h'), KeyModifiers::empty()));
-        assert_eq!(events[4], make_key_event(KeyCode::Char('o'), KeyModifiers::empty()));
+        assert_eq!(
+            events[0],
+            make_key_event(KeyCode::Char('h'), KeyModifiers::empty())
+        );
+        assert_eq!(
+            events[4],
+            make_key_event(KeyCode::Char('o'), KeyModifiers::empty())
+        );
 
         // Uppercase with Shift
         let events = parse_raw_events(b"Hi");
-        assert_eq!(events[0], make_key_event(KeyCode::Char('H'), KeyModifiers::SHIFT));
-        assert_eq!(events[1], make_key_event(KeyCode::Char('i'), KeyModifiers::empty()));
+        assert_eq!(
+            events[0],
+            make_key_event(KeyCode::Char('H'), KeyModifiers::SHIFT)
+        );
+        assert_eq!(
+            events[1],
+            make_key_event(KeyCode::Char('i'), KeyModifiers::empty())
+        );
 
         // Multi-byte UTF-8 emoji and umlaut
         let events = parse_raw_events("🚀äöü".as_bytes());
         assert_eq!(events.len(), 4);
-        assert_eq!(events[0], make_key_event(KeyCode::Char('🚀'), KeyModifiers::empty()));
-        assert_eq!(events[1], make_key_event(KeyCode::Char('ä'), KeyModifiers::empty()));
-        assert_eq!(events[2], make_key_event(KeyCode::Char('ö'), KeyModifiers::empty()));
-        assert_eq!(events[3], make_key_event(KeyCode::Char('ü'), KeyModifiers::empty()));
+        assert_eq!(
+            events[0],
+            make_key_event(KeyCode::Char('🚀'), KeyModifiers::empty())
+        );
+        assert_eq!(
+            events[1],
+            make_key_event(KeyCode::Char('ä'), KeyModifiers::empty())
+        );
+        assert_eq!(
+            events[2],
+            make_key_event(KeyCode::Char('ö'), KeyModifiers::empty())
+        );
+        assert_eq!(
+            events[3],
+            make_key_event(KeyCode::Char('ü'), KeyModifiers::empty())
+        );
+    }
+
+    #[test]
+    fn test_is_shift_enter_helper() {
+        assert!(is_shift_enter(b"\x1b[13;2u"));
+        assert!(is_shift_enter(b"\x1b[13:10;2u"));
+        assert!(is_shift_enter(b"\x1b[27;2;13~"));
+
+        assert!(!is_shift_enter(b"\r"));
+        assert!(!is_shift_enter(b"\n"));
+        assert!(!is_shift_enter(b"\x1b[13;5u"));
+        assert!(!is_shift_enter(b"\x1b[32;5u"));
+        assert!(!is_shift_enter(b"hello"));
+    }
+
+    #[test]
+    fn test_raw_leader_decoder_shift_enter() {
+        let mut decoder = RawLeaderDecoder::new();
+
+        // 1. Direct Shift+Enter sequences in passthrough
+        assert_eq!(
+            decoder.decode(b"\x1b[13;2u"),
+            vec![RawAction::Passthrough(b"\x1b[13;2u".to_vec())]
+        );
+        assert_eq!(
+            decoder.decode(b"\x1b[13:10;2u"),
+            vec![RawAction::Passthrough(b"\x1b[13:10;2u".to_vec())]
+        );
+        assert_eq!(
+            decoder.decode(b"\x1b[27;2;13~"),
+            vec![RawAction::Passthrough(b"\x1b[27;2;13~".to_vec())]
+        );
+
+        // 2. Shift+Enter cancels active leader mode
+        decoder.set_leader_active(true);
+        assert_eq!(decoder.decode(b"\x1b[13;2u"), vec![RawAction::CancelLeader]);
+        assert!(!decoder.is_leader_active());
+
+        decoder.set_leader_active(true);
+        assert_eq!(
+            decoder.decode(b"\x1b[27;2;13~"),
+            vec![RawAction::CancelLeader]
+        );
+        assert!(!decoder.is_leader_active());
     }
 
     #[test]
     fn test_parse_raw_events_enter_variations() {
         // Plain CR and LF
-        assert_eq!(parse_raw_events(b"\r"), vec![make_key_event(KeyCode::Enter, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\n"), vec![make_key_event(KeyCode::Enter, KeyModifiers::empty())]);
+        assert_eq!(
+            parse_raw_events(b"\r"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\n"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::empty())]
+        );
 
         // Shift+Enter CSI-u: \x1b[13;2u
         assert_eq!(
             parse_raw_events(b"\x1b[13;2u"),
             vec![make_key_event(KeyCode::Enter, KeyModifiers::SHIFT)]
+        );
+
+        // Shift+Enter Kitty alternate: \x1b[13:10;2u
+        assert_eq!(
+            parse_raw_events(b"\x1b[13:10;2u"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::SHIFT)]
+        );
+
+        // Shift+Enter Xterm modifyOtherKeys: \x1b[27;2;13~
+        assert_eq!(
+            parse_raw_events(b"\x1b[27;2;13~"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::SHIFT)]
+        );
+
+        // Ctrl+Enter Xterm modifyOtherKeys: \x1b[27;5;13~
+        assert_eq!(
+            parse_raw_events(b"\x1b[27;5;13~"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::CONTROL)]
         );
 
         // Alt+Enter CSI-u and escape
@@ -876,14 +1044,20 @@ mod tests {
         );
         assert_eq!(
             parse_raw_events(b"\x1b[13;6u"),
-            vec![make_key_event(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT)]
+            vec![make_key_event(
+                KeyCode::Enter,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )]
         );
     }
 
     #[test]
     fn test_parse_raw_events_tab_backtab() {
         // Tab: \t
-        assert_eq!(parse_raw_events(b"\t"), vec![make_key_event(KeyCode::Tab, KeyModifiers::empty())]);
+        assert_eq!(
+            parse_raw_events(b"\t"),
+            vec![make_key_event(KeyCode::Tab, KeyModifiers::empty())]
+        );
 
         // BackTab: \x1b[Z
         assert_eq!(
@@ -905,15 +1079,24 @@ mod tests {
     #[test]
     fn test_parse_raw_events_backspace_esc_delete() {
         // Backspace: 0x7f, 0x08
-        assert_eq!(parse_raw_events(&[0x7f]), vec![make_key_event(KeyCode::Backspace, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(&[0x08]), vec![make_key_event(KeyCode::Backspace, KeyModifiers::empty())]);
+        assert_eq!(
+            parse_raw_events(&[0x7f]),
+            vec![make_key_event(KeyCode::Backspace, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(&[0x08]),
+            vec![make_key_event(KeyCode::Backspace, KeyModifiers::empty())]
+        );
         assert_eq!(
             parse_raw_events(b"\x1b[127;2u"),
             vec![make_key_event(KeyCode::Backspace, KeyModifiers::SHIFT)]
         );
 
         // Esc: 0x1b
-        assert_eq!(parse_raw_events(b"\x1b"), vec![make_key_event(KeyCode::Esc, KeyModifiers::empty())]);
+        assert_eq!(
+            parse_raw_events(b"\x1b"),
+            vec![make_key_event(KeyCode::Esc, KeyModifiers::empty())]
+        );
         assert_eq!(
             parse_raw_events(b"\x1b[27;2u"),
             vec![make_key_event(KeyCode::Esc, KeyModifiers::SHIFT)]
@@ -933,10 +1116,22 @@ mod tests {
     #[test]
     fn test_parse_raw_events_arrow_keys_and_navigation() {
         // Plain arrows
-        assert_eq!(parse_raw_events(b"\x1b[A"), vec![make_key_event(KeyCode::Up, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\x1b[B"), vec![make_key_event(KeyCode::Down, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\x1b[C"), vec![make_key_event(KeyCode::Right, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\x1b[D"), vec![make_key_event(KeyCode::Left, KeyModifiers::empty())]);
+        assert_eq!(
+            parse_raw_events(b"\x1b[A"),
+            vec![make_key_event(KeyCode::Up, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[B"),
+            vec![make_key_event(KeyCode::Down, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[C"),
+            vec![make_key_event(KeyCode::Right, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[D"),
+            vec![make_key_event(KeyCode::Left, KeyModifiers::empty())]
+        );
 
         // Modified arrows
         assert_eq!(
@@ -949,13 +1144,34 @@ mod tests {
         );
 
         // Home, End, PageUp, PageDown, Insert
-        assert_eq!(parse_raw_events(b"\x1b[H"), vec![make_key_event(KeyCode::Home, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\x1b[F"), vec![make_key_event(KeyCode::End, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\x1b[1~"), vec![make_key_event(KeyCode::Home, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\x1b[4~"), vec![make_key_event(KeyCode::End, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\x1b[5~"), vec![make_key_event(KeyCode::PageUp, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\x1b[6~"), vec![make_key_event(KeyCode::PageDown, KeyModifiers::empty())]);
-        assert_eq!(parse_raw_events(b"\x1b[2~"), vec![make_key_event(KeyCode::Insert, KeyModifiers::empty())]);
+        assert_eq!(
+            parse_raw_events(b"\x1b[H"),
+            vec![make_key_event(KeyCode::Home, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[F"),
+            vec![make_key_event(KeyCode::End, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[1~"),
+            vec![make_key_event(KeyCode::Home, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[4~"),
+            vec![make_key_event(KeyCode::End, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[5~"),
+            vec![make_key_event(KeyCode::PageUp, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[6~"),
+            vec![make_key_event(KeyCode::PageDown, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[2~"),
+            vec![make_key_event(KeyCode::Insert, KeyModifiers::empty())]
+        );
     }
 
     #[test]
@@ -1085,4 +1301,3 @@ mod tests {
         );
     }
 }
-

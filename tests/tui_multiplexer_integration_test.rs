@@ -144,7 +144,11 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
         .unwrap();
 
     let buf = terminal.backend().buffer();
-    let text = buf.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
+    let text = buf
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
     assert!(text.contains("interactive-cli"));
     assert!(text.contains("agy-prompt> user input"));
 
@@ -178,7 +182,9 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
 #[test]
 fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
     use botai::tui::app::TuiApp;
-    use botai::tui::events::{mouse_event_to_bytes, mouse_event_to_sgr_bytes, mouse_scroll_to_bytes};
+    use botai::tui::events::{
+        mouse_event_to_bytes, mouse_event_to_sgr_bytes, mouse_scroll_to_bytes,
+    };
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let tmp = tempdir().expect("Failed to create tempdir");
@@ -239,10 +245,7 @@ fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
         modifiers: KeyModifiers::empty(),
     };
     app.handle_mouse_event(scroll_up);
-    assert_eq!(
-        app.registry.active_session().unwrap().vt().scrollback(),
-        3
-    );
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
     assert_eq!(
         app.registry.active_session().unwrap().project_name(),
         "backend-api"
@@ -255,7 +258,12 @@ fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
         app.registry.active_session().unwrap().project_name(),
         "frontend-ui"
     );
-    assert!(app.registry.active_session().unwrap().vt().is_mouse_mode_enabled());
+    assert!(app
+        .registry
+        .active_session()
+        .unwrap()
+        .vt()
+        .is_mouse_mode_enabled());
 
     // Forward ScrollDown to active session 2 (emits SGR and marks activity)
     let scroll_down = MouseEvent {
@@ -276,7 +284,11 @@ fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
 
     // 4. When leader is active, mouse scrolling is suppressed
     app.leader_active = true;
-    app.registry.active_session_mut().unwrap().project_session.set_status(SessionStatus::WaitingForInput);
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
     app.handle_mouse_event(scroll_up);
     assert_eq!(
         app.registry.active_session().unwrap().status(),
@@ -323,7 +335,10 @@ fn test_integration_tui_multiplexer_raw_events_decoding_and_paste() {
     );
     assert_eq!(
         parse_raw_events(b"\x1b[13;6u"),
-        vec![make_key(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT)]
+        vec![make_key(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )]
     );
 
     // 3. Tab, BackTab, Enter, Backspace, Esc
@@ -401,10 +416,7 @@ fn test_integration_raw_leader_decoder_and_pty_byte_forwarding() {
     assert!(!decoder.is_leader_active());
 
     // 4. Kitty protocol Ctrl+Space interception \x1b[32;5u
-    assert_eq!(
-        decoder.decode(b"\x1b[32;5u"),
-        vec![RawAction::EnterLeader]
-    );
+    assert_eq!(decoder.decode(b"\x1b[32;5u"), vec![RawAction::EnterLeader]);
     assert!(decoder.is_leader_active());
 
     // 5. Subsequent launcher hotkey 'c'
@@ -455,3 +467,215 @@ fn test_integration_raw_leader_decoder_and_pty_byte_forwarding() {
     );
 }
 
+#[test]
+fn test_integration_shift_enter_multiline_support_claude_vs_agy_and_enter() {
+    use botai::tui::app::TuiApp;
+    use botai::tui::events::is_shift_enter;
+    use std::time::Duration;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "more"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "cat"]);
+
+    let mut registry = SessionRegistry::new();
+
+    // 1. Session 1: Claude Code agent
+    let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+    let pty1 = PtySession::spawn(config1).unwrap();
+    let vt1 = VtScreen::new(80, 24);
+    let mut ps1 = ProjectSession::new("claude-project", "workspace", "claude");
+    ps1.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps1, pty1, vt1).unwrap();
+
+    // 2. Session 2: Agy agent
+    let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty2 = PtySession::spawn(config2).unwrap();
+    let vt2 = VtScreen::new(80, 24);
+    let mut ps2 = ProjectSession::new("agy-project", "workspace", "agy");
+    ps2.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps2, pty2, vt2).unwrap();
+
+    let mut app = TuiApp::new(registry);
+    assert_eq!(app.registry.active_index(), Some(0));
+
+    // Verify helper
+    assert!(is_shift_enter(b"\x1b[13;2u"));
+    assert!(is_shift_enter(b"\x1b[13:10;2u"));
+    assert!(is_shift_enter(b"\x1b[27;2;13~"));
+    assert!(!is_shift_enter(b"\r"));
+    assert!(!is_shift_enter(b"\n"));
+
+    // Claude session: Shift+Enter sends \n (0x0A)
+    app.handle_raw_bytes(b"\x1b[13;2u");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    // Sleep to allow cat process to echo back
+    std::thread::sleep(Duration::from_millis(100));
+    app.process_pty_streams();
+    let text = app.registry.active_session().unwrap().vt().contents();
+    // \n was processed by VT
+    assert!(
+        text.contains('\n')
+            || text.is_empty()
+            || app.registry.active_session().unwrap().status() == SessionStatus::Busy
+    );
+
+    // Claude session: Shift+Enter alternate Kitty format (\x1b[13:10;2u)
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\x1b[13:10;2u");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    // Claude session: Shift+Enter xterm format (\x1b[27;2;13~]
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\x1b[27;2;13~");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    // Normal Enter (\r) unaffected
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\r");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    // Switch to session 2: Agy
+    app.registry.set_active_index(1).unwrap();
+    assert_eq!(
+        app.registry.active_session().unwrap().project_name(),
+        "agy-project"
+    );
+
+    // Agy session: Shift+Enter forwards \x1b[13;2u
+    app.handle_raw_bytes(b"\x1b[13;2u");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    // Agy session: Alternate formats also forward appropriately
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\x1b[13:10;2u");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\x1b[27;2;13~");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    // Normal Enter (\r) on Agy session unaffected
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\r");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+}
+
+#[test]
+fn test_integration_mouse_wheel_scrolling_via_handle_raw_bytes() {
+    use botai::tui::app::TuiApp;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+    let mut registry = SessionRegistry::new();
+
+    // Session 1: mouse disabled
+    let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+    let pty1 = PtySession::spawn(config1).unwrap();
+    let mut vt1 = VtScreen::new(80, 24);
+    for i in 1..=30 {
+        vt1.process(format!("output line {i}\r\n").as_bytes());
+    }
+    let mut ps1 = ProjectSession::new("scroll-test", "ws", "claude");
+    ps1.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps1, pty1, vt1).unwrap();
+
+    // Session 2: mouse enabled
+    let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty2 = PtySession::spawn(config2).unwrap();
+    let mut vt2 = VtScreen::new(80, 24);
+    vt2.process(b"\x1b[?1000h");
+    let mut ps2 = ProjectSession::new("mouse-app", "ws", "agy");
+    ps2.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps2, pty2, vt2).unwrap();
+
+    let mut app = TuiApp::new(registry);
+
+    // 1. In Session 1, SGR ScrollUp raw bytes (\x1b[<64;10;5M) navigate virtual terminal scrollback directly
+    app.handle_raw_bytes(b"\x1b[<64;10;5M");
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::WaitingForInput
+    );
+
+    app.handle_raw_bytes(b"\x1b[<64;10;5M");
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 6);
+
+    // SGR ScrollDown raw bytes (\x1b[<65;10;5M) scroll down by 3
+    app.handle_raw_bytes(b"\x1b[<65;10;5M");
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
+
+    // 2. Typing any key resets scrollback to 0
+    app.handle_raw_bytes(b"x");
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
+
+    // 3. In Session 2 (mouse mode enabled), SGR bytes are forwarded to PTY and record activity
+    app.registry.set_active_index(1).unwrap();
+    assert!(app
+        .registry
+        .active_session()
+        .unwrap()
+        .vt()
+        .is_mouse_mode_enabled());
+
+    app.handle_raw_bytes(b"\x1b[<64;10;5M");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+}

@@ -1,5 +1,10 @@
 # TODO
 
+## Project Creation & Validation
+- [ ] **Async / Non-Blocking Branch Collision Checking**:
+  - Check for git branch collisions across template repositories asynchronously during project creation.
+  - Currently, checking branch collisions synchronously in the UI thread can lock up the TUI. Move pre-validation checks to background worker or debounce them to prevent UI freezing.
+
 ## TUI Top Bar & Header Refactoring
 
 Refactor the tmux-like top status bar and dashboard header into a clean, declarative Ratatui component.

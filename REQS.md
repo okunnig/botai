@@ -175,7 +175,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Unmodified Newline (`KeyCode::Char('\n')` with no modifiers): `\n` (`0x0A`, LF / Ctrl+J).
     - Unmodified Carriage Return (`KeyCode::Char('\r')` with no modifiers): `\r` (`0x0D`, CR).
     - Ctrl+J (`KeyCode::Char('j')` with Ctrl, or unmodified `\n`): `0x0A` (LF).
-    - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Shift+Enter` / `Shift + '\n'` / `Shift + '\r'` -> `\x1b[13;2u` for multiline prompt input in `agy`, Charmbracelet, Bubbletea, and modern TUIs; `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`; `Super+Enter` -> `\x1b[13;9u`).
+    - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`; `Super+Enter` -> `\x1b[13;9u`).
+    - **Seamless Agent-Aware Shift+Enter Multiline Routing**:
+      - Inspects the active session (`active.project_session.agent`) when receiving raw Shift+Enter sequences (`\x1b[13;2u`, `\x1b[13:10;2u`, or `\x1b[27;2;13~`):
+        - For `claude` (or non-Kitty agents): Sends `b"\n"` (`0x0A` / Line Feed) so Claude Code inserts a clean multiline newline instead of submitting.
+        - For `agy`: Forwards `b"\x1b[13;2u"` (native Kitty protocol multiline newline sequence).
+        - Default/other agents: Sends `b"\n"`.
+      - Unmodified Enter (`\r`) is forwarded unchanged as `\r` (`0x0D`, CR) across all sessions.
   - **Modified Tab & BackTab**:
     - Unmodified Tab: `\t` (`0x09`).
     - Shift+Tab / BackTab: `\x1b[Z`.
