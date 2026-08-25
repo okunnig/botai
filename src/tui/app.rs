@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -56,15 +56,13 @@ pub struct TuiApp {
 }
 
 
-struct TerminalCleanupGuard {
-    enhanced_keyboard: bool,
-}
+struct TerminalCleanupGuard;
 
 impl Drop for TerminalCleanupGuard {
     fn drop(&mut self) {
-        if self.enhanced_keyboard {
-            let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
-        }
+        let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
+        let _ = io::stdout().write_all(b"\x1b[>4;0m");
+        let _ = io::stdout().flush();
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
@@ -180,35 +178,34 @@ impl TuiApp {
     /// Runs the interactive TUI application event loop.
     pub fn run(&mut self, stdout: &mut Stdout) -> io::Result<()> {
         enable_raw_mode()?;
-        let enhanced_keyboard = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
-        if enhanced_keyboard {
-            let _ = execute!(
-                stdout,
-                crossterm::event::PushKeyboardEnhancementFlags(
-                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                )
-            );
-        }
+        let _ = execute!(
+            stdout,
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        );
+        let _ = stdout.write_all(b"\x1b[>4;2m");
+        let _ = stdout.flush();
+
         execute!(
             stdout,
             EnterAlternateScreen,
             crossterm::event::EnableMouseCapture,
             crossterm::cursor::Show
         )?;
-        let mut _guard = TerminalCleanupGuard { enhanced_keyboard };
+        let _guard = TerminalCleanupGuard;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
         let res = self.run_loop(&mut terminal);
 
         // Always restore terminal state even on error
-        if enhanced_keyboard {
-            let _ = execute!(
-                terminal.backend_mut(),
-                crossterm::event::PopKeyboardEnhancementFlags
-            );
-        }
-        _guard.enhanced_keyboard = false;
+        let _ = execute!(
+            terminal.backend_mut(),
+            crossterm::event::PopKeyboardEnhancementFlags
+        );
+        let _ = terminal.backend_mut().write_all(b"\x1b[>4;0m");
+        let _ = terminal.backend_mut().flush();
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),

@@ -159,6 +159,18 @@ pub fn key_to_bytes(event: &KeyEvent) -> Vec<u8> {
 
     // Handle character keys
     if let KeyCode::Char(c) = event.code {
+        if c == '\n' || c == '\r' {
+            if m == 1 {
+                return if c == '\n' {
+                    b"\n".to_vec()
+                } else {
+                    b"\r".to_vec()
+                };
+            } else {
+                return format!("\x1b[13;{m}u").into_bytes();
+            }
+        }
+
         if event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT {
             return c.to_string().into_bytes();
         }
@@ -802,6 +814,50 @@ mod tests {
         assert_eq!(
             key_to_bytes(&make_key(KeyCode::Enter, KeyModifiers::SUPER)),
             b"\x1b[13;9u".to_vec()
+        );
+
+        // KeyCode::Char('\n') and KeyCode::Char('\r') handling
+        // Without modifiers -> LF (0x0A) or CR (0x0D)
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\n'), KeyModifiers::empty())),
+            b"\n".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\r'), KeyModifiers::empty())),
+            b"\r".to_vec()
+        );
+
+        // With Shift -> \x1b[13;2u
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\n'), KeyModifiers::SHIFT)),
+            b"\x1b[13;2u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\r'), KeyModifiers::SHIFT)),
+            b"\x1b[13;2u".to_vec()
+        );
+
+        // With Alt -> \x1b[13;3u
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\n'), KeyModifiers::ALT)),
+            b"\x1b[13;3u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\r'), KeyModifiers::ALT)),
+            b"\x1b[13;3u".to_vec()
+        );
+
+        // With Ctrl and Ctrl+Shift
+        assert_eq!(
+            key_to_bytes(&make_key(KeyCode::Char('\n'), KeyModifiers::CONTROL)),
+            b"\x1b[13;5u".to_vec()
+        );
+        assert_eq!(
+            key_to_bytes(&make_key(
+                KeyCode::Char('\n'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            b"\x1b[13;6u".to_vec()
         );
     }
 

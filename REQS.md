@@ -161,15 +161,16 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Positions the terminal hardware cursor directly at the active input position during interactive sessions, rendering the native block cursor where user input is focused when at live scrollback position.
   - Automatically positions cursor in active text fields within dialogs/modals and hides the cursor when viewing scrollback history or when appropriate.
 - **Keyboard Enhancement Protocol Negotiation**:
-  - Queries terminal capabilities on startup via `crossterm::terminal::supports_keyboard_enhancement()`.
-  - When supported, pushes `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` via `PushKeyboardEnhancementFlags` to enable progressive keyboard enhancement and unambiguous distinction between modified keys (e.g. distinguishing Shift+Enter from plain Enter, modified arrows, Ctrl+Shift combinations).
-  - Ensures `PopKeyboardEnhancementFlags` is executed during teardown and in `TerminalCleanupGuard::drop`, guaranteeing the host terminal's original keyboard state is fully restored even on unexpected exit or error.
+  - Unconditionally pushes `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` via `PushKeyboardEnhancementFlags` on startup to enable progressive keyboard enhancement and unambiguous distinction between modified keys (e.g. distinguishing Shift+Enter from plain Enter, modified arrows, Ctrl+Shift combinations).
+  - Unconditionally enables xterm `modifyOtherKeys` mode 2 via `\x1b[>4;2m` to guarantee modifier reporting across all modern terminal emulators.
+  - Ensures `PopKeyboardEnhancementFlags` and disabling `modifyOtherKeys` (`\x1b[>4;0m`) are executed during teardown and in `TerminalCleanupGuard::drop`, guaranteeing the host terminal's original keyboard state is fully restored even on unexpected exit or error.
 - **Full CSI-u / ANSI Modifier Key Passthrough**:
   - Encodes modified key events using standard Xterm / CSI-u modifier parameter values:
     `modifier_code = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0) + (Super/Meta ? 8 : 0)`.
-  - **Modified Enter**:
+  - **Modified Enter and Newlines**:
     - Unmodified Enter: `\r` (`0x0D`).
-    - Modified Enter (Shift, Alt, Ctrl, Super, etc.): `\x1b[13;<mod>u` (e.g. `Shift+Enter` -> `\x1b[13;2u` for multiline prompt input in `agy`, Charmbracelet, Bubbletea, and modern TUIs; `Ctrl+Enter` -> `\x1b[13;5u`; `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`).
+    - Unmodified Newline (`KeyCode::Char('\n')`): `\n` (`0x0A` / Ctrl+J).
+    - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Shift+Enter` -> `\x1b[13;2u` for multiline prompt input in `agy`, Charmbracelet, Bubbletea, and modern TUIs; `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`).
   - **Modified Tab & BackTab**:
     - Unmodified Tab: `\t` (`0x09`).
     - Shift+Tab / BackTab: `\x1b[Z`.

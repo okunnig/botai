@@ -310,6 +310,12 @@ fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
     let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
     assert_eq!(key_to_bytes(&shift_enter), b"\x1b[13;2u".to_vec());
 
+    let shift_char_lf = KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::SHIFT);
+    assert_eq!(key_to_bytes(&shift_char_lf), b"\x1b[13;2u".to_vec());
+
+    let shift_char_cr = KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::SHIFT);
+    assert_eq!(key_to_bytes(&shift_char_cr), b"\x1b[13;2u".to_vec());
+
     // 2. Ctrl+Enter, Alt+Enter, Ctrl+Shift+Enter
     let ctrl_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL);
     assert_eq!(key_to_bytes(&ctrl_enter), b"\x1b[13;5u".to_vec());
@@ -317,11 +323,24 @@ fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
     let alt_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
     assert_eq!(key_to_bytes(&alt_enter), b"\x1b[13;3u".to_vec());
 
+    let alt_char_lf = KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::ALT);
+    assert_eq!(key_to_bytes(&alt_char_lf), b"\x1b[13;3u".to_vec());
+
+    let alt_char_cr = KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::ALT);
+    assert_eq!(key_to_bytes(&alt_char_cr), b"\x1b[13;3u".to_vec());
+
     let ctrl_shift_enter = KeyEvent::new(
         KeyCode::Enter,
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     );
     assert_eq!(key_to_bytes(&ctrl_shift_enter), b"\x1b[13;6u".to_vec());
+
+    // Plain LF / CR
+    let plain_char_lf = KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::NONE);
+    assert_eq!(key_to_bytes(&plain_char_lf), b"\n".to_vec());
+
+    let plain_char_cr = KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::NONE);
+    assert_eq!(key_to_bytes(&plain_char_cr), b"\r".to_vec());
 
     // 3. Modified arrows and navigation
     let ctrl_up = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
