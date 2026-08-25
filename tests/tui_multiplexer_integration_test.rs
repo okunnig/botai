@@ -312,9 +312,10 @@ fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
 
     // 1. Verify keyboard enhancement flags
     let flags = keyboard_enhancement_flags();
+    assert_eq!(flags, KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES);
     assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
-    assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
-    assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+    assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+    assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
     assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
     assert_eq!(KeyHandler::keyboard_enhancement_flags(), flags);
 

@@ -60,11 +60,13 @@ pub fn host_modify_other_keys_mode() -> Option<ModifyOtherKeysMode> {
     )
 }
 
-/// Returns the IME-safe progressive keyboard enhancement flags.
+/// Returns the keyboard enhancement flags (`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`).
+///
+/// Returning ONLY `DISAMBIGUATE_ESCAPE_CODES` (`\x1b[>1u`) ensures terminals like Alacritty and agy
+/// disambiguate modified keys (e.g. Shift+Enter -> `\x1b[13;2u`) without sending alternate key
+/// codepoints (`REPORT_ALTERNATE_KEYS` -> `\x1b[13:10;2u`) which crossterm strips the Shift modifier from.
 pub fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
     KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 /// High-level actions triggered by user keyboard events or internal TUI timers.
@@ -140,7 +142,7 @@ impl KeyHandler {
         mouse_event_to_sgr_bytes(event)
     }
 
-    /// Returns the IME-safe progressive keyboard enhancement flags.
+    /// Returns the keyboard enhancement flags (`KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES`).
     pub fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
         keyboard_enhancement_flags()
     }
@@ -1524,9 +1526,10 @@ mod tests {
     #[test]
     fn test_keyboard_enhancement_flags() {
         let flags = keyboard_enhancement_flags();
+        assert_eq!(flags, KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES);
         assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
-        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
         assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
     }
 
