@@ -17,8 +17,8 @@ pub use dashboard::{
     DestroyModalState,
 };
 pub use events::{
-    key_to_bytes, map_key_event, mouse_event_to_bytes, mouse_scroll_to_bytes, KeyHandler,
-    TuiAction,
+    mouse_event_to_bytes, mouse_event_to_sgr_bytes, mouse_scroll_to_bytes, parse_raw_events,
+    paste_to_bytes, RawAction, RawLeaderDecoder, TuiAction,
 };
 pub use quick_launcher::{
     render_quick_launcher, LauncherFocus, LauncherTab, QuickLauncherAction, QuickLauncherState,

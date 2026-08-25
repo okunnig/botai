@@ -363,12 +363,9 @@ repos = []
     assert!(!app.is_showing_dashboard());
 
     // 3. Send leader Ctrl+Space then Detach ('d')
-    let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
-    app.handle_key_event(ctrl_space);
+    app.handle_raw_bytes(&[0x00]);
     assert!(app.leader_active);
-
-    let d_key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
-    app.handle_key_event(d_key);
+    app.handle_raw_bytes(b"d");
 
     // Should return to dashboard without quitting, keeping session running
     assert!(!app.leader_active);
@@ -423,10 +420,8 @@ repos = []
     assert_eq!(app.registry.len(), 1);
 
     // 2. Detach back to dashboard
-    let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
-    app.handle_key_event(ctrl_space);
-    let d_key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
-    app.handle_key_event(d_key);
+    app.handle_raw_bytes(&[0x00]);
+    app.handle_raw_bytes(b"d");
 
     assert!(app.is_showing_dashboard());
 

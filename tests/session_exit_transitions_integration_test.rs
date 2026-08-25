@@ -9,7 +9,6 @@ use botai::tui::dashboard::DashboardState;
 use botai::tui::ui::compute_layout;
 use botai::tui::ui::TerminalView;
 use botai::tui::TuiApp;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -153,8 +152,7 @@ fn test_integration_session_exit_error_retention_and_banner_dismissal() {
     assert!(text.contains("[Process exited with code 1 - Press Enter or Ctrl+Space w to dismiss]"));
 
     // Dismiss with Enter
-    let enter_key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-    app.handle_key_event(enter_key);
+    app.handle_raw_bytes(b"\r");
 
     assert_eq!(app.registry.len(), 0);
     assert!(app.should_quit);

@@ -12,9 +12,7 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-fn ctrl_space_key() -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)
-}
+
 
 #[test]
 fn test_integration_in_session_quick_launcher_lifecycle() {
@@ -65,9 +63,9 @@ repos = []
     assert!(app.quick_launcher.is_none());
 
     // 2. Open quick launcher via Ctrl+Space then 'c'
-    app.handle_key_event(ctrl_space_key());
+    app.handle_raw_bytes(&[0x00]);
     assert!(app.leader_active);
-    app.handle_key_event(key(KeyCode::Char('c')));
+    app.handle_raw_bytes(b"c");
     assert!(!app.leader_active);
     assert!(app.quick_launcher.is_some());
 
@@ -175,9 +173,9 @@ repos = []
 
 
     // 10. Open launcher again via Ctrl+Space then 'C' from inside the active session
-    app.handle_key_event(ctrl_space_key());
+    app.handle_raw_bytes(&[0x00]);
     assert!(app.leader_active);
-    app.handle_key_event(make_key(KeyCode::Char('C'), KeyModifiers::SHIFT));
+    app.handle_raw_bytes(b"C");
     assert!(!app.leader_active);
     assert!(app.quick_launcher.is_some());
     // Active template should default to "payments" (the active session's template)
@@ -218,8 +216,8 @@ repos = []
     assert_eq!(app.registry.active_index(), Some(1));
 
     // 13. Open launcher and attach "stripe-webhooks" (which is already active as session 0)
-    app.handle_key_event(ctrl_space_key());
-    app.handle_key_event(key(KeyCode::Char('c')));
+    app.handle_raw_bytes(&[0x00]);
+    app.handle_raw_bytes(b"c");
     let mut launcher = app.quick_launcher.take().unwrap();
     launcher.switch_tab(LauncherTab::Attach);
     // Find index of stripe-webhooks in local_projects
@@ -243,8 +241,8 @@ repos = []
     );
 
     // 14. Open launcher and test Dismiss / Cancel via Esc
-    app.handle_key_event(ctrl_space_key());
-    app.handle_key_event(key(KeyCode::Char('c')));
+    app.handle_raw_bytes(&[0x00]);
+    app.handle_raw_bytes(b"c");
     assert!(app.quick_launcher.is_some());
     app.handle_launcher_key(key(KeyCode::Esc));
     assert!(app.quick_launcher.is_none());
