@@ -131,8 +131,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Optional custom markdown instructions configured per template in `config.toml` via `agents_md_append`.
   - When configured and non-empty after trimming, automatically appended to `AGENTS.md` under a dedicated `## Template Instructions` section.
 - **Initial Task / Prompt Seeding**:
-  - `botai start <template> <project-name> --prompt "..."` (or `-m "..."`):
-  - Injects or passes an initial task description directly to the AI agent on launch.
+  - `botai create <template> <project-name> --attach --prompt "..."` (or `-a -p "..."`):
+  - Injects or passes an initial task description directly to the AI agent on launch (requires `--attach` / `-a`).
 
 ---
 
@@ -216,12 +216,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Multi-Session Scenario (Normal Exit)**: When an agent process exits cleanly (exit code 0) and other session tabs remain active, the finished tab is automatically closed and focus transitions immediately to the adjacent active session tab.
   - **Last / Only Session Scenario (Context-Aware Exit)**:
     - If `botai` was launched from the dashboard, terminating the last session automatically transitions back to the interactive project dashboard (with refreshed project directories).
-    - If `botai` was launched directly via CLI (`botai start` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
+    - If `botai` was launched directly via CLI (`botai create --attach` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
   - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
 - **Session Detachment & Background Persistence**:
   - Detaching from an active session (`Ctrl + Space` then `d`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
-    - When launched directly from CLI (`botai start` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
+    - When launched directly from CLI (`botai create --attach` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
 - **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, template, key hints, and a visible `[LEADER]` mode indicator when active.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
@@ -238,10 +238,26 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 7. CLI Commands & Lifecycle Operations
 - **Default (No Arguments)**: Launching `botai` without arguments opens the interactive TUI project switcher / dashboard.
-- **`botai start <template> <project-name> [--agent <agent>] [--prompt <prompt>]`**:
-  - Uses the unified `ProjectBuilder` pipeline to validate preconditions, clone missing repositories to `repos_dir`, fetch upstreams, create worktrees, synthesize `AGENTS.md`, and spawn the agent PTY process.
-  - Streams real-time step progress (`[1/4]...`, `[2/4]...`) and diagnostic logs to stdout in the host shell.
-  - Once initialized, switches terminal to raw mode and launches the interactive TUI multiplexer focused on the newly created project session.
+- **`botai create <template> <project> [--agent <agent> / -A <agent>] [--prompt <prompt> / -p <prompt>] [--attach / -a]`**:
+  - Creates a new multi-repo workspace project under `CWD/<project>` from the specified template.
+  - **Arguments & Flags**:
+    - `template`: (Positional required String) Name of the project template defined in `config.toml`.
+    - `project`: (Positional required String) Name of the project directory and git branch to create.
+    - `--agent` / `-A`: (Optional String) Override the AI agent CLI tool (e.g. `claude`, `agy`, `copilot`, `aider`).
+    - `--prompt` / `-p`: (Optional String) Initial task description or prompt to pass to the agent (requires `--attach` / `-a`).
+    - `--attach` / `-a`: (Flag) Launch interactive TUI multiplexer immediately after project creation.
+  - **Non-Attached Mode (Default, without `--attach`)**:
+    - Executes workspace initialization steps 1-4 via `ProjectBuilder::create_workspace`.
+    - Validates inputs, auto-clones missing repositories to `repos_dir`, fetches upstream branches, provisions git worktrees on branch `<project>`, and synthesizes `AGENTS.md`.
+    - Does NOT spawn any agent PTY process or enter raw terminal mode.
+    - Streams progress logs to stdout in the host shell and outputs:
+      `✓ Project '<project>' created successfully at <path>!`
+      `Hint: Run 'botai attach <project>' to launch the agent session or run 'botai' to open the interactive dashboard.`
+    - Exits cleanly with code 0 (or non-zero on error with atomic rollback).
+  - **Attached Mode (with `--attach` / `-a`)**:
+    - Executes workspace initialization steps 1-4.
+    - Spawns the AI agent CLI inside a pseudo-terminal (`PtySession`) in step 5.
+    - Switches host terminal to raw mode and launches the interactive TUI multiplexer attached directly to the newly created project session.
 - **`botai sync [template]`**:
   - Pre-clones missing repositories and updates existing cached repositories across all or a specific template.
   - Clones missing repositories to `repos_dir` if needed.
@@ -264,13 +280,16 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 8. Unified Project Creation Engine & Interactive TUI Creation Modal
 - **Unified Backend Engine (`ProjectBuilder`)**:
-  - Single, centralized project initialization pipeline in `src/project/` used across CLI `botai start`, the TUI Dashboard, and In-Session Quick Launcher.
+  - Single, centralized project initialization pipeline in `src/project/` used across CLI `botai create` (both non-attached and attached modes), the TUI Dashboard, and In-Session Quick Launcher.
   - **Sequential Pipeline Steps**:
     1. **Pre-Validation**: Live checking of directory non-existence and git branch availability across all constituent template repositories.
     2. **Repository Resolution & Cloning**: Clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch for existing repos.
     3. **Worktree Checkout**: Creates a git worktree for each repository checked out to branch `<project_name>` at `<project_dir>/<repo_name>`.
     4. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md`.
     5. **PTY Process Spawning**: Spawns the agent CLI process inside a master/slave pseudo-terminal attached to a virtual terminal screen buffer.
+  - **Modular Execution**:
+    - `ProjectBuilder::create_workspace`: Executes steps 1-4 without spawning PTY, returning the canonical project path and repository mappings.
+    - `ProjectBuilder::build`: Executes steps 1-4 via `create_workspace` and proceeds with step 5 PTY spawning for attached session workflows.
   - **Event & Progress Streaming**: Emits structured `ProjectSetupEvent` (Steps, Logs, Success, Error) consumed by CLI stdout or the TUI setup modal.
   - **Atomic Rollback**: On any initialization error (e.g. branch collision, clone failure, process crash), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory.
 - **Unified Interactive Project Creation Modal (Two-Step Flow)**:

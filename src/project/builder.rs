@@ -279,20 +279,20 @@ impl ProjectBuilder {
         validation
     }
 
-    /// Executes the full end-to-end project creation pipeline:
+    /// Executes workspace initialization steps 1-4 without spawning an AI agent PTY session:
     /// 1. Pre-validation & repo resolution
     /// 2. Auto-cloning missing repositories & upstream fetching
     /// 3. Project directory creation & git worktree checkout
     /// 4. `AGENTS.md` context synthesis
-    /// 5. PTY process spawning & virtual screen initialization
     ///
-    /// On any error during steps 1-5, triggers atomic rollback by removing any created
-    /// worktrees with `remove_worktree_auto` and deleting the project directory.
-    pub fn build<F>(&self, progress_sink: F) -> anyhow::Result<(ProjectSession, PtySession, VtScreen)>
+    /// Returns the canonical project root directory and repository mappings.
+    /// On any error, triggers atomic rollback by removing any created worktrees
+    /// with `remove_worktree_auto` and deleting the project directory.
+    pub fn create_workspace<F>(&self, progress_sink: F) -> anyhow::Result<(PathBuf, Vec<RepoMapping>)>
     where
-        F: Fn(ProjectSetupEvent) + Send + Sync + 'static,
+        F: Fn(ProjectSetupEvent),
     {
-        let res = (|| -> anyhow::Result<(ProjectSession, PtySession, VtScreen)> {
+        let res = (|| -> anyhow::Result<(PathBuf, Vec<RepoMapping>)> {
             // Step 1: Pre-validation & resolving repositories
             progress_sink(ProjectSetupEvent::Step {
                 current: 1,
@@ -311,8 +311,6 @@ impl ProjectBuilder {
                 .get_template(&self.template_name)
                 .ok_or_else(|| ProjectError::TemplateNotFound(self.template_name.clone()))?;
 
-            let agent_name = self.resolved_agent_name();
-            let (agent_cmd, agent_args, agent_env) = self.resolve_agent_command();
             let resolved_repos: Vec<ResolvedRepo> = self
                 .config
                 .resolve_template_repos(&self.template_name)?;
@@ -414,51 +412,11 @@ impl ProjectBuilder {
                 anyhow::bail!("Failed to generate AGENTS.md: {err}");
             }
 
-            // Step 5: Spawning agent CLI in pseudo-terminal
-            let (cols, rows) = self.viewport_size;
-            progress_sink(ProjectSetupEvent::Log(format!(
-                "Spawning AI agent CLI '{agent_cmd}' in pseudo-terminal ({cols}x{rows})..."
-            )));
-
-            let mut pty_config = PtyConfig::new(&agent_cmd, &project_dir_canon)
-                .with_args(agent_args)
-                .with_dimensions(cols, rows);
-
-            for (k, v) in &agent_env {
-                pty_config = pty_config.with_env(k, v);
-            }
-            for (k, v) in &tpl.env {
-                pty_config = pty_config.with_env(k, v);
-            }
-
-            let pty = match PtySession::spawn(pty_config) {
-                Ok(p) => p,
-                Err(err) => {
-                    for mapping in &created_mappings {
-                        let _ = remove_worktree_auto(&mapping.worktree_path, true);
-                    }
-                    let _ = fs::remove_dir_all(&project_dir);
-                    anyhow::bail!("Failed to spawn agent process '{agent_cmd}': {err}");
-                }
-            };
-
-            let vt = VtScreen::new(cols, rows);
-            let mut ps = ProjectSession::new(trimmed_project_name, &self.template_name, &agent_name);
-            if let Some(ref p) = self.prompt {
-                ps = ps.with_prompt(p);
-            }
-
-            Ok((ps, pty, vt))
+            Ok((project_dir_canon, created_mappings))
         })();
 
         match res {
-            Ok((ps, pty, vt)) => {
-                progress_sink(ProjectSetupEvent::Log(
-                    "✓ Project setup completed successfully!".to_string(),
-                ));
-                progress_sink(ProjectSetupEvent::Success);
-                Ok((ps, pty, vt))
-            }
+            Ok(val) => Ok(val),
             Err(err) => {
                 let err_msg = err.to_string();
                 progress_sink(ProjectSetupEvent::Log(format!("✗ Error: {err_msg}")));
@@ -466,6 +424,75 @@ impl ProjectBuilder {
                 Err(err)
             }
         }
+    }
+
+    /// Executes the full end-to-end project creation pipeline:
+    /// 1. Pre-validation & repo resolution
+    /// 2. Auto-cloning missing repositories & upstream fetching
+    /// 3. Project directory creation & git worktree checkout
+    /// 4. `AGENTS.md` context synthesis
+    /// 5. PTY process spawning & virtual screen initialization
+    ///
+    /// On any error during steps 1-5, triggers atomic rollback by removing any created
+    /// worktrees with `remove_worktree_auto` and deleting the project directory.
+    pub fn build<F>(&self, progress_sink: F) -> anyhow::Result<(ProjectSession, PtySession, VtScreen)>
+    where
+        F: Fn(ProjectSetupEvent) + Send + Sync + 'static,
+    {
+        let (project_dir_canon, created_mappings) = self.create_workspace(&progress_sink)?;
+
+        let tpl = self
+            .config
+            .get_template(&self.template_name)
+            .ok_or_else(|| ProjectError::TemplateNotFound(self.template_name.clone()))?;
+
+        let agent_name = self.resolved_agent_name();
+        let (agent_cmd, agent_args, agent_env) = self.resolve_agent_command();
+
+        // Step 5: Spawning agent CLI in pseudo-terminal
+        let (cols, rows) = self.viewport_size;
+        progress_sink(ProjectSetupEvent::Log(format!(
+            "Spawning AI agent CLI '{agent_cmd}' in pseudo-terminal ({cols}x{rows})..."
+        )));
+
+        let mut pty_config = PtyConfig::new(&agent_cmd, &project_dir_canon)
+            .with_args(agent_args)
+            .with_dimensions(cols, rows);
+
+        for (k, v) in &agent_env {
+            pty_config = pty_config.with_env(k, v);
+        }
+        for (k, v) in &tpl.env {
+            pty_config = pty_config.with_env(k, v);
+        }
+
+        let pty = match PtySession::spawn(pty_config) {
+            Ok(p) => p,
+            Err(err) => {
+                for mapping in &created_mappings {
+                    let _ = remove_worktree_auto(&mapping.worktree_path, true);
+                }
+                let _ = fs::remove_dir_all(&project_dir_canon);
+                let err_msg = format!("Failed to spawn agent process '{agent_cmd}': {err}");
+                progress_sink(ProjectSetupEvent::Log(format!("✗ Error: {err_msg}")));
+                progress_sink(ProjectSetupEvent::Error(err_msg.clone()));
+                anyhow::bail!("{err_msg}");
+            }
+        };
+
+        let vt = VtScreen::new(cols, rows);
+        let trimmed_project_name = self.project_name.trim();
+        let mut ps = ProjectSession::new(trimmed_project_name, &self.template_name, &agent_name);
+        if let Some(ref p) = self.prompt {
+            ps = ps.with_prompt(p);
+        }
+
+        progress_sink(ProjectSetupEvent::Log(
+            "✓ Project setup completed successfully!".to_string(),
+        ));
+        progress_sink(ProjectSetupEvent::Success);
+
+        Ok((ps, pty, vt))
     }
 }
 
@@ -568,6 +595,100 @@ mod tests {
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
         assert!(val.primary_message().unwrap().contains("already exists in repository"));
+    }
+
+    #[test]
+    fn test_project_builder_create_workspace_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("backend");
+        create_mock_git_repo(&repo_dir);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.web_app]
+            description = "Web App Services"
+            repos = ["{}"]
+            "#,
+            temp_dir.path().display(),
+            repo_dir.display()
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder = ProjectBuilder::new(config, "web_app", "checkout-feat")
+            .with_cwd(&project_cwd)
+            .with_prompt("Build payment integration");
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = builder.create_workspace(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        assert!(res.is_ok(), "create_workspace should succeed: {:?}", res.err());
+        let (project_dir_canon, mappings) = res.unwrap();
+        let expected_project_dir = project_cwd.join("checkout-feat").canonicalize().unwrap();
+        assert_eq!(project_dir_canon, expected_project_dir);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].name, "backend");
+        assert_eq!(mappings[0].worktree_path, expected_project_dir.join("backend"));
+
+        assert!(expected_project_dir.exists());
+        assert!(expected_project_dir.join("AGENTS.md").exists());
+        assert!(expected_project_dir.join("backend").exists());
+        assert!(expected_project_dir.join("backend").join("README.md").exists());
+
+        let ev_list = events.lock().unwrap();
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Step { current: 1, .. })));
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Step { current: 4, .. })));
+    }
+
+    #[test]
+    fn test_project_builder_create_workspace_rollback_on_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("failing_repo");
+        create_mock_git_repo(&repo_dir);
+
+        // Pre-create branch so create_worktree fails
+        let _ = std::process::Command::new("git")
+            .args(["branch", "clashing_project"])
+            .current_dir(&repo_dir)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.failing_tpl]
+            repos = ["{}"]
+            "#,
+            temp_dir.path().display(),
+            repo_dir.display()
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder = ProjectBuilder::new(config, "failing_tpl", "clashing_project")
+            .with_cwd(&project_cwd);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = builder.create_workspace(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        assert!(res.is_err());
+        let project_dir = project_cwd.join("clashing_project");
+        assert!(!project_dir.exists(), "project_dir must be cleaned up on rollback");
+
+        let ev_list = events.lock().unwrap();
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Error(_))));
     }
 
     #[test]

@@ -17,8 +17,8 @@ pub struct Cli {
 /// Available subcommands for botai.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Commands {
-    /// Start a new project with git worktrees and launch an AI agent CLI.
-    Start {
+    /// Create a new multi-repo workspace project and optionally launch an AI agent session.
+    Create {
         /// Name of the project template defined in config.toml.
         template: String,
 
@@ -26,12 +26,16 @@ pub enum Commands {
         project: String,
 
         /// Override the AI agent CLI tool (e.g. claude, agy, copilot).
-        #[arg(short, long)]
+        #[arg(short = 'A', long)]
         agent: Option<String>,
 
-        /// Initial task description or prompt to pass to the agent.
-        #[arg(short, long)]
+        /// Initial task description or prompt to pass to the agent (requires --attach).
+        #[arg(short, long, requires = "attach")]
         prompt: Option<String>,
+
+        /// Launch interactive TUI multiplexer immediately after project creation.
+        #[arg(short, long)]
+        attach: bool,
     },
 
     /// Synchronize template repositories by cloning missing repos and fetching latest updates.
@@ -98,33 +102,147 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_start_subcommand() {
-        let cli = Cli::try_parse_from([
-            "botai",
-            "start",
-            "ecommerce",
-            "feature-cart",
-            "--agent",
-            "agy",
-            "--prompt",
-            "Implement cart discount logic",
-        ])
-        .expect("Failed to parse start");
+    fn test_cli_create_subcommand_defaults() {
+        let cli = Cli::try_parse_from(["botai", "create", "ecommerce", "feature-cart"])
+            .expect("Failed to parse create with defaults");
 
         match cli.command {
-            Some(Commands::Start {
+            Some(Commands::Create {
                 template,
                 project,
                 agent,
                 prompt,
+                attach,
+            }) => {
+                assert_eq!(template, "ecommerce");
+                assert_eq!(project, "feature-cart");
+                assert_eq!(agent, None);
+                assert_eq!(prompt, None);
+                assert!(!attach);
+            }
+            _ => panic!("Expected Create command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_create_subcommand_with_attach_long_and_short() {
+        let cli_long = Cli::try_parse_from(["botai", "create", "ecommerce", "feature-cart", "--attach"])
+            .expect("Failed to parse create with --attach");
+        match cli_long.command {
+            Some(Commands::Create { attach, .. }) => assert!(attach),
+            _ => panic!("Expected Create command"),
+        }
+
+        let cli_short = Cli::try_parse_from(["botai", "create", "ecommerce", "feature-cart", "-a"])
+            .expect("Failed to parse create with -a");
+        match cli_short.command {
+            Some(Commands::Create { attach, .. }) => assert!(attach),
+            _ => panic!("Expected Create command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_create_subcommand_with_agent_flags() {
+        let cli_long = Cli::try_parse_from([
+            "botai", "create", "ecommerce", "feature-cart", "--agent", "agy",
+        ])
+        .expect("Failed to parse create with --agent");
+        match cli_long.command {
+            Some(Commands::Create { agent, .. }) => {
+                assert_eq!(agent, Some("agy".to_string()));
+            }
+            _ => panic!("Expected Create command"),
+        }
+
+        let cli_short = Cli::try_parse_from([
+            "botai", "create", "ecommerce", "feature-cart", "-A", "claude",
+        ])
+        .expect("Failed to parse create with -A");
+        match cli_short.command {
+            Some(Commands::Create { agent, .. }) => {
+                assert_eq!(agent, Some("claude".to_string()));
+            }
+            _ => panic!("Expected Create command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_create_subcommand_with_prompt_requires_attach() {
+        let cli_full = Cli::try_parse_from([
+            "botai",
+            "create",
+            "ecommerce",
+            "feature-cart",
+            "--agent",
+            "agy",
+            "--attach",
+            "--prompt",
+            "Implement cart discount logic",
+        ])
+        .expect("Failed to parse create with prompt and attach");
+
+        match cli_full.command {
+            Some(Commands::Create {
+                template,
+                project,
+                agent,
+                prompt,
+                attach,
             }) => {
                 assert_eq!(template, "ecommerce");
                 assert_eq!(project, "feature-cart");
                 assert_eq!(agent, Some("agy".to_string()));
                 assert_eq!(prompt, Some("Implement cart discount logic".to_string()));
+                assert!(attach);
             }
-            _ => panic!("Expected Start command"),
+            _ => panic!("Expected Create command"),
         }
+
+        let cli_short = Cli::try_parse_from([
+            "botai",
+            "create",
+            "ecommerce",
+            "feature-cart",
+            "-a",
+            "-p",
+            "Quick task",
+        ])
+        .expect("Failed to parse create with short prompt and attach flags");
+
+        match cli_short.command {
+            Some(Commands::Create { prompt, attach, .. }) => {
+                assert_eq!(prompt, Some("Quick task".to_string()));
+                assert!(attach);
+            }
+            _ => panic!("Expected Create command"),
+        }
+
+        // Fails when --prompt is specified without --attach
+        let err_long = Cli::try_parse_from([
+            "botai",
+            "create",
+            "ecommerce",
+            "feature-cart",
+            "--prompt",
+            "Missing attach flag",
+        ]);
+        assert!(err_long.is_err(), "--prompt without --attach must fail validation");
+
+        let err_short = Cli::try_parse_from([
+            "botai",
+            "create",
+            "ecommerce",
+            "feature-cart",
+            "-p",
+            "Missing attach flag",
+        ]);
+        assert!(err_short.is_err(), "-p without -a/--attach must fail validation");
+    }
+
+    #[test]
+    fn test_cli_start_subcommand_is_completely_removed() {
+        let err = Cli::try_parse_from(["botai", "start", "ecommerce", "feature-cart"]);
+        assert!(err.is_err(), "botai start must not be recognized as a valid subcommand");
     }
 
     #[test]

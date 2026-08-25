@@ -36,17 +36,19 @@ fn main() -> Result<()> {
     match cli.command {
         None => run_default_dashboard(&config),
         Some(Commands::Init { .. }) => unreachable!(),
-        Some(Commands::Start {
+        Some(Commands::Create {
             template,
             project,
             agent,
             prompt,
-        }) => cmd_start(
+            attach,
+        }) => cmd_create(
             &config,
             &template,
             &project,
             agent.as_deref(),
             prompt.as_deref(),
+            attach,
         ),
         Some(Commands::Sync { template }) => cmd_sync(&config, template.as_deref()),
         Some(Commands::Attach { project }) => cmd_attach(&config, &project),
@@ -147,13 +149,14 @@ fn run_default_dashboard(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// `botai start <template> <project> [--agent <agent>] [--prompt <prompt>]`
-fn cmd_start(
+/// `botai create <template> <project> [--agent <agent>] [--prompt <prompt>] [--attach]`
+fn cmd_create(
     config: &Config,
     template_name: &str,
     project_name: &str,
     agent_override: Option<&str>,
     prompt: Option<&str>,
+    attach: bool,
 ) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current working directory")?;
     let (term_cols, term_rows) = crossterm::terminal::size()
@@ -169,6 +172,31 @@ fn cmd_start(
     }
     if let Some(p) = prompt {
         builder = builder.with_prompt(p);
+    }
+
+    if !attach {
+        let progress_sink = |event: ProjectSetupEvent| match event {
+            ProjectSetupEvent::Log(msg) => {
+                println!("{msg}");
+            }
+            ProjectSetupEvent::Error(err) => {
+                eprintln!("✗ Error: {err}");
+            }
+            _ => {}
+        };
+
+        let (project_dir, _) = builder
+            .create_workspace(progress_sink)
+            .with_context(|| format!("Failed to create project '{project_name}'"))?;
+
+        println!(
+            "✓ Project '{project_name}' created successfully at {}!",
+            project_dir.display()
+        );
+        println!(
+            "Hint: Run 'botai attach {project_name}' to launch the agent session or run 'botai' to open the interactive dashboard."
+        );
+        return Ok(());
     }
 
     // Stream step and log progress directly to stdout

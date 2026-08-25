@@ -51,7 +51,7 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
 - 🎨 **Multiple Built-in Color Themes**  
   Ship with carefully crafted palettes: **Tokyo Night** (default), **Catppuccin Mocha**, **Cyberpunk**, **Gruvbox Dark**, **Monochrome / Slate**, and standard **ANSI 16-color**.
 - 🚀 **Interactive TUI Dashboard & CLI Suite**  
-  Launch `botai` without arguments for a full-screen interactive project switcher and creation wizard, or use fast, scriptable CLI commands (`botai start`, `botai sync`, `botai list`, `botai attach`, `botai destroy`).
+  Launch `botai` without arguments for a full-screen interactive project switcher and creation wizard, or use fast, scriptable CLI commands (`botai create`, `botai sync`, `botai list`, `botai attach`, `botai destroy`).
 
 ---
 
@@ -143,11 +143,14 @@ From the dashboard you can:
 ### 2. Command-Line Interface (CLI)
 
 ```bash
-# Start a new multi-repo project from a template and launch agent
-botai start ecommerce feat-checkout --prompt "Implement payment webhook listener"
+# Create a new multi-repo workspace from a template (without launching agent)
+botai create ecommerce feat-checkout
 
-# Start with a specific AI agent tool override
-botai start backend-services api-v2 --agent agy
+# Create and immediately attach to the interactive agent session
+botai create ecommerce feat-checkout --attach --prompt "Implement payment webhook listener"
+
+# Create with short flags and a specific AI agent tool override
+botai create backend-services api-v2 -a -A agy -p "Refactor auth middleware"
 
 # Sync and pre-clone all remote repositories defined in a template
 botai sync ecommerce

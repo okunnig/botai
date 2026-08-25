@@ -984,11 +984,9 @@ impl TuiApp {
         if let Some(active) = self.registry.active_session_mut() {
             if active.vt().is_mouse_mode_enabled() {
                 let bytes = crate::tui::events::mouse_event_to_sgr_bytes(&mouse);
-                if !bytes.is_empty() {
-                    if active.pty_mut().write_all(&bytes).is_ok() {
-                        let new_status = self.tracker.record_activity();
-                        active.project_session.set_status(new_status);
-                    }
+                if !bytes.is_empty() && active.pty_mut().write_all(&bytes).is_ok() {
+                    let new_status = self.tracker.record_activity();
+                    active.project_session.set_status(new_status);
                 }
             } else {
                 match mouse.kind {

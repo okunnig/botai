@@ -520,10 +520,10 @@ pub fn mouse_event_to_sgr_bytes(event: &MouseEvent) -> Vec<u8> {
     }
 
     let (btn_code, release) = match event.kind {
-        MouseEventKind::Down(crossterm::event::MouseButton::Left) => (0 + modifier_flag, false),
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => (modifier_flag, false),
         MouseEventKind::Down(crossterm::event::MouseButton::Middle) => (1 + modifier_flag, false),
         MouseEventKind::Down(crossterm::event::MouseButton::Right) => (2 + modifier_flag, false),
-        MouseEventKind::Up(crossterm::event::MouseButton::Left) => (0 + modifier_flag, true),
+        MouseEventKind::Up(crossterm::event::MouseButton::Left) => (modifier_flag, true),
         MouseEventKind::Up(crossterm::event::MouseButton::Middle) => (1 + modifier_flag, true),
         MouseEventKind::Up(crossterm::event::MouseButton::Right) => (2 + modifier_flag, true),
         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => (32 + modifier_flag, false),
