@@ -404,8 +404,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 ## 13. CI/CD Automation & PR Quality Validation Gates
 - **Continuous Integration Pipeline (`.github/workflows/ci.yml`)**:
   - **Triggers**:
-    - Pull Requests targeting the `main` branch.
-    - Push events to the `main` branch.
+    - Exclusively runs on Pull Requests targeting the `main` branch.
   - **Concurrency Control**: Automatically cancels in-progress workflow runs for the same branch or PR ref (`cancel-in-progress: true`), preventing redundant build queue congestion.
   - **Security & Least Privilege**: Top-level permissions explicitly constrained to `contents: read`.
 - **Parallel Quality Gates (Running on `ubuntu-latest`)**:
