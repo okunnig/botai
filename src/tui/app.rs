@@ -31,12 +31,8 @@ use crate::tui::events::{
     host_modify_other_keys_mode, keyboard_enhancement_flags, map_key_event, ModifyOtherKeysMode,
     TuiAction,
 };
-use crate::tui::quick_launcher::{
-    render_quick_launcher, QuickLauncherAction, QuickLauncherState,
-};
-use crate::tui::setup_modal::{
-    render_setup_modal, SetupModalState, SetupProgressEvent,
-};
+use crate::tui::quick_launcher::{render_quick_launcher, QuickLauncherAction, QuickLauncherState};
+use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
 use crate::tui::status_bar::StatusBar;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{compute_layout, TerminalView};
@@ -57,7 +53,6 @@ pub struct TuiApp {
     pub leader_active: bool,
     pub showing_dashboard: bool,
 }
-
 
 struct TerminalCleanupGuard;
 
@@ -84,9 +79,8 @@ pub fn render_error_banner(exit_code: Option<u32>, area: Rect, buf: &mut Buffer,
     let code_str = exit_code
         .map(|c| c.to_string())
         .unwrap_or_else(|| "1".to_string());
-    let msg = format!(
-        " [Process exited with code {code_str} - Press Enter or Ctrl+Space w to dismiss] "
-    );
+    let msg =
+        format!(" [Process exited with code {code_str} - Press Enter or Ctrl+Space w to dismiss] ");
     let banner_y = area.bottom().saturating_sub(1);
     let style = Style::default()
         .bg(theme.error_banner_bg)
@@ -147,7 +141,6 @@ impl TuiApp {
         self
     }
 
-
     /// Sets the configuration on `TuiApp`.
     pub fn with_config(mut self, config: Config) -> Self {
         self.config = Some(config);
@@ -207,7 +200,9 @@ impl TuiApp {
             terminal.backend_mut(),
             crossterm::event::PopKeyboardEnhancementFlags
         );
-        let _ = terminal.backend_mut().write_all(ModifyOtherKeysMode::reset_sequence());
+        let _ = terminal
+            .backend_mut()
+            .write_all(ModifyOtherKeysMode::reset_sequence());
         let _ = terminal.backend_mut().flush();
         disable_raw_mode()?;
         execute!(
@@ -384,7 +379,6 @@ impl TuiApp {
                     }
                 }
             }
-
 
             if last_tick.elapsed() >= self.tick_rate {
                 last_tick = Instant::now();
@@ -660,12 +654,7 @@ impl TuiApp {
         prompt: Option<&str>,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let modal = SetupModalState::new(
-            project_name,
-            template_name,
-            prompt.map(String::from),
-            rx,
-        );
+        let modal = SetupModalState::new(project_name, template_name, prompt.map(String::from), rx);
         self.setup_modal = Some(modal);
 
         if self.registry.get_by_project(project_name).is_some() {
@@ -702,7 +691,6 @@ impl TuiApp {
         });
     }
 
-
     /// Attaches to an existing project directory and adds its session to the registry.
     pub fn attach_project(&mut self, project_name: &str) -> anyhow::Result<()> {
         if let Some(pos) = self
@@ -728,7 +716,8 @@ impl TuiApp {
         let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
 
         let default_config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                .ok();
         let config = self.config.as_ref().or(default_config.as_ref());
 
         let agent_name = config.map(|c| c.default_agent.as_str()).unwrap_or("claude");
@@ -841,15 +830,16 @@ impl TuiApp {
             let new_dashboard = if let Some(cfg) = &self.config {
                 DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
             } else {
-                let default_cfg =
-                    Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                        .unwrap_or_else(|_| Config {
-                            default_agent: "claude".to_string(),
-                            theme: "tokyo-night".to_string(),
-                            repos_dir: PathBuf::from(".botai_repos"),
-                            agents: HashMap::new(),
-                            templates: HashMap::new(),
-                        });
+                let default_cfg = Config::load_from_str(
+                    "default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n",
+                )
+                .unwrap_or_else(|_| Config {
+                    default_agent: "claude".to_string(),
+                    theme: "tokyo-night".to_string(),
+                    repos_dir: PathBuf::from(".botai_repos"),
+                    agents: HashMap::new(),
+                    templates: HashMap::new(),
+                });
                 DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
             };
             self.dashboard = Some(new_dashboard);
@@ -868,7 +858,8 @@ impl TuiApp {
         if is_active_errored && !self.leader_active {
             let is_dismiss_key = match key.code {
                 crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
-                    !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                    !key.modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
                         && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
                 }
                 _ => false,
@@ -1096,9 +1087,7 @@ repos = []
 "#;
         let config = Config::load_from_str(config_toml).unwrap();
         let registry = SessionRegistry::new();
-        let mut app = TuiApp::new(registry)
-            .with_config(config)
-            .with_cwd(cwd);
+        let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
 
         assert!(app.quick_launcher.is_none());
 
@@ -1211,13 +1200,12 @@ repos = []
 
         app.handle_launcher_key(enter_key);
         assert!(app.quick_launcher.is_none());
-        assert!(app.setup_modal.is_some(), "Setup modal must be open on error");
         assert!(
-            app.setup_modal
-                .as_ref()
-                .unwrap()
-                .error
-                .is_some(),
+            app.setup_modal.is_some(),
+            "Setup modal must be open on error"
+        );
+        assert!(
+            app.setup_modal.as_ref().unwrap().error.is_some(),
             "Error message must be set in setup_modal on collision"
         );
     }
@@ -1314,13 +1302,17 @@ repos = []
         let (cmd, args) = ("sh", vec!["-c", "true"]);
 
         let mut registry = SessionRegistry::new();
-        let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone()).with_dimensions(80, 24);
+        let config1 = PtyConfig::new(cmd, tmp.path())
+            .with_args(args.clone())
+            .with_dimensions(80, 24);
         let pty1 = PtySession::spawn(config1).unwrap();
         let vt1 = VtScreen::new(80, 24);
         let ps1 = ProjectSession::new("proj1", "ws1", "mock");
         registry.add(ps1, pty1, vt1).unwrap();
 
-        let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args).with_dimensions(80, 24);
+        let config2 = PtyConfig::new(cmd, tmp.path())
+            .with_args(args)
+            .with_dimensions(80, 24);
         let pty2 = PtySession::spawn(config2).unwrap();
         let vt2 = VtScreen::new(80, 24);
         let ps2 = ProjectSession::new("proj2", "ws1", "mock");
@@ -1367,7 +1359,8 @@ repos = []
         // Set custom viewport size
         app.viewport_size = Some((115, 38));
 
-        app.create_and_start_project("backend", "resized-project", None).unwrap();
+        app.create_and_start_project("backend", "resized-project", None)
+            .unwrap();
         let active = app.registry.active_session().unwrap();
         assert_eq!(active.vt().size(), (115, 38));
 
@@ -1392,7 +1385,8 @@ repos = []
             .map(|x| buf.cell((x, 23)).unwrap().symbol())
             .collect::<String>();
 
-        assert!(bottom_row_text.contains("[Process exited with code 127 - Press Enter or Ctrl+Space w to dismiss]"));
+        assert!(bottom_row_text
+            .contains("[Process exited with code 127 - Press Enter or Ctrl+Space w to dismiss]"));
 
         let cell = buf.cell((0, 23)).unwrap();
         assert_eq!(cell.bg, theme.error_banner_bg);
@@ -1411,7 +1405,8 @@ repos = []
             .map(|x| buf.cell((x, 23)).unwrap().symbol())
             .collect::<String>();
 
-        assert!(bottom_row_text.contains("[Process exited with code 2 - Press Enter or Ctrl+Space w to dismiss]"));
+        assert!(bottom_row_text
+            .contains("[Process exited with code 2 - Press Enter or Ctrl+Space w to dismiss]"));
 
         let cell = buf.cell((0, 23)).unwrap();
         assert_eq!(cell.bg, theme.error_banner_bg);
@@ -1458,7 +1453,10 @@ repos = []
         // Session 1 should be removed, leaving only session 2
         assert_eq!(app.registry.len(), 1);
         assert_eq!(app.registry.active_index(), Some(0));
-        assert_eq!(app.registry.active_session().unwrap().project_name(), "proj2-running");
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "proj2-running"
+        );
         assert!(!app.should_quit);
     }
 
@@ -1673,7 +1671,10 @@ repos = []
         assert!(app.showing_dashboard);
         assert!(app.is_showing_dashboard());
         assert_eq!(app.registry.len(), 1);
-        assert_eq!(app.registry.active_session().unwrap().project_name(), "running-proj");
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "running-proj"
+        );
     }
 
     #[test]
@@ -1779,10 +1780,8 @@ repos = []
         let ps = ProjectSession::new("active-proj", "ws", "mock");
         registry.add(ps, pty, vt).unwrap();
 
-        let dashboard = DashboardState::new(
-            vec!["ws".to_string()],
-            vec!["active-proj".to_string()],
-        );
+        let dashboard =
+            DashboardState::new(vec!["ws".to_string()], vec!["active-proj".to_string()]);
         let mut app = TuiApp::new(registry)
             .with_dashboard(dashboard)
             .with_cwd(cwd.clone());
@@ -1928,10 +1927,7 @@ repos = []
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse_event(scroll_up);
-        assert_eq!(
-            app.registry.active_session().unwrap().vt().scrollback(),
-            3
-        );
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
 
         // 2. Send ScrollDown event: decrements scrollback back to 0
         let scroll_down = MouseEvent {
@@ -1941,14 +1937,19 @@ repos = []
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse_event(scroll_down);
-        assert_eq!(
-            app.registry.active_session().unwrap().vt().scrollback(),
-            0
-        );
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
 
         // 3. With child mouse mode enabled: sends SGR and marks activity
-        app.registry.active_session_mut().unwrap().vt_mut().process(b"\x1b[?1000h");
-        app.registry.active_session_mut().unwrap().project_session.set_status(SessionStatus::WaitingForInput);
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .vt_mut()
+            .process(b"\x1b[?1000h");
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
         app.handle_mouse_event(scroll_up);
         assert_eq!(
             app.registry.active_session().unwrap().status(),
@@ -1994,7 +1995,7 @@ repos = []
 
     #[test]
     fn test_tui_app_handle_mouse_event_ignored_non_scroll() {
-        use crossterm::event::{MouseButton, KeyModifiers, MouseEvent, MouseEventKind};
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
         let tmp = tempfile::tempdir().expect("tempdir");
         #[cfg(windows)]
@@ -2046,10 +2047,7 @@ repos = []
             modifiers: KeyModifiers::empty(),
         };
         app.handle_dashboard_mouse(scroll_down);
-        assert_eq!(
-            app.dashboard.as_ref().unwrap().selected_project_idx,
-            1
-        );
+        assert_eq!(app.dashboard.as_ref().unwrap().selected_project_idx, 1);
 
         // 2. Setup modal routing
         let (_tx, rx) = std::sync::mpsc::channel();
@@ -2066,10 +2064,7 @@ repos = []
             modifiers: KeyModifiers::empty(),
         };
         app.handle_setup_modal_mouse(scroll_up);
-        assert_eq!(
-            app.setup_modal.as_ref().unwrap().scroll_offset,
-            3
-        );
+        assert_eq!(app.setup_modal.as_ref().unwrap().scroll_offset, 3);
     }
 
     #[test]
@@ -2112,7 +2107,11 @@ repos = []
         app.quick_launcher = Some(launcher);
         app.handle_launcher_paste("pasted-project-name");
         assert_eq!(
-            app.quick_launcher.as_ref().unwrap().creation_modal.project_name_input,
+            app.quick_launcher
+                .as_ref()
+                .unwrap()
+                .creation_modal
+                .project_name_input,
             "pasted-project-name"
         );
 
@@ -2123,9 +2122,14 @@ repos = []
         app.dashboard = Some(dashboard);
         app.handle_dashboard_paste("dash-project");
         assert_eq!(
-            app.dashboard.as_ref().unwrap().creation_modal.as_ref().unwrap().project_name_input,
+            app.dashboard
+                .as_ref()
+                .unwrap()
+                .creation_modal
+                .as_ref()
+                .unwrap()
+                .project_name_input,
             "dash-project"
         );
     }
 }
-

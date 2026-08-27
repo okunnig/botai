@@ -126,8 +126,9 @@ mod tests {
 
     #[test]
     fn test_cli_create_subcommand_with_attach_long_and_short() {
-        let cli_long = Cli::try_parse_from(["botai", "create", "ecommerce", "feature-cart", "--attach"])
-            .expect("Failed to parse create with --attach");
+        let cli_long =
+            Cli::try_parse_from(["botai", "create", "ecommerce", "feature-cart", "--attach"])
+                .expect("Failed to parse create with --attach");
         match cli_long.command {
             Some(Commands::Create { attach, .. }) => assert!(attach),
             _ => panic!("Expected Create command"),
@@ -144,7 +145,12 @@ mod tests {
     #[test]
     fn test_cli_create_subcommand_with_agent_flags() {
         let cli_long = Cli::try_parse_from([
-            "botai", "create", "ecommerce", "feature-cart", "--agent", "agy",
+            "botai",
+            "create",
+            "ecommerce",
+            "feature-cart",
+            "--agent",
+            "agy",
         ])
         .expect("Failed to parse create with --agent");
         match cli_long.command {
@@ -155,7 +161,12 @@ mod tests {
         }
 
         let cli_short = Cli::try_parse_from([
-            "botai", "create", "ecommerce", "feature-cart", "-A", "claude",
+            "botai",
+            "create",
+            "ecommerce",
+            "feature-cart",
+            "-A",
+            "claude",
         ])
         .expect("Failed to parse create with -A");
         match cli_short.command {
@@ -226,7 +237,10 @@ mod tests {
             "--prompt",
             "Missing attach flag",
         ]);
-        assert!(err_long.is_err(), "--prompt without --attach must fail validation");
+        assert!(
+            err_long.is_err(),
+            "--prompt without --attach must fail validation"
+        );
 
         let err_short = Cli::try_parse_from([
             "botai",
@@ -236,13 +250,19 @@ mod tests {
             "-p",
             "Missing attach flag",
         ]);
-        assert!(err_short.is_err(), "-p without -a/--attach must fail validation");
+        assert!(
+            err_short.is_err(),
+            "-p without -a/--attach must fail validation"
+        );
     }
 
     #[test]
     fn test_cli_start_subcommand_is_completely_removed() {
         let err = Cli::try_parse_from(["botai", "start", "ecommerce", "feature-cart"]);
-        assert!(err.is_err(), "botai start must not be recognized as a valid subcommand");
+        assert!(
+            err.is_err(),
+            "botai start must not be recognized as a valid subcommand"
+        );
     }
 
     #[test]

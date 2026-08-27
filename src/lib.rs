@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 pub mod cli;
 pub mod config;
 pub mod context;
@@ -10,4 +12,3 @@ pub mod tui;
 pub use git::{remove_worktree_auto, resolve_main_repo};
 pub use project::{ProjectBuilder, ProjectError, ProjectSetupEvent, ProjectValidation};
 pub use tui::Theme;
-

@@ -146,7 +146,11 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
         .unwrap();
 
     let buf = terminal.backend().buffer();
-    let text = buf.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
+    let text = buf
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
     assert!(text.contains("interactive-cli"));
     assert!(text.contains("agy-prompt> user input"));
 
@@ -180,7 +184,9 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
 #[test]
 fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
     use botai::tui::app::TuiApp;
-    use botai::tui::events::{mouse_event_to_bytes, mouse_event_to_sgr_bytes, mouse_scroll_to_bytes};
+    use botai::tui::events::{
+        mouse_event_to_bytes, mouse_event_to_sgr_bytes, mouse_scroll_to_bytes,
+    };
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
     let tmp = tempdir().expect("Failed to create tempdir");
@@ -241,10 +247,7 @@ fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
         modifiers: KeyModifiers::empty(),
     };
     app.handle_mouse_event(scroll_up);
-    assert_eq!(
-        app.registry.active_session().unwrap().vt().scrollback(),
-        3
-    );
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
     assert_eq!(
         app.registry.active_session().unwrap().project_name(),
         "backend-api"
@@ -257,7 +260,12 @@ fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
         app.registry.active_session().unwrap().project_name(),
         "frontend-ui"
     );
-    assert!(app.registry.active_session().unwrap().vt().is_mouse_mode_enabled());
+    assert!(app
+        .registry
+        .active_session()
+        .unwrap()
+        .vt()
+        .is_mouse_mode_enabled());
 
     // Forward ScrollDown to active session 2 (emits SGR and marks activity)
     let scroll_down = MouseEvent {
@@ -278,7 +286,11 @@ fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
 
     // 4. When leader is active, mouse scrolling is suppressed
     app.leader_active = true;
-    app.registry.active_session_mut().unwrap().project_session.set_status(SessionStatus::WaitingForInput);
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
     app.handle_mouse_event(scroll_up);
     assert_eq!(
         app.registry.active_session().unwrap().status(),
@@ -305,7 +317,7 @@ fn test_integration_tui_multiplexer_mouse_scroll_and_scrollback_end_to_end() {
 #[test]
 fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
     use botai::tui::events::{
-        host_modify_other_keys_mode_for_env, keyboard_enhancement_flags, key_to_bytes,
+        host_modify_other_keys_mode_for_env, key_to_bytes, keyboard_enhancement_flags,
         paste_to_bytes, KeyHandler, ModifyOtherKeysMode,
     };
     use crossterm::event::KeyboardEnhancementFlags;
@@ -372,10 +384,8 @@ fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
     let alt_char_cr = KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::ALT);
     assert_eq!(key_to_bytes(&alt_char_cr), b"\x1b[13;3u".to_vec());
 
-    let ctrl_shift_enter = KeyEvent::new(
-        KeyCode::Enter,
-        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-    );
+    let ctrl_shift_enter =
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
     assert_eq!(key_to_bytes(&ctrl_shift_enter), b"\x1b[13;6u".to_vec());
 
     let super_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SUPER);
@@ -411,4 +421,3 @@ fn test_integration_tui_multiplexer_csi_u_modifiers_and_paste() {
         b"\x1b[200~def test():\n    return 42\n\x1b[201~".to_vec()
     );
 }
-

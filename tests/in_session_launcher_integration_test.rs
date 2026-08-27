@@ -127,7 +127,11 @@ repos = []
         app.handle_launcher_key(key(KeyCode::Char(c)));
     }
     assert_eq!(
-        app.quick_launcher.as_ref().unwrap().creation_modal.project_name_input,
+        app.quick_launcher
+            .as_ref()
+            .unwrap()
+            .creation_modal
+            .project_name_input,
         "stripe-webhooks"
     );
 
@@ -143,7 +147,11 @@ repos = []
         app.handle_launcher_key(key(KeyCode::Char(c)));
     }
     assert_eq!(
-        app.quick_launcher.as_ref().unwrap().creation_modal.prompt_input,
+        app.quick_launcher
+            .as_ref()
+            .unwrap()
+            .creation_modal
+            .prompt_input,
         "Implement idempotency keys"
     );
 
@@ -172,7 +180,6 @@ repos = []
         "payments"
     );
     assert!(cwd.join("stripe-webhooks").join("AGENTS.md").is_file());
-
 
     // 10. Open launcher again via Ctrl+Space then 'C' from inside the active session
     app.handle_key_event(ctrl_space_key());

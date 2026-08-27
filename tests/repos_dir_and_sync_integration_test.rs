@@ -135,8 +135,7 @@ repos = [
     let mut repo_mappings = Vec::new();
     for repo in &resolved {
         let worktree_path = project_dir.join(&repo.name);
-        create_worktree(&repo.local_path, &worktree_path, "my-project")
-            .expect("create worktree");
+        create_worktree(&repo.local_path, &worktree_path, "my-project").expect("create worktree");
         assert!(worktree_path.exists());
         assert_eq!(
             get_current_branch(&worktree_path).expect("branch"),

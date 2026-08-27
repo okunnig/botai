@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain with rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --all-targets --all-features
+
+      - name: Run doc tests
+        run: cargo test --doc
+
+  unsafe-audit:
+    name: Unsafe Code Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify #![forbid(unsafe_code)] declarations
+        run: |
+          grep -F '#![forbid(unsafe_code)]' src/lib.rs || { echo "Missing #![forbid(unsafe_code)] in src/lib.rs"; exit 1; }
+          grep -F '#![forbid(unsafe_code)]' src/main.rs || { echo "Missing #![forbid(unsafe_code)] in src/main.rs"; exit 1; }
+
+      - name: Verify zero unsafe usage in src/
+        run: |
+          if grep -rnE '\bunsafe\b' src/; then
+            echo "Error: Unsafe code block detected in src/"
+            exit 1
+          fi
+          echo "Audit passed: No unsafe blocks detected in src/"
+
+      - name: Verify compilation under forbid(unsafe_code)
+        run: cargo check --all-targets --all-features

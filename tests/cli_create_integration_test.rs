@@ -96,9 +96,18 @@ fn test_cli_create_without_attach_e2e() {
 
     let project_dir = workspace_cwd.join("feat-checkout");
     assert!(project_dir.exists(), "project root directory must exist");
-    assert!(project_dir.join("AGENTS.md").exists(), "AGENTS.md must exist");
-    assert!(project_dir.join("backend").exists(), "backend worktree must exist");
-    assert!(project_dir.join("frontend").exists(), "frontend worktree must exist");
+    assert!(
+        project_dir.join("AGENTS.md").exists(),
+        "AGENTS.md must exist"
+    );
+    assert!(
+        project_dir.join("backend").exists(),
+        "backend worktree must exist"
+    );
+    assert!(
+        project_dir.join("frontend").exists(),
+        "frontend worktree must exist"
+    );
     assert!(project_dir.join("backend").join("README.md").exists());
     assert!(project_dir.join("frontend").join("README.md").exists());
 
@@ -108,7 +117,9 @@ fn test_cli_create_without_attach_e2e() {
         .current_dir(project_dir.join("backend"))
         .output()
         .expect("git rev-parse");
-    let branch_name = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
+    let branch_name = String::from_utf8_lossy(&branch_output.stdout)
+        .trim()
+        .to_string();
     assert_eq!(branch_name, "feat-checkout");
 }
 
@@ -143,13 +154,7 @@ fn test_cli_create_short_prompt_without_attach_rejected_by_clap() {
     let mut cmd = Command::cargo_bin("botai").expect("binary exists");
     let assert = cmd
         .current_dir(&workspace_cwd)
-        .args([
-            "create",
-            "fullstack",
-            "feat-short-err",
-            "-p",
-            "Task prompt",
-        ])
+        .args(["create", "fullstack", "feat-short-err", "-p", "Task prompt"])
         .assert();
 
     assert.failure();
@@ -159,9 +164,7 @@ fn test_cli_create_short_prompt_without_attach_rejected_by_clap() {
 #[test]
 fn test_cli_start_subcommand_is_rejected_as_unknown() {
     let mut cmd = Command::cargo_bin("botai").expect("binary exists");
-    let assert = cmd
-        .args(["start", "fullstack", "feat-old-cmd"])
-        .assert();
+    let assert = cmd.args(["start", "fullstack", "feat-old-cmd"]).assert();
 
     assert.failure();
 }
@@ -212,7 +215,10 @@ fn test_cli_create_with_agent_flag_without_attach() {
         .stdout(predicate::str::contains("✓ Project 'feat-agent-override' created successfully at"))
         .stdout(predicate::str::contains("Hint: Run 'botai attach feat-agent-override' to launch the agent session or run 'botai' to open the interactive dashboard."));
 
-    assert!(workspace_cwd.join("feat-agent-override").join("service").exists());
+    assert!(workspace_cwd
+        .join("feat-agent-override")
+        .join("service")
+        .exists());
 }
 
 #[test]
