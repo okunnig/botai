@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use anyhow::{bail, Context, Result};
 use std::env;
 use std::fs;

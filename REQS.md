@@ -368,7 +368,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ---
 
-## 10. UI Theming & Color Schemes
+## 11. UI Theming & Color Schemes
 - **Declarative Theme Configuration**:
   - Configured globally in `config.toml` via the `theme` setting (e.g. `theme = "tokyo-night"`).
   - Defaults to `"tokyo-night"` if omitted or unrecognized.
@@ -389,7 +389,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ---
 
-## 11. Native Compilation & Distributable Artifacts
+## 12. Native Compilation & Distributable Artifacts
 - **Host Platform Support**:
   - **Linux**: `linux-x86_64`, `linux-aarch64`
   - **Windows**: `windows-x86_64`, `windows-aarch64`
@@ -407,6 +407,31 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Windows: `.zip` archive containing `botai.exe`, `README.md`, and `REQS.md`.
   - Naming schema: `dist/botai-v<version>-<platform>.<tar.gz|zip>` (e.g., `dist/botai-v0.1.0-linux-x86_64.tar.gz`).
   - `dist/SHA256SUMS`: Cryptographic SHA-256 verification manifest automatically generated/updated in `dist/`.
+
+---
+
+## 13. CI/CD Automation & PR Quality Validation Gates
+- **Continuous Integration Pipeline (`.github/workflows/ci.yml`)**:
+  - **Triggers**:
+    - Exclusively runs on Pull Requests targeting the `main` branch.
+  - **Concurrency Control**: Automatically cancels in-progress workflow runs for the same branch or PR ref (`cancel-in-progress: true`), preventing redundant build queue congestion.
+  - **Security & Least Privilege**: Top-level permissions explicitly constrained to `contents: read`.
+- **Parallel Quality Gates (Running on `ubuntu-latest`)**:
+  - **1. Rustfmt Gate (`fmt`)**:
+    - Validates uniform codebase formatting across all source and test files (`cargo fmt --all -- --check`).
+    - Uses stable toolchain with the official `rustfmt` component.
+  - **2. Clippy Linter Gate (`clippy`)**:
+    - Enforces zero compiler and linter warnings (`cargo clippy --all-targets --all-features -- -D warnings`).
+    - Employs GitHub Actions Rust caching (`Swatinem/rust-cache@v2`) for accelerated feedback cycles.
+  - **3. Test Suite Gate (`test`)**:
+    - Executes the entire test suite across all crates, targets, unit tests, and integration tests (`cargo test --all-targets --all-features`).
+    - Executes documentation test suite (`cargo test --doc`).
+    - Leverages shared Rust dependency and compilation caching (`Swatinem/rust-cache@v2`).
+  - **4. Unsafe Code Audit Gate (`unsafe-audit`)**:
+    - **Strict `#![forbid(unsafe_code)]` Enforcement**: Verifies that crate root headers (`src/lib.rs` and `src/main.rs`) explicitly mandate `#![forbid(unsafe_code)]`.
+    - **Zero Unsafe Usage Policy**: Scans all source files under `src/` to guarantee zero `unsafe` keyword blocks or invocations exist in the production codebase.
+    - **Compilation Verification**: Confirms clean `cargo check --all-targets --all-features` pass under the strict forbid lint constraint.
+
 
 
 
