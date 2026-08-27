@@ -176,7 +176,7 @@ fn test_integration_tui_multiplexer_dynamic_resizing_and_cursor() {
         .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
     assert!(text2.contains("interactive-cli"));
-    assert!(text2.contains("Ctrl+Space:Leader"));
+    assert!(text2.contains("Ctrl+Space: Actions"));
 }
 
 #[test]

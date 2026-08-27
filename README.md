@@ -186,7 +186,7 @@ botai destroy feat-checkout --force
 
 ### In-Session Multiplexer Leader Keys (`Ctrl + Space`)
 
-When working inside an active terminal session, press `Ctrl + Space` to enter **Leader Mode** (indicated by `[LEADER]` in the status bar), then press any of the following keys:
+When working inside an active terminal session, press `Ctrl + Space` to enter **Leader Mode** (displaying the actionable key menu in the status bar), then press any of the following keys:
 
 | Leader Shortcut | Action |
 | :--- | :--- |

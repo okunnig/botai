@@ -228,7 +228,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Detaching from an active session (`Ctrl + Space` then `d`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
     - When launched directly from CLI (`botai create --attach` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
-- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, template, key hints, and a visible `[LEADER]` mode indicator when active.
+- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, and streamlined key hints. In normal state, it displays a concise right-aligned `'Ctrl+Space: Actions'` hint (omitted gracefully on narrow viewports). When the leader key is triggered (`leader_active`), it displays the focused actionable commands menu `'[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]'` in high-contrast leader styling. When no active sessions exist, it displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'`, transitioning to the active leader menu when `Ctrl+Space` is pressed.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
     - `Ctrl + Space` then `1` .. `9`: Directly switch to project session 1 to 9.
