@@ -2,7 +2,9 @@ use std::fs;
 use tempfile::tempdir;
 
 use botai::config::Config;
-use botai::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen};
+use botai::session::{
+    ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
+};
 use botai::tui::app::render_error_banner;
 use botai::tui::dashboard::{render_dashboard, DashboardState};
 use botai::tui::quick_launcher::{render_quick_launcher, QuickLauncherState};
@@ -94,11 +96,18 @@ repos = ["/tmp/repos/shop"]
 
     // 4. Test Status Bar rendering with Cyberpunk theme
     let mut registry = SessionRegistry::new();
-    let (ps, pty, vt) = create_test_session("shop-service", "ecommerce", "claude", SessionStatus::Busy);
+    let (ps, pty, vt) =
+        create_test_session("shop-service", "ecommerce", "claude", SessionStatus::Busy);
     registry.add(ps, pty, vt).unwrap();
 
     let mut status_buf = Buffer::empty(Rect::new(0, 0, 80, 1));
-    StatusBar::render_to_buffer_with_theme(&registry, false, &theme, Rect::new(0, 0, 80, 1), &mut status_buf);
+    StatusBar::render_to_buffer_with_theme(
+        &registry,
+        false,
+        &theme,
+        Rect::new(0, 0, 80, 1),
+        &mut status_buf,
+    );
 
     // Active tab leading space cell at (1, 0) matches cyberpunk tab_active_bg and tab_active_fg
     let active_tab_cell = status_buf.cell((1, 0)).unwrap();

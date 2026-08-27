@@ -167,15 +167,24 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Mode 2 (`\x1b[>4;2m`): Enabled when running inside `tmux` (detected via `TMUX` environment variable) to guarantee modifier reporting through tmux's internal terminal multiplexing layer.
     - None (no escape sequence emitted): For Alacritty 0.13+, WezTerm, Kitty, Ghostty, and standard terminals, relying on the native Kitty Keyboard Protocol (`\x1b[>1u`) rather than sending `modifyOtherKeys` Mode 1 (`\x1b[>4;1m`) which would override Alacritty/WezTerm's Kitty mode and suppress Shift+Enter escape sequences.
   - Ensures `PopKeyboardEnhancementFlags` and disabling `modifyOtherKeys` (`\x1b[>4;0m`) are executed during teardown and in `TerminalCleanupGuard::drop`, guaranteeing the host terminal's original keyboard state is fully restored even on unexpected exit or error.
-- **Full CSI-u / ANSI Modifier Key Passthrough**:
-  - Encodes modified key events using standard Xterm / CSI-u modifier parameter values:
+- **Full CSI-u / ANSI Modifier Key Passthrough & Stream Demuxing**:
+  - Encodes and decodes modified key events using standard Xterm / CSI-u modifier parameter values:
     `modifier_code = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0) + (Super/Meta ? 8 : 0)`.
+    - Handles progressive Kitty sub-parameters (`\x1b[<codepoint>:<shifted>;<modifiers>:<event_type>u`) and masks out lock keys (Caps Lock `64`, Num Lock `128`) to accurately detect modifiers under all keyboard states.
+    - Buffers split escape sequences across chunk boundaries (including single `\x1b` byte splits) in `RawLeaderDecoder` symmetrically across inactive and active leader modes to prevent raw escape leakages.
+    - Stream-demuxes mixed input buffers containing interleaved SGR mouse sequences (`\x1b[<...M/m`) and keystrokes, buffering incomplete cross-chunk SGR mouse prefixes without dropping trailing keys or leaking coordinates.
   - **Modified Enter, Shift+Enter, and Newlines**:
     - Unmodified Enter (`KeyCode::Enter` with no modifiers): `\r` (`0x0D`, CR).
     - Unmodified Newline (`KeyCode::Char('\n')` with no modifiers): `\n` (`0x0A`, LF / Ctrl+J).
     - Unmodified Carriage Return (`KeyCode::Char('\r')` with no modifiers): `\r` (`0x0D`, CR).
     - Ctrl+J (`KeyCode::Char('j')` with Ctrl, or unmodified `\n`): `0x0A` (LF).
-    - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Shift+Enter` / `Shift + '\n'` / `Shift + '\r'` -> `\x1b[13;2u` for multiline prompt input in `agy`, Charmbracelet, Bubbletea, and modern TUIs; `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`; `Super+Enter` -> `\x1b[13;9u`).
+    - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`; `Super+Enter` -> `\x1b[13;9u`).
+    - **Seamless Agent-Aware Shift+Enter Multiline Routing**:
+      - Inspects the active session (`active.project_session.agent`) when receiving raw Shift+Enter sequences (Kitty CSI-u `\x1b[13;<mod>u` with Shift bit, sub-parameters `\x1b[13;2:1u`, alternate codepoints `\x1b[13:10;2u`, or xterm modifyOtherKeys `\x1b[27;<mod>;13~`):
+        - For `claude` (or non-Kitty agents): Sends `b"\n"` (`0x0A` / Line Feed) so Claude Code inserts a clean multiline newline instead of submitting.
+        - For `agy`: Forwards `b"\x1b[13;2u"` (native Kitty protocol multiline newline sequence).
+        - Default/other agents: Sends `b"\n"`.
+      - Unmodified Enter (`\r`) is forwarded unchanged as `\r` (`0x0D`, CR) across all sessions.
   - **Modified Tab & BackTab**:
     - Unmodified Tab: `\t` (`0x09`).
     - Shift+Tab / BackTab: `\x1b[Z`.
@@ -222,7 +231,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Detaching from an active session (`Ctrl + Space` then `d`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
     - When launched directly from CLI (`botai create --attach` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
-- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, active project name, template, key hints, and a visible `[LEADER]` mode indicator when active.
+- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, and streamlined key hints. In normal state, it displays a concise right-aligned `'Ctrl+Space: Actions'` hint (omitted gracefully on narrow viewports). When the leader key is triggered (`leader_active`), it displays the focused actionable commands menu `'[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]'` in high-contrast leader styling. When no active sessions exist, it displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'`, transitioning to the active leader menu when `Ctrl+Space` is pressed.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
     - `Ctrl + Space` then `1` .. `9`: Directly switch to project session 1 to 9.

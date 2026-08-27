@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::{self, Stdout, Write};
+use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyEventKind},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -28,15 +31,11 @@ use crate::session::{
 };
 use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
 use crate::tui::events::{
-    host_modify_other_keys_mode, keyboard_enhancement_flags, map_key_event, ModifyOtherKeysMode,
-    TuiAction,
+    is_incomplete_sgr_mouse, is_shift_enter, parse_raw_events, parse_sgr_mouse, RawAction,
+    RawLeaderDecoder,
 };
-use crate::tui::quick_launcher::{
-    render_quick_launcher, QuickLauncherAction, QuickLauncherState,
-};
-use crate::tui::setup_modal::{
-    render_setup_modal, SetupModalState, SetupProgressEvent,
-};
+use crate::tui::quick_launcher::{render_quick_launcher, QuickLauncherAction, QuickLauncherState};
+use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
 use crate::tui::status_bar::StatusBar;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{compute_layout, TerminalView};
@@ -56,20 +55,19 @@ pub struct TuiApp {
     pub viewport_size: Option<(u16, u16)>,
     pub leader_active: bool,
     pub showing_dashboard: bool,
+    pub raw_decoder: RawLeaderDecoder,
+    pub pending_raw_input: Vec<u8>,
 }
-
 
 struct TerminalCleanupGuard;
 
 impl Drop for TerminalCleanupGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), crossterm::event::PopKeyboardEnhancementFlags);
-        let _ = io::stdout().write_all(ModifyOtherKeysMode::reset_sequence());
-        let _ = io::stdout().flush();
         let _ = disable_raw_mode();
         let _ = execute!(
             io::stdout(),
-            crossterm::event::DisableMouseCapture,
+            PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );
@@ -84,9 +82,8 @@ pub fn render_error_banner(exit_code: Option<u32>, area: Rect, buf: &mut Buffer,
     let code_str = exit_code
         .map(|c| c.to_string())
         .unwrap_or_else(|| "1".to_string());
-    let msg = format!(
-        " [Process exited with code {code_str} - Press Enter or Ctrl+Space w to dismiss] "
-    );
+    let msg =
+        format!(" [Process exited with code {code_str} - Press Enter or Ctrl+Space w to dismiss] ");
     let banner_y = area.bottom().saturating_sub(1);
     let style = Style::default()
         .bg(theme.error_banner_bg)
@@ -119,6 +116,8 @@ impl TuiApp {
             viewport_size: None,
             leader_active: false,
             showing_dashboard: false,
+            raw_decoder: RawLeaderDecoder::new(),
+            pending_raw_input: Vec::new(),
         }
     }
 
@@ -146,7 +145,6 @@ impl TuiApp {
         self.setup_modal = Some(setup_modal);
         self
     }
-
 
     /// Sets the configuration on `TuiApp`.
     pub fn with_config(mut self, config: Config) -> Self {
@@ -181,19 +179,11 @@ impl TuiApp {
     /// Runs the interactive TUI application event loop.
     pub fn run(&mut self, stdout: &mut Stdout) -> io::Result<()> {
         enable_raw_mode()?;
-        let _ = execute!(
-            stdout,
-            crossterm::event::PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
-        );
-        if let Some(mode) = host_modify_other_keys_mode() {
-            let _ = stdout.write_all(mode.enable_sequence());
-            let _ = stdout.flush();
-        }
-
         execute!(
             stdout,
             EnterAlternateScreen,
-            crossterm::event::EnableMouseCapture,
+            EnableMouseCapture,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
             crossterm::cursor::Show
         )?;
         let _guard = TerminalCleanupGuard;
@@ -202,17 +192,11 @@ impl TuiApp {
 
         let res = self.run_loop(&mut terminal);
 
-        // Always restore terminal state even on error
-        let _ = execute!(
-            terminal.backend_mut(),
-            crossterm::event::PopKeyboardEnhancementFlags
-        );
-        let _ = terminal.backend_mut().write_all(ModifyOtherKeysMode::reset_sequence());
-        let _ = terminal.backend_mut().flush();
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),
-            crossterm::event::DisableMouseCapture,
+            PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         )?;
@@ -230,10 +214,37 @@ impl TuiApp {
             .collect()
     }
 
-    /// Internal event loop.
+    /// Runs the interactive event loop using a background thread reading raw stdin bytes.
     pub fn run_loop<B: ratatui::backend::Backend>(
         &mut self,
         terminal: &mut Terminal<B>,
+    ) -> io::Result<()> {
+        let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut stdin = std::io::stdin().lock();
+            let mut buf = [0u8; 4096];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if stdin_tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        self.run_loop_with_receiver(terminal, &stdin_rx)
+    }
+
+    /// Runs the TUI loop reading from a receiver channel of raw stdin byte chunks.
+    pub fn run_loop_with_receiver<B: ratatui::backend::Backend>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+        stdin_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     ) -> io::Result<()> {
         let mut last_tick = Instant::now();
 
@@ -331,60 +342,15 @@ impl TuiApp {
                 }
             })?;
 
-            // 4. Handle user input with timeout up to tick_rate
+            // 4. Handle raw input bytes with timeout up to tick_rate
             let timeout = self.tick_rate.saturating_sub(last_tick.elapsed());
-
-            if event::poll(timeout)? {
-                while event::poll(Duration::from_millis(0))? {
-                    match event::read()? {
-                        Event::Key(key) => {
-                            if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
-                                if self.setup_modal.is_some() {
-                                    self.handle_setup_modal_key(key);
-                                } else if self.quick_launcher.is_some() {
-                                    self.handle_launcher_key(key);
-                                } else if self.is_showing_dashboard() {
-                                    self.handle_dashboard_key(key);
-                                } else {
-                                    self.handle_key_event(key);
-                                }
-                            }
-                        }
-                        Event::Paste(text) => {
-                            if self.setup_modal.is_some() {
-                                self.handle_setup_modal_paste(&text);
-                            } else if self.quick_launcher.is_some() {
-                                self.handle_launcher_paste(&text);
-                            } else if self.is_showing_dashboard() {
-                                self.handle_dashboard_paste(&text);
-                            } else if !self.leader_active {
-                                self.handle_paste_event(&text);
-                            }
-                        }
-                        Event::Mouse(mouse) => {
-                            if self.setup_modal.is_some() {
-                                self.handle_setup_modal_mouse(mouse);
-                            } else if self.quick_launcher.is_some() {
-                                self.handle_launcher_mouse(mouse);
-                            } else if self.is_showing_dashboard() {
-                                self.handle_dashboard_mouse(mouse);
-                            } else if !self.leader_active {
-                                self.handle_mouse_event(mouse);
-                            }
-                        }
-                        Event::Resize(cols, rows) => {
-                            let (_, term_area) =
-                                compute_layout(ratatui::layout::Rect::new(0, 0, cols, rows));
-                            if self.viewport_size != Some((term_area.width, term_area.height)) {
-                                self.viewport_size = Some((term_area.width, term_area.height));
-                                self.resize_all_sessions(term_area.width, term_area.height);
-                            }
-                        }
-                        _ => {}
-                    }
+            if let Ok(bytes) = stdin_rx.recv_timeout(timeout) {
+                let mut all_bytes = bytes;
+                while let Ok(more) = stdin_rx.try_recv() {
+                    all_bytes.extend(more);
                 }
+                self.handle_input_bytes(&all_bytes);
             }
-
 
             if last_tick.elapsed() >= self.tick_rate {
                 last_tick = Instant::now();
@@ -392,6 +358,43 @@ impl TuiApp {
         }
 
         Ok(())
+    }
+
+    /// Routes incoming raw input bytes either to active modal/dashboard event decoders or directly to PTY passthrough/leader decoder.
+    pub fn handle_input_bytes(&mut self, bytes: &[u8]) {
+        if self.setup_modal.is_some() {
+            let events = parse_raw_events(bytes);
+            for event in events {
+                match event {
+                    Event::Key(key) => self.handle_setup_modal_key(key),
+                    Event::Paste(text) => self.handle_setup_modal_paste(&text),
+                    Event::Mouse(mouse) => self.handle_setup_modal_mouse(mouse),
+                    _ => {}
+                }
+            }
+        } else if self.quick_launcher.is_some() {
+            let events = parse_raw_events(bytes);
+            for event in events {
+                match event {
+                    Event::Key(key) => self.handle_launcher_key(key),
+                    Event::Paste(text) => self.handle_launcher_paste(&text),
+                    Event::Mouse(mouse) => self.handle_launcher_mouse(mouse),
+                    _ => {}
+                }
+            }
+        } else if self.is_showing_dashboard() {
+            let events = parse_raw_events(bytes);
+            for event in events {
+                match event {
+                    Event::Key(key) => self.handle_dashboard_key(key),
+                    Event::Paste(text) => self.handle_dashboard_paste(&text),
+                    Event::Mouse(mouse) => self.handle_dashboard_mouse(mouse),
+                    _ => {}
+                }
+            }
+        } else {
+            self.handle_raw_bytes(bytes);
+        }
     }
 
     /// Reads output bytes from all running PTY sessions into their respective VT screens.
@@ -660,12 +663,7 @@ impl TuiApp {
         prompt: Option<&str>,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let modal = SetupModalState::new(
-            project_name,
-            template_name,
-            prompt.map(String::from),
-            rx,
-        );
+        let modal = SetupModalState::new(project_name, template_name, prompt.map(String::from), rx);
         self.setup_modal = Some(modal);
 
         if self.registry.get_by_project(project_name).is_some() {
@@ -702,7 +700,6 @@ impl TuiApp {
         });
     }
 
-
     /// Attaches to an existing project directory and adds its session to the registry.
     pub fn attach_project(&mut self, project_name: &str) -> anyhow::Result<()> {
         if let Some(pos) = self
@@ -728,7 +725,8 @@ impl TuiApp {
         let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
 
         let default_config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n").ok();
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                .ok();
         let config = self.config.as_ref().or(default_config.as_ref());
 
         let agent_name = config.map(|c| c.default_agent.as_str()).unwrap_or("claude");
@@ -841,63 +839,41 @@ impl TuiApp {
             let new_dashboard = if let Some(cfg) = &self.config {
                 DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
             } else {
-                let default_cfg =
-                    Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                        .unwrap_or_else(|_| Config {
-                            default_agent: "claude".to_string(),
-                            theme: "tokyo-night".to_string(),
-                            repos_dir: PathBuf::from(".botai_repos"),
-                            agents: HashMap::new(),
-                            templates: HashMap::new(),
-                        });
+                let default_cfg = Config::load_from_str(
+                    "default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n",
+                )
+                .unwrap_or_else(|_| Config {
+                    default_agent: "claude".to_string(),
+                    theme: "tokyo-night".to_string(),
+                    repos_dir: PathBuf::from(".botai_repos"),
+                    agents: HashMap::new(),
+                    templates: HashMap::new(),
+                });
                 DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
             };
             self.dashboard = Some(new_dashboard);
         }
     }
 
-    /// Dispatches key actions based on leader hotkeys or PTY passthrough.
-    pub fn handle_key_event(&mut self, key: crossterm::event::KeyEvent) {
-        let is_active_errored = self
-            .registry
-            .active_session()
-            .map(|s| s.status() == SessionStatus::Error)
-            .unwrap_or(false);
-
-        // If the active session is errored, dismiss it on Enter or plain Space (when leader is inactive)
-        if is_active_errored && !self.leader_active {
-            let is_dismiss_key = match key.code {
-                crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') => {
-                    !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                        && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
-                }
-                _ => false,
-            };
-
-            if is_dismiss_key {
-                if let Some(active) = self.registry.active_session() {
-                    let id = active.id().to_string();
-                    self.close_session(&id);
-                    return;
-                }
-            }
-        }
-
-        let action = map_key_event(key, self.leader_active);
-
+    /// Dispatches a decoded `RawAction` to the multiplexer or active PTY session.
+    pub fn handle_raw_action(&mut self, action: RawAction) {
         match action {
-            TuiAction::EnterLeader => {
+            RawAction::EnterLeader => {
                 self.leader_active = true;
+                self.raw_decoder.set_leader_active(true);
             }
-            TuiAction::CancelLeader => {
+            RawAction::CancelLeader => {
                 self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
             }
-            TuiAction::Quit => {
+            RawAction::Quit => {
                 self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
                 self.should_quit = true;
             }
-            TuiAction::Detach => {
+            RawAction::Detach => {
                 self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
                 if self.dashboard.is_some() {
                     self.refresh_dashboard();
                     self.showing_dashboard = true;
@@ -906,52 +882,140 @@ impl TuiApp {
                     self.should_quit = true;
                 }
             }
-            TuiAction::SwitchSession(idx) => {
+            RawAction::SwitchSession(idx) => {
                 self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
                 let _ = self.registry.set_active_index(idx);
             }
-            TuiAction::NextSession => {
+            RawAction::NextSession => {
                 self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
                 self.registry.next_session();
             }
-            TuiAction::PrevSession => {
+            RawAction::PrevSession => {
                 self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
                 self.registry.prev_session();
             }
-            TuiAction::OpenLauncher => {
+            RawAction::OpenLauncher => {
                 self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
                 self.open_quick_launcher();
             }
-            TuiAction::CloseSession => {
+            RawAction::CloseSession => {
                 self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
                     self.close_session(&id);
                 }
             }
-            TuiAction::Passthrough(bytes) => {
+            RawAction::Passthrough(bytes) => {
                 self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
                 if let Some(active) = self.registry.active_session_mut() {
                     active.vt_mut().reset_scrollback();
-                    let _ = active.pty_mut().write_all(&bytes);
+
+                    let bytes_to_write = if is_shift_enter(&bytes) {
+                        if active
+                            .project_session
+                            .agent_name
+                            .eq_ignore_ascii_case("agy")
+                        {
+                            b"\x1b[13;2u".to_vec()
+                        } else {
+                            b"\n".to_vec()
+                        }
+                    } else {
+                        bytes
+                    };
+
+                    if active.pty_mut().write_all(&bytes_to_write).is_ok()
+                        && active.status() != SessionStatus::Error
+                    {
+                        let new_status = self.tracker.record_activity();
+                        active.project_session.set_status(new_status);
+                    }
                 }
             }
-            TuiAction::Resize(..) | TuiAction::Tick => {}
         }
     }
 
-    /// Forwards pasted text to the active session's PTY formatted as bracketed paste.
-    pub fn handle_paste_event(&mut self, text: &str) {
-        if self.leader_active {
-            return;
+    /// Processes a slice of non-mouse raw input bytes (errored session dismiss check + leader decoder).
+    /// Returns `true` if an active errored session was dismissed.
+    fn process_non_mouse_bytes(&mut self, segment: &[u8]) -> bool {
+        if segment.is_empty() {
+            return false;
         }
-        let bytes = crate::tui::events::paste_to_bytes(text);
-        if let Some(active) = self.registry.active_session_mut() {
-            active.vt_mut().reset_scrollback();
-            if active.pty_mut().write_all(&bytes).is_ok() {
-                let new_status = self.tracker.record_activity();
-                active.project_session.set_status(new_status);
+
+        let is_active_errored = self
+            .registry
+            .active_session()
+            .map(|s| s.status() == SessionStatus::Error)
+            .unwrap_or(false);
+
+        // If the active session is errored, dismiss it on Enter (\r, \n) or plain Space (when leader is inactive)
+        if is_active_errored && !self.leader_active {
+            let is_dismiss = segment
+                .iter()
+                .any(|&b| b == b'\r' || b == b'\n' || b == b' ');
+            if is_dismiss {
+                if let Some(active) = self.registry.active_session() {
+                    let id = active.id().to_string();
+                    self.close_session(&id);
+                    return true;
+                }
             }
+        }
+
+        self.raw_decoder.set_leader_active(self.leader_active);
+        let actions = self.raw_decoder.decode(segment);
+        for action in actions {
+            self.handle_raw_action(action);
+        }
+        false
+    }
+
+    /// Feeds raw stdin bytes directly into the `RawLeaderDecoder` and processes the resulting actions,
+    /// demuxing SGR mouse sequences so they are dispatched to `handle_mouse_event` without dropping
+    /// interleaved or trailing keystrokes, and buffering incomplete cross-chunk SGR mouse sequences.
+    pub fn handle_raw_bytes(&mut self, bytes: &[u8]) {
+        let mut combined = Vec::with_capacity(self.pending_raw_input.len() + bytes.len());
+        combined.extend_from_slice(&self.pending_raw_input);
+        combined.extend_from_slice(bytes);
+        self.pending_raw_input.clear();
+
+        let mut i = 0;
+        let mut seg_start = 0;
+
+        while i < combined.len() {
+            let slice = &combined[i..];
+            if slice.starts_with(b"\x1b[<") || is_incomplete_sgr_mouse(slice) {
+                if let Some((consumed, mouse)) = parse_sgr_mouse(slice) {
+                    // Process non-mouse key bytes accumulated before this mouse sequence
+                    if seg_start < i && self.process_non_mouse_bytes(&combined[seg_start..i]) {
+                        return; // Errored session dismissed
+                    }
+                    self.handle_mouse_event(mouse);
+                    i += consumed;
+                    seg_start = i;
+                    continue;
+                } else if is_incomplete_sgr_mouse(slice) {
+                    // Incomplete SGR mouse sequence at the tail of input
+                    if seg_start < i && self.process_non_mouse_bytes(&combined[seg_start..i]) {
+                        return; // Errored session dismissed
+                    }
+                    self.pending_raw_input.extend_from_slice(slice);
+                    seg_start = combined.len();
+                    break;
+                }
+            }
+            i += 1;
+        }
+
+        // Process trailing non-mouse key bytes
+        if seg_start < combined.len() {
+            self.process_non_mouse_bytes(&combined[seg_start..]);
         }
     }
 
@@ -1014,21 +1078,13 @@ mod tests {
         assert!(!app.should_quit);
         assert!(!app.leader_active);
 
-        // Enter leader mode via Ctrl+Space
-        let ctrl_space = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(' '),
-            crossterm::event::KeyModifiers::CONTROL,
-        );
-        app.handle_key_event(ctrl_space);
+        // Enter leader mode via Ctrl+Space (0x00)
+        app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
         assert!(!app.should_quit);
 
         // Press 'q' while leader is active
-        let quit_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('q'),
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app.handle_key_event(quit_key);
+        app.handle_raw_bytes(b"q");
         assert!(app.should_quit);
         assert!(!app.leader_active);
     }
@@ -1040,29 +1096,17 @@ mod tests {
         assert!(!app.leader_active);
 
         // 1. Enter leader mode
-        let ctrl_space = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(' '),
-            crossterm::event::KeyModifiers::CONTROL,
-        );
-        app.handle_key_event(ctrl_space);
+        app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
 
-        // 2. Esc cancels leader mode
-        let esc_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Esc,
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app.handle_key_event(esc_key);
+        // 2. Unrecognized key cancels leader mode
+        app.handle_raw_bytes(b"z");
         assert!(!app.leader_active);
 
-        // 3. Unrecognized key cancels leader mode
-        app.handle_key_event(ctrl_space);
+        // 3. Arrow / CSI escape cancels leader mode
+        app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
-        let z_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('z'),
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app.handle_key_event(z_key);
+        app.handle_raw_bytes(b"\x1b[A");
         assert!(!app.leader_active);
     }
 
@@ -1096,26 +1140,16 @@ repos = []
 "#;
         let config = Config::load_from_str(config_toml).unwrap();
         let registry = SessionRegistry::new();
-        let mut app = TuiApp::new(registry)
-            .with_config(config)
-            .with_cwd(cwd);
+        let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
 
         assert!(app.quick_launcher.is_none());
 
         // Send Ctrl+Space to activate leader
-        let ctrl_space = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(' '),
-            crossterm::event::KeyModifiers::CONTROL,
-        );
-        app.handle_key_event(ctrl_space);
+        app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
 
         // Send 'c' key
-        let c_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('c'),
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app.handle_key_event(c_key);
+        app.handle_raw_bytes(b"c");
 
         assert!(!app.leader_active);
         assert!(app.quick_launcher.is_some());
@@ -1211,13 +1245,12 @@ repos = []
 
         app.handle_launcher_key(enter_key);
         assert!(app.quick_launcher.is_none());
-        assert!(app.setup_modal.is_some(), "Setup modal must be open on error");
         assert!(
-            app.setup_modal
-                .as_ref()
-                .unwrap()
-                .error
-                .is_some(),
+            app.setup_modal.is_some(),
+            "Setup modal must be open on error"
+        );
+        assert!(
+            app.setup_modal.as_ref().unwrap().error.is_some(),
             "Error message must be set in setup_modal on collision"
         );
     }
@@ -1314,13 +1347,17 @@ repos = []
         let (cmd, args) = ("sh", vec!["-c", "true"]);
 
         let mut registry = SessionRegistry::new();
-        let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone()).with_dimensions(80, 24);
+        let config1 = PtyConfig::new(cmd, tmp.path())
+            .with_args(args.clone())
+            .with_dimensions(80, 24);
         let pty1 = PtySession::spawn(config1).unwrap();
         let vt1 = VtScreen::new(80, 24);
         let ps1 = ProjectSession::new("proj1", "ws1", "mock");
         registry.add(ps1, pty1, vt1).unwrap();
 
-        let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args).with_dimensions(80, 24);
+        let config2 = PtyConfig::new(cmd, tmp.path())
+            .with_args(args)
+            .with_dimensions(80, 24);
         let pty2 = PtySession::spawn(config2).unwrap();
         let vt2 = VtScreen::new(80, 24);
         let ps2 = ProjectSession::new("proj2", "ws1", "mock");
@@ -1367,7 +1404,8 @@ repos = []
         // Set custom viewport size
         app.viewport_size = Some((115, 38));
 
-        app.create_and_start_project("backend", "resized-project", None).unwrap();
+        app.create_and_start_project("backend", "resized-project", None)
+            .unwrap();
         let active = app.registry.active_session().unwrap();
         assert_eq!(active.vt().size(), (115, 38));
 
@@ -1392,7 +1430,8 @@ repos = []
             .map(|x| buf.cell((x, 23)).unwrap().symbol())
             .collect::<String>();
 
-        assert!(bottom_row_text.contains("[Process exited with code 127 - Press Enter or Ctrl+Space w to dismiss]"));
+        assert!(bottom_row_text
+            .contains("[Process exited with code 127 - Press Enter or Ctrl+Space w to dismiss]"));
 
         let cell = buf.cell((0, 23)).unwrap();
         assert_eq!(cell.bg, theme.error_banner_bg);
@@ -1411,7 +1450,8 @@ repos = []
             .map(|x| buf.cell((x, 23)).unwrap().symbol())
             .collect::<String>();
 
-        assert!(bottom_row_text.contains("[Process exited with code 2 - Press Enter or Ctrl+Space w to dismiss]"));
+        assert!(bottom_row_text
+            .contains("[Process exited with code 2 - Press Enter or Ctrl+Space w to dismiss]"));
 
         let cell = buf.cell((0, 23)).unwrap();
         assert_eq!(cell.bg, theme.error_banner_bg);
@@ -1458,7 +1498,10 @@ repos = []
         // Session 1 should be removed, leaving only session 2
         assert_eq!(app.registry.len(), 1);
         assert_eq!(app.registry.active_index(), Some(0));
-        assert_eq!(app.registry.active_session().unwrap().project_name(), "proj2-running");
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "proj2-running"
+        );
         assert!(!app.should_quit);
     }
 
@@ -1552,19 +1595,11 @@ repos = []
         assert!(!app.should_quit);
 
         // Pressing normal keys like 'a' does not dismiss it
-        let key_a = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('a'),
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app.handle_key_event(key_a);
+        app.handle_raw_bytes(b"a");
         assert_eq!(app.registry.len(), 1);
 
         // Pressing Enter dismisses the errored session
-        let enter_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app.handle_key_event(enter_key);
+        app.handle_raw_bytes(b"\r");
 
         assert_eq!(app.registry.len(), 0);
         assert!(app.should_quit);
@@ -1593,11 +1628,7 @@ repos = []
         app1.process_pty_streams();
         assert_eq!(app1.registry.len(), 1);
 
-        let space_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(' '),
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app1.handle_key_event(space_key);
+        app1.handle_raw_bytes(b" ");
         assert_eq!(app1.registry.len(), 0);
         assert!(app1.dashboard.is_some());
         assert!(!app1.should_quit);
@@ -1615,18 +1646,10 @@ repos = []
         app2.process_pty_streams();
         assert_eq!(app2.registry.len(), 1);
 
-        let ctrl_space = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(' '),
-            crossterm::event::KeyModifiers::CONTROL,
-        );
-        app2.handle_key_event(ctrl_space);
+        app2.handle_raw_bytes(&[0x00]);
         assert!(app2.leader_active);
 
-        let w_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('w'),
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app2.handle_key_event(w_key);
+        app2.handle_raw_bytes(b"w");
         assert_eq!(app2.registry.len(), 0);
         assert!(app2.should_quit);
     }
@@ -1654,26 +1677,21 @@ repos = []
         assert!(!app.should_quit);
 
         // Enter leader mode Ctrl+Space
-        let ctrl_space = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(' '),
-            crossterm::event::KeyModifiers::CONTROL,
-        );
-        app.handle_key_event(ctrl_space);
+        app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
 
         // Detach key 'd'
-        let d_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('d'),
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app.handle_key_event(d_key);
+        app.handle_raw_bytes(b"d");
 
         assert!(!app.leader_active);
         assert!(!app.should_quit);
         assert!(app.showing_dashboard);
         assert!(app.is_showing_dashboard());
         assert_eq!(app.registry.len(), 1);
-        assert_eq!(app.registry.active_session().unwrap().project_name(), "running-proj");
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "running-proj"
+        );
     }
 
     #[test]
@@ -1740,19 +1758,11 @@ repos = []
         assert!(app.dashboard.is_none());
 
         // Enter leader mode Ctrl+Space
-        let ctrl_space = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(' '),
-            crossterm::event::KeyModifiers::CONTROL,
-        );
-        app.handle_key_event(ctrl_space);
+        app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
 
         // Detach key 'd'
-        let d_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('d'),
-            crossterm::event::KeyModifiers::NONE,
-        );
-        app.handle_key_event(d_key);
+        app.handle_raw_bytes(b"d");
 
         assert!(!app.leader_active);
         assert!(app.should_quit);
@@ -1779,10 +1789,8 @@ repos = []
         let ps = ProjectSession::new("active-proj", "ws", "mock");
         registry.add(ps, pty, vt).unwrap();
 
-        let dashboard = DashboardState::new(
-            vec!["ws".to_string()],
-            vec!["active-proj".to_string()],
-        );
+        let dashboard =
+            DashboardState::new(vec!["ws".to_string()], vec!["active-proj".to_string()]);
         let mut app = TuiApp::new(registry)
             .with_dashboard(dashboard)
             .with_cwd(cwd.clone());
@@ -1928,10 +1936,7 @@ repos = []
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse_event(scroll_up);
-        assert_eq!(
-            app.registry.active_session().unwrap().vt().scrollback(),
-            3
-        );
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
 
         // 2. Send ScrollDown event: decrements scrollback back to 0
         let scroll_down = MouseEvent {
@@ -1941,14 +1946,19 @@ repos = []
             modifiers: KeyModifiers::empty(),
         };
         app.handle_mouse_event(scroll_down);
-        assert_eq!(
-            app.registry.active_session().unwrap().vt().scrollback(),
-            0
-        );
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
 
         // 3. With child mouse mode enabled: sends SGR and marks activity
-        app.registry.active_session_mut().unwrap().vt_mut().process(b"\x1b[?1000h");
-        app.registry.active_session_mut().unwrap().project_session.set_status(SessionStatus::WaitingForInput);
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .vt_mut()
+            .process(b"\x1b[?1000h");
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
         app.handle_mouse_event(scroll_up);
         assert_eq!(
             app.registry.active_session().unwrap().status(),
@@ -1994,7 +2004,7 @@ repos = []
 
     #[test]
     fn test_tui_app_handle_mouse_event_ignored_non_scroll() {
-        use crossterm::event::{MouseButton, KeyModifiers, MouseEvent, MouseEventKind};
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
         let tmp = tempfile::tempdir().expect("tempdir");
         #[cfg(windows)]
@@ -2046,10 +2056,7 @@ repos = []
             modifiers: KeyModifiers::empty(),
         };
         app.handle_dashboard_mouse(scroll_down);
-        assert_eq!(
-            app.dashboard.as_ref().unwrap().selected_project_idx,
-            1
-        );
+        assert_eq!(app.dashboard.as_ref().unwrap().selected_project_idx, 1);
 
         // 2. Setup modal routing
         let (_tx, rx) = std::sync::mpsc::channel();
@@ -2066,10 +2073,7 @@ repos = []
             modifiers: KeyModifiers::empty(),
         };
         app.handle_setup_modal_mouse(scroll_up);
-        assert_eq!(
-            app.setup_modal.as_ref().unwrap().scroll_offset,
-            3
-        );
+        assert_eq!(app.setup_modal.as_ref().unwrap().scroll_offset, 3);
     }
 
     #[test]
@@ -2103,7 +2107,7 @@ repos = []
         assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
 
         // 2. Typing or pasting resets scrollback back to 0
-        app.handle_paste_event("echo 'pasted text'\n");
+        app.handle_raw_bytes(b"echo 'pasted text'\n");
         assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
 
         // 3. Quick launcher paste
@@ -2112,7 +2116,11 @@ repos = []
         app.quick_launcher = Some(launcher);
         app.handle_launcher_paste("pasted-project-name");
         assert_eq!(
-            app.quick_launcher.as_ref().unwrap().creation_modal.project_name_input,
+            app.quick_launcher
+                .as_ref()
+                .unwrap()
+                .creation_modal
+                .project_name_input,
             "pasted-project-name"
         );
 
@@ -2123,9 +2131,376 @@ repos = []
         app.dashboard = Some(dashboard);
         app.handle_dashboard_paste("dash-project");
         assert_eq!(
-            app.dashboard.as_ref().unwrap().creation_modal.as_ref().unwrap().project_name_input,
+            app.dashboard
+                .as_ref()
+                .unwrap()
+                .creation_modal
+                .as_ref()
+                .unwrap()
+                .project_name_input,
             "dash-project"
         );
     }
-}
 
+    #[test]
+    fn test_tui_app_handle_raw_bytes_passthrough_to_active_pty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let mut vt = VtScreen::new(80, 5);
+        for i in 1..=10 {
+            vt.process(format!("line {i}\r\n").as_bytes());
+        }
+        let mut ps = ProjectSession::new("raw-pty-test", "ws", "mock");
+        ps.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        // Scroll up first
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .vt_mut()
+            .scroll_up(3);
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
+
+        // Feed raw bytes directly
+        app.handle_raw_bytes(b"cargo check\r");
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+        assert!(!app.leader_active);
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_ctrl_space_0x00_and_switch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+        let pty1 = PtySession::spawn(config1).unwrap();
+        let vt1 = VtScreen::new(80, 24);
+        let ps1 = ProjectSession::new("proj1", "ws", "mock");
+        registry.add(ps1, pty1, vt1).unwrap();
+
+        let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty2 = PtySession::spawn(config2).unwrap();
+        let vt2 = VtScreen::new(80, 24);
+        let ps2 = ProjectSession::new("proj2", "ws", "mock");
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert_eq!(app.registry.active_index(), Some(0));
+
+        // 1. Send Ctrl+Space (0x00) -> Enter leader
+        app.handle_raw_bytes(&[0x00]);
+        assert!(app.leader_active);
+
+        // 2. Send '2' -> Switch to session 2 (index 1)
+        app.handle_raw_bytes(b"2");
+        assert!(!app.leader_active);
+        assert_eq!(app.registry.active_index(), Some(1));
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "proj2"
+        );
+
+        // 3. Combined chunk: 0x00 then '1'
+        app.handle_raw_bytes(&[0x00, b'1']);
+        assert!(!app.leader_active);
+        assert_eq!(app.registry.active_index(), Some(0));
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "proj1"
+        );
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_kitty_ctrl_space_and_open_launcher() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let config_toml = r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[agents.mock]
+command = "sh"
+args = ["-c", "exit 0"]
+
+[templates.demo]
+repos = []
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
+
+        assert!(app.quick_launcher.is_none());
+
+        // Send Kitty Ctrl+Space (\x1b[32;5u)
+        app.handle_raw_bytes(b"\x1b[32;5u");
+        assert!(app.leader_active);
+
+        // Send 'c' to open launcher
+        app.handle_raw_bytes(b"c");
+        assert!(!app.leader_active);
+        assert!(app.quick_launcher.is_some());
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_literal_ctrl_space() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let mut ps = ProjectSession::new("test-literal-null", "ws", "mock");
+        ps.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        // Double Ctrl+Space (0x00 0x00) -> enters leader then forwards 0x00 literal
+        app.handle_raw_bytes(&[0x00, 0x00]);
+        assert!(!app.leader_active);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // Ctrl+Space then Space (0x00 ' ') -> enters leader then forwards 0x00 literal
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(&[0x00, b' ']);
+        assert!(!app.leader_active);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_errored_session_dismissal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 1"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 1"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-err", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        std::thread::sleep(Duration::from_millis(150));
+        app.process_pty_streams();
+        assert_eq!(app.registry.len(), 1);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Error
+        );
+
+        // Send \r to dismiss
+        app.handle_raw_bytes(b"\r");
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_shift_enter_claude_and_agy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+
+        // 1. Claude session
+        let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+        let pty1 = PtySession::spawn(config1).unwrap();
+        let vt1 = VtScreen::new(80, 24);
+        let mut ps1 = ProjectSession::new("claude-session", "ws", "claude");
+        ps1.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps1, pty1, vt1).unwrap();
+
+        // 2. Agy session
+        let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+        let pty2 = PtySession::spawn(config2).unwrap();
+        let vt2 = VtScreen::new(80, 24);
+        let mut ps2 = ProjectSession::new("agy-session", "ws", "agy");
+        ps2.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        // 3. Default / Other session
+        let config3 = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty3 = PtySession::spawn(config3).unwrap();
+        let vt3 = VtScreen::new(80, 24);
+        let mut ps3 = ProjectSession::new("other-session", "ws", "copilot");
+        ps3.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps3, pty3, vt3).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        // Active: claude -> Shift+Enter (\x1b[13;2u) sets status to Busy
+        assert_eq!(app.registry.active_index(), Some(0));
+        app.handle_raw_bytes(b"\x1b[13;2u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // Shift+Enter Kitty alternate (\x1b[13:10;2u) and xterm (\x1b[27;2;13~]
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(b"\x1b[13:10;2u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(b"\x1b[27;2;13~");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // Switch to agy (index 1)
+        app.registry.set_active_index(1).unwrap();
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "agy-session"
+        );
+        app.handle_raw_bytes(b"\x1b[13;2u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // Switch to other (index 2)
+        app.registry.set_active_index(2).unwrap();
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "other-session"
+        );
+        app.handle_raw_bytes(b"\x1b[13;2u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // Normal Enter (\r) unaffected
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(b"\r");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_sgr_mouse_scrolling() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+
+        // Session 1: mouse tracking disabled
+        let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+        let pty1 = PtySession::spawn(config1).unwrap();
+        let mut vt1 = VtScreen::new(80, 24);
+        for i in 1..=30 {
+            vt1.process(format!("line {i}\r\n").as_bytes());
+        }
+        let mut ps1 = ProjectSession::new("no-mouse-session", "ws", "claude");
+        ps1.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps1, pty1, vt1).unwrap();
+
+        // Session 2: mouse tracking enabled
+        let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty2 = PtySession::spawn(config2).unwrap();
+        let mut vt2 = VtScreen::new(80, 24);
+        vt2.process(b"\x1b[?1000h");
+        let mut ps2 = ProjectSession::new("mouse-enabled-session", "ws", "agy");
+        ps2.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert_eq!(app.registry.active_index(), Some(0));
+
+        // 1. SGR ScrollUp raw bytes (\x1b[<64;10;5M) scrolls VtScreen scrollback by 3
+        app.handle_raw_bytes(b"\x1b[<64;10;5M");
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
+        // Does not mark activity / status stays WaitingForInput
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::WaitingForInput
+        );
+
+        // ScrollUp again -> scrollback 6
+        app.handle_raw_bytes(b"\x1b[<64;10;5M");
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 6);
+
+        // SGR ScrollDown raw bytes (\x1b[<65;10;5M) scrolls down by 3
+        app.handle_raw_bytes(b"\x1b[<65;10;5M");
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
+
+        // 2. Typing any key resets scrollback to 0
+        app.handle_raw_bytes(b"a");
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
+
+        // 3. Switch to session 2 (mouse enabled)
+        app.registry.set_active_index(1).unwrap();
+        assert!(app
+            .registry
+            .active_session()
+            .unwrap()
+            .vt()
+            .is_mouse_mode_enabled());
+
+        // Forward raw SGR bytes to PTY master and update activity
+        app.handle_raw_bytes(b"\x1b[<64;10;5M");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+    }
+}

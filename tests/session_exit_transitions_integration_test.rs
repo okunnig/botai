@@ -9,7 +9,6 @@ use botai::tui::dashboard::DashboardState;
 use botai::tui::ui::compute_layout;
 use botai::tui::ui::TerminalView;
 use botai::tui::TuiApp;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -77,8 +76,7 @@ fn test_integration_session_exit_normal_multi_session_focus_transition() {
 #[test]
 fn test_integration_session_exit_normal_last_session_returns_to_dashboard() {
     let mut registry = SessionRegistry::new();
-    let (ps, pty, vt) =
-        create_process_session("single-project", "workspace1", "claude", "exit 0");
+    let (ps, pty, vt) = create_process_session("single-project", "workspace1", "claude", "exit 0");
     registry.add(ps, pty, vt).unwrap();
 
     let dashboard = DashboardState::new(vec!["workspace1".to_string()], vec![]);
@@ -143,18 +141,26 @@ fn test_integration_session_exit_error_retention_and_banner_dismissal() {
             let active = app.registry.active_session().unwrap();
             f.render_widget(TerminalView::new(active.vt()), term_area);
             let theme = botai::Theme::default();
-            render_error_banner(active.project_session.exit_code, term_area, f.buffer_mut(), &theme);
+            render_error_banner(
+                active.project_session.exit_code,
+                term_area,
+                f.buffer_mut(),
+                &theme,
+            );
         })
         .unwrap();
 
     let buf = terminal.backend().buffer();
-    let text = buf.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
+    let text = buf
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
     assert!(text.contains("Fatal Error: failed to compile"));
     assert!(text.contains("[Process exited with code 1 - Press Enter or Ctrl+Space w to dismiss]"));
 
     // Dismiss with Enter
-    let enter_key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-    app.handle_key_event(enter_key);
+    app.handle_raw_bytes(b"\r");
 
     assert_eq!(app.registry.len(), 0);
     assert!(app.should_quit);

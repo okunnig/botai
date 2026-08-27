@@ -85,9 +85,7 @@ impl<'a> StatusBar<'a> {
             let inactive_style = Style::default()
                 .fg(theme.tab_inactive_fg)
                 .bg(theme.tab_inactive_bg);
-            let dot_style_inactive = Style::default()
-                .fg(dot_color)
-                .bg(theme.tab_inactive_bg);
+            let dot_style_inactive = Style::default().fg(dot_color).bg(theme.tab_inactive_bg);
 
             vec![
                 Span::styled("  ", inactive_style),
@@ -121,7 +119,9 @@ impl<'a> StatusBar<'a> {
         }
 
         // Fill entire background cleanly
-        let bg_style = Style::default().bg(theme.status_bar_bg).fg(theme.status_bar_fg);
+        let bg_style = Style::default()
+            .bg(theme.status_bar_bg)
+            .fg(theme.status_bar_fg);
         for x in area.left()..area.right() {
             for y in area.top()..area.bottom() {
                 if let Some(cell) = buf.cell_mut((x, y)) {
@@ -132,7 +132,7 @@ impl<'a> StatusBar<'a> {
 
         if registry.is_empty() {
             if leader_active {
-                let leader_msg = "[LEADER: 1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit | Space Literal | Esc Cancel]";
+                let leader_msg = "[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]";
                 let line = Line::from(Span::styled(
                     leader_msg,
                     Style::default()
@@ -218,7 +218,10 @@ impl<'a> StatusBar<'a> {
         if visible_start > 0 {
             spans.push(Span::styled(
                 "◀ ",
-                Style::default().fg(theme.leader_bg).bg(theme.status_bar_bg).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.leader_bg)
+                    .bg(theme.status_bar_bg)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -230,7 +233,10 @@ impl<'a> StatusBar<'a> {
         if visible_end < tab_spans_list.len() {
             spans.push(Span::styled(
                 "▶",
-                Style::default().fg(theme.leader_bg).bg(theme.status_bar_bg).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.leader_bg)
+                    .bg(theme.status_bar_bg)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -239,7 +245,7 @@ impl<'a> StatusBar<'a> {
         buf.set_line(area.x, area.y, &line, area.width);
 
         if leader_active {
-            let leader_msg = "[LEADER: 1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit | Space Literal | Esc Cancel]";
+            let leader_msg = "[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]";
             let leader_len = leader_msg.chars().count() as u16;
             if area.width >= tabs_width + leader_len + 2 {
                 let start_x = area.right().saturating_sub(leader_len + 1);
@@ -259,29 +265,12 @@ impl<'a> StatusBar<'a> {
                 buf.set_line(start_x, area.y, &leader_line, leader_len);
             }
         } else {
-            // Multi-tier responsive hints based on remaining space
-            let full_hints = "Ctrl+Space:Leader | 1..9:Switch | c:New | n/p:Nav | w:Close | d:Detach | q:Quit";
-            let compact_hints = "Ctrl+Space:Leader | 1..9 | c:New | w:Close | d:Detach";
-            let minimal_hints = "Ctrl+Space:Leader";
-
-            let full_len = full_hints.chars().count() as u16;
-            let compact_len = compact_hints.chars().count() as u16;
-            let minimal_len = minimal_hints.chars().count() as u16;
-
-            let hint_to_render = if area.width >= tabs_width + full_len + 2 {
-                Some((full_hints, full_len))
-            } else if area.width >= tabs_width + compact_len + 2 {
-                Some((compact_hints, compact_len))
-            } else if area.width >= tabs_width + minimal_len + 2 {
-                Some((minimal_hints, minimal_len))
-            } else {
-                None
-            };
-
-            if let Some((hint_str, hint_len)) = hint_to_render {
+            let hint = "Ctrl+Space: Actions";
+            let hint_len = hint.chars().count() as u16;
+            if area.width >= tabs_width + hint_len + 2 {
                 let start_x = area.right().saturating_sub(hint_len + 1);
                 let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
-                let hint_line = Line::from(Span::styled(hint_str, hint_style));
+                let hint_line = Line::from(Span::styled(hint, hint_style));
                 buf.set_line(start_x, area.y, &hint_line, hint_len);
             }
         }
@@ -404,6 +393,7 @@ mod tests {
     #[test]
     fn test_status_bar_empty_registry_rendering() {
         let registry = SessionRegistry::new();
+        // Inactive leader
         let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 1));
         StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 100, 1), &mut buffer);
 
@@ -413,6 +403,19 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered.contains("No Active Sessions"));
+        assert!(rendered.contains("Press Ctrl+Space then q to quit"));
+
+        // Active leader
+        let mut buffer_leader = Buffer::empty(Rect::new(0, 0, 100, 1));
+        StatusBar::render_to_buffer(&registry, true, Rect::new(0, 0, 100, 1), &mut buffer_leader);
+
+        let rendered_leader = buffer_leader
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered_leader
+            .contains("[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]"));
     }
 
     #[test]
@@ -432,7 +435,13 @@ mod tests {
 
         let theme = Theme::tokyo_night();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 160, 1));
-        StatusBar::render_to_buffer_with_theme(&registry, false, &theme, Rect::new(0, 0, 160, 1), &mut buffer);
+        StatusBar::render_to_buffer_with_theme(
+            &registry,
+            false,
+            &theme,
+            Rect::new(0, 0, 160, 1),
+            &mut buffer,
+        );
 
         let rendered = buffer
             .content()
@@ -442,9 +451,7 @@ mod tests {
 
         assert!(rendered.contains("● 1: proj-backend"));
         assert!(rendered.contains("● 2: proj-frontend"));
-        assert!(rendered.contains("Ctrl+Space:Leader"));
-        assert!(rendered.contains("1..9:Switch"));
-        assert!(rendered.contains("c:New"));
+        assert!(rendered.contains("Ctrl+Space: Actions"));
 
         // Verify status dot colors in buffer cells
         // Session 1 (active, Busy): dot at x = 2
@@ -479,7 +486,7 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("● 1: proj-backend"));
-        assert!(rendered.contains("[LEADER: 1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit | Space Literal | Esc Cancel]"));
+        assert!(rendered.contains("[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]"));
     }
 
     #[test]
@@ -493,30 +500,28 @@ mod tests {
         registry.add(ps1, pty1, vt1).unwrap();
         registry.add(ps2, pty2, vt2).unwrap();
 
-        // 1. 200 cols -> Full hints
-        let mut buf200 = Buffer::empty(Rect::new(0, 0, 200, 1));
-        StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 200, 1), &mut buf200);
-        let rendered200 = buf200.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
-        assert!(rendered200.contains("Ctrl+Space:Leader | 1..9:Switch | c:New | n/p:Nav | w:Close | d:Detach | q:Quit"));
+        // 1. Wide buffer (100 cols) -> Displays "Ctrl+Space: Actions"
+        let mut buf_wide = Buffer::empty(Rect::new(0, 0, 100, 1));
+        StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 100, 1), &mut buf_wide);
+        let rendered_wide = buf_wide
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered_wide.contains("● 1: p1"));
+        assert!(rendered_wide.contains("● 2: p2"));
+        assert!(rendered_wide.contains("Ctrl+Space: Actions"));
 
-        // 2. 95 cols -> Compact hints
-        let mut buf95 = Buffer::empty(Rect::new(0, 0, 95, 1));
-        StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 95, 1), &mut buf95);
-        let rendered95 = buf95.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
-        assert!(rendered95.contains("Ctrl+Space:Leader | 1..9 | c:New | w:Close | d:Detach"));
-
-        // 3. 60 cols -> Minimal hints
-        let mut buf60 = Buffer::empty(Rect::new(0, 0, 60, 1));
-        StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 60, 1), &mut buf60);
-        let rendered60 = buf60.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
-        assert!(rendered60.contains("Ctrl+Space:Leader"));
-
-        // 4. 20 cols -> Tight space, hints gracefully hidden, active tab still visible
-        let mut buf20 = Buffer::empty(Rect::new(0, 0, 20, 1));
-        StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 20, 1), &mut buf20);
-        let rendered20 = buf20.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
-        assert!(rendered20.contains("● 1: p1"));
-        assert!(!rendered20.contains("Ctrl+Space:Leader"));
+        // 2. Tight buffer (35 cols) -> Tabs visible, hint cleanly omitted
+        let mut buf_tight = Buffer::empty(Rect::new(0, 0, 35, 1));
+        StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 35, 1), &mut buf_tight);
+        let rendered_tight = buf_tight
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered_tight.contains("● 1: p1"));
+        assert!(!rendered_tight.contains("Ctrl+Space: Actions"));
     }
 
     #[test]
@@ -535,7 +540,11 @@ mod tests {
         // Render in a 60-col width buffer (cannot fit all 10 long tabs)
         let mut buf60 = Buffer::empty(Rect::new(0, 0, 60, 1));
         StatusBar::render_to_buffer(&registry, false, Rect::new(0, 0, 60, 1), &mut buf60);
-        let rendered60 = buf60.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
+        let rendered60 = buf60
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
 
         // Active tab 8 MUST be rendered
         assert!(
@@ -553,10 +562,20 @@ mod tests {
 
         let theme = Theme::cyberpunk();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 1));
-        StatusBar::render_to_buffer_with_theme(&registry, false, &theme, Rect::new(0, 0, 80, 1), &mut buffer);
+        StatusBar::render_to_buffer_with_theme(
+            &registry,
+            false,
+            &theme,
+            Rect::new(0, 0, 80, 1),
+            &mut buffer,
+        );
 
         // Check active tab text and colors
-        let rendered = buffer.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
         assert!(rendered.contains("● 1: themed-proj"));
 
         // Tab leading space cell at (1, 0) matches tab_active_fg and tab_active_bg
@@ -610,7 +629,13 @@ mod tests {
                 registry.add(ps, pty, vt).unwrap();
 
                 let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 1));
-                StatusBar::render_to_buffer_with_theme(&registry, false, theme, Rect::new(0, 0, 60, 1), &mut buffer);
+                StatusBar::render_to_buffer_with_theme(
+                    &registry,
+                    false,
+                    theme,
+                    Rect::new(0, 0, 60, 1),
+                    &mut buffer,
+                );
 
                 // Dot cell is at (2, 0)
                 let dot_cell = buffer.cell((2, 0)).unwrap();

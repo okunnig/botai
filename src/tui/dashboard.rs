@@ -52,9 +52,7 @@ impl DestroyModalState {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 Some(DashboardAction::Destroy(self.project_name.clone()))
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                Some(DashboardAction::None)
-            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(DashboardAction::None),
             _ => None,
         }
     }
@@ -76,23 +74,27 @@ pub struct DashboardState {
 impl DashboardState {
     /// Creates a new `DashboardState` with given templates and local projects.
     pub fn new(templates: Vec<String>, local_projects: Vec<String>) -> Self {
-        let mut config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-            .unwrap_or_else(|_| Config {
-                default_agent: "claude".to_string(),
-                theme: "tokyo-night".to_string(),
-                repos_dir: PathBuf::from(".botai_repos"),
-                agents: HashMap::new(),
-                templates: HashMap::new(),
-            });
+        let mut config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                .unwrap_or_else(|_| Config {
+                    default_agent: "claude".to_string(),
+                    theme: "tokyo-night".to_string(),
+                    repos_dir: PathBuf::from(".botai_repos"),
+                    agents: HashMap::new(),
+                    templates: HashMap::new(),
+                });
 
         for tpl in &templates {
-            config.templates.entry(tpl.clone()).or_insert_with(|| crate::config::TemplateConfig {
-                description: None,
-                default_agent: None,
-                agents_md_append: None,
-                repos: Vec::new(),
-                env: HashMap::new(),
-            });
+            config
+                .templates
+                .entry(tpl.clone())
+                .or_insert_with(|| crate::config::TemplateConfig {
+                    description: None,
+                    default_agent: None,
+                    agents_md_append: None,
+                    repos: Vec::new(),
+                    env: HashMap::new(),
+                });
         }
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -184,7 +186,11 @@ impl DashboardState {
     /// Opens the project creation modal.
     pub fn open_creation_modal(&mut self) {
         let default_tpl = self.templates.first().map(|s| s.as_str());
-        self.creation_modal = Some(ProjectCreationModal::new(&self.config, &self.cwd, default_tpl));
+        self.creation_modal = Some(ProjectCreationModal::new(
+            &self.config,
+            &self.cwd,
+            default_tpl,
+        ));
     }
 
     /// Closes the project creation modal.
@@ -392,9 +398,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
 
     if let Some((hint_str, hint_len)) = hint_to_render {
         let start_x = header_area.right().saturating_sub(hint_len + 1);
-        let hint_style = Style::default()
-            .fg(theme.key_hint)
-            .bg(theme.status_bar_bg);
+        let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
         let hint_line = Line::from(Span::styled(hint_str, hint_style));
         buf.set_line(start_x, header_area.y, &hint_line, hint_len);
     }
@@ -414,8 +418,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
 
     if state.local_projects.is_empty() {
         let empty_msg = "No local projects found in CWD. Press [n] or [c] to create a new project.";
-        let msg = Paragraph::new(empty_msg)
-            .style(Style::default().fg(theme.input_placeholder));
+        let msg = Paragraph::new(empty_msg).style(Style::default().fg(theme.input_placeholder));
         msg.render(inner, buf);
     } else {
         let items: Vec<ListItem> = state
@@ -595,7 +598,8 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(text_wide.contains("botai"));
-        assert!(text_wide.contains("↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"));
+        assert!(text_wide
+            .contains("↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"));
 
         // 2. Medium screen (60 cols) -> Compact hints
         let area_med = Rect::new(0, 0, 60, 20);
@@ -672,7 +676,8 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        assert!(rendered.contains("No local projects found in CWD. Press [n] or [c] to create a new project."));
+        assert!(rendered
+            .contains("No local projects found in CWD. Press [n] or [c] to create a new project."));
     }
 
     #[test]
@@ -712,10 +717,8 @@ mod tests {
 
     #[test]
     fn test_dashboard_themed_rendering() {
-        let state = DashboardState::new(
-            vec!["ws-backend".to_string()],
-            vec!["proj-api".to_string()],
-        );
+        let state =
+            DashboardState::new(vec!["ws-backend".to_string()], vec!["proj-api".to_string()]);
 
         let area = Rect::new(0, 0, 100, 20);
         let mut buf = Buffer::empty(area);
@@ -1037,10 +1040,7 @@ command = "claude"
 
     #[test]
     fn test_render_destroy_modal() {
-        let mut state = DashboardState::new(
-            vec!["ws".into()],
-            vec!["legacy-app".into()],
-        );
+        let mut state = DashboardState::new(vec!["ws".into()], vec!["legacy-app".into()]);
         state.destroy_modal = Some(DestroyModalState::new("legacy-app"));
 
         let area = Rect::new(0, 0, 100, 30);
@@ -1189,8 +1189,8 @@ command = "claude"
         running.insert("proj-busy".to_string(), SessionStatus::Busy);
 
         let projects = vec!["proj-busy".to_string()];
-        let state = DashboardState::new(vec!["ws".to_string()], projects)
-            .with_running_sessions(running);
+        let state =
+            DashboardState::new(vec!["ws".to_string()], projects).with_running_sessions(running);
 
         let area = Rect::new(0, 0, 100, 20);
         let mut buf = Buffer::empty(area);
@@ -1209,7 +1209,11 @@ command = "claude"
 
         let mut state = DashboardState::new(
             vec!["ws1".to_string()],
-            vec!["proj1".to_string(), "proj2".to_string(), "proj3".to_string()],
+            vec![
+                "proj1".to_string(),
+                "proj2".to_string(),
+                "proj3".to_string(),
+            ],
         );
 
         assert_eq!(state.selected_project_idx, 0);
