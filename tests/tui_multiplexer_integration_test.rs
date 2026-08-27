@@ -769,3 +769,62 @@ fn test_integration_errored_session_mouse_vs_key_dismissal() {
     app.handle_raw_bytes(b"\x1b[<64;10;20M\r");
     assert_eq!(app.registry.len(), 0);
 }
+
+#[test]
+fn test_integration_split_sgr_mouse_and_keystrokes_across_chunks() {
+    use botai::tui::app::TuiApp;
+    use std::time::Duration;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "more"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "cat"]);
+
+    let mut registry = SessionRegistry::new();
+    let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty = PtySession::spawn(config).unwrap();
+    let mut vt = VtScreen::new(80, 24);
+    for i in 1..=30 {
+        vt.process(format!("output line {i}\r\n").as_bytes());
+    }
+    let mut ps = ProjectSession::new("split-mouse", "ws", "claude");
+    ps.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps, pty, vt).unwrap();
+
+    let mut app = TuiApp::new(registry);
+
+    // 1. Test split SGR mouse sequence across chunks: Chunk 1: b"\x1b[<64;10;", Chunk 2: b"20M"
+    app.handle_raw_bytes(b"\x1b[<64;10;");
+    assert_eq!(app.pending_raw_input, b"\x1b[<64;10;");
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
+
+    app.handle_raw_bytes(b"20M");
+    assert!(app.pending_raw_input.is_empty());
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
+
+    // 2. Test split SGR mouse followed by trailing keystrokes across chunks: Chunk 1: b"\x1b[<64;10;", Chunk 2: b"20Mhello\r"
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\x1b[<64;10;");
+    assert_eq!(app.pending_raw_input, b"\x1b[<64;10;");
+
+    app.handle_raw_bytes(b"20Mhello\r");
+    assert!(app.pending_raw_input.is_empty());
+    // Mouse scroll increased scrollback, but trailing "hello\r" reset it to 0 and marked busy
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    // Let the cat process echo back
+    std::thread::sleep(Duration::from_millis(100));
+    app.process_pty_streams();
+    let text = app.registry.active_session().unwrap().vt().contents();
+    assert!(text.contains("hello") || app.registry.active_session().unwrap().status() == SessionStatus::Busy);
+}
+

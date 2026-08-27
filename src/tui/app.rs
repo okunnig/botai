@@ -31,7 +31,8 @@ use crate::session::{
 };
 use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
 use crate::tui::events::{
-    is_shift_enter, parse_raw_events, parse_sgr_mouse, RawAction, RawLeaderDecoder,
+    is_incomplete_sgr_mouse, is_shift_enter, parse_raw_events, parse_sgr_mouse, RawAction,
+    RawLeaderDecoder,
 };
 use crate::tui::quick_launcher::{render_quick_launcher, QuickLauncherAction, QuickLauncherState};
 use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
@@ -55,6 +56,7 @@ pub struct TuiApp {
     pub leader_active: bool,
     pub showing_dashboard: bool,
     pub raw_decoder: RawLeaderDecoder,
+    pub pending_raw_input: Vec<u8>,
 }
 
 struct TerminalCleanupGuard;
@@ -115,6 +117,7 @@ impl TuiApp {
             leader_active: false,
             showing_dashboard: false,
             raw_decoder: RawLeaderDecoder::new(),
+            pending_raw_input: Vec::new(),
         }
     }
 
@@ -973,32 +976,44 @@ impl TuiApp {
 
     /// Feeds raw stdin bytes directly into the `RawLeaderDecoder` and processes the resulting actions,
     /// demuxing SGR mouse sequences so they are dispatched to `handle_mouse_event` without dropping
-    /// interleaved or trailing keystrokes.
+    /// interleaved or trailing keystrokes, and buffering incomplete cross-chunk SGR mouse sequences.
     pub fn handle_raw_bytes(&mut self, bytes: &[u8]) {
+        let mut combined = Vec::with_capacity(self.pending_raw_input.len() + bytes.len());
+        combined.extend_from_slice(&self.pending_raw_input);
+        combined.extend_from_slice(bytes);
+        self.pending_raw_input.clear();
+
         let mut i = 0;
         let mut seg_start = 0;
 
-        while i < bytes.len() {
-            if bytes[i..].starts_with(b"\x1b[<") {
-                if let Some((consumed, mouse)) = parse_sgr_mouse(&bytes[i..]) {
+        while i < combined.len() {
+            let slice = &combined[i..];
+            if slice.starts_with(b"\x1b[<") || is_incomplete_sgr_mouse(slice) {
+                if let Some((consumed, mouse)) = parse_sgr_mouse(slice) {
                     // Process non-mouse key bytes accumulated before this mouse sequence
-                    if seg_start < i {
-                        if self.process_non_mouse_bytes(&bytes[seg_start..i]) {
-                            return; // Errored session dismissed
-                        }
+                    if seg_start < i && self.process_non_mouse_bytes(&combined[seg_start..i]) {
+                        return; // Errored session dismissed
                     }
                     self.handle_mouse_event(mouse);
                     i += consumed;
                     seg_start = i;
                     continue;
+                } else if is_incomplete_sgr_mouse(slice) {
+                    // Incomplete SGR mouse sequence at the tail of input
+                    if seg_start < i && self.process_non_mouse_bytes(&combined[seg_start..i]) {
+                        return; // Errored session dismissed
+                    }
+                    self.pending_raw_input.extend_from_slice(slice);
+                    seg_start = combined.len();
+                    break;
                 }
             }
             i += 1;
         }
 
         // Process trailing non-mouse key bytes
-        if seg_start < bytes.len() {
-            self.process_non_mouse_bytes(&bytes[seg_start..]);
+        if seg_start < combined.len() {
+            self.process_non_mouse_bytes(&combined[seg_start..]);
         }
     }
 
@@ -1082,14 +1097,14 @@ mod tests {
         app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
 
-        // 2. Esc cancels leader mode
-        app.handle_raw_bytes(&[0x1b]);
+        // 2. Unrecognized key cancels leader mode
+        app.handle_raw_bytes(b"z");
         assert!(!app.leader_active);
 
-        // 3. Unrecognized key cancels leader mode
+        // 3. Arrow / CSI escape cancels leader mode
         app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
-        app.handle_raw_bytes(b"z");
+        app.handle_raw_bytes(b"\x1b[A");
         assert!(!app.leader_active);
     }
 

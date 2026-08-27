@@ -92,7 +92,7 @@ impl RawLeaderDecoder {
                         actions.push(RawAction::Passthrough(vec![0x00]));
                         i += Self::KITTY_CTRL_SPACE.len();
                         continue;
-                    } else if rest.starts_with(b"\x1b[") && Self::KITTY_CTRL_SPACE.starts_with(rest)
+                    } else if rest.starts_with(b"\x1b") && Self::KITTY_CTRL_SPACE.starts_with(rest)
                     {
                         // Incomplete prefix of Kitty Ctrl+Space at the end of input
                         self.flush_passthrough(&mut actions, &mut passthrough_buf);
@@ -223,7 +223,7 @@ pub fn is_shift_enter(bytes: &[u8]) -> bool {
     if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"u") && bytes.len() >= 4 {
         if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
             let parts: Vec<&str> = param_str.split(';').collect();
-            let key_code = parts.get(0).and_then(|s| s.split(':').next()).unwrap_or("");
+            let key_code = parts.first().and_then(|s| s.split(':').next()).unwrap_or("");
             if key_code == "13" || key_code == "10" {
                 if let Some(mod_part) = parts.get(1) {
                     if let Some(mod_str) = mod_part.split(':').next() {
@@ -243,7 +243,7 @@ pub fn is_shift_enter(bytes: &[u8]) -> bool {
     if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"~") && bytes.len() >= 6 {
         if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
             let parts: Vec<&str> = param_str.split(';').collect();
-            if parts.len() == 3 && parts.get(0).and_then(|s| s.split(':').next()) == Some("27") {
+            if parts.len() == 3 && parts.first().and_then(|s| s.split(':').next()) == Some("27") {
                 let key_code = parts.get(2).and_then(|s| s.split(':').next()).unwrap_or("");
                 if key_code == "13" || key_code == "10" {
                     if let Some(mod_part) = parts.get(1) {
@@ -354,6 +354,32 @@ pub fn parse_sgr_mouse(bytes: &[u8]) -> Option<(usize, MouseEvent)> {
     Some((total_len, mouse))
 }
 
+/// Returns whether `bytes` is a valid incomplete prefix of an SGR mouse sequence.
+pub fn is_incomplete_sgr_mouse(bytes: &[u8]) -> bool {
+    if bytes.is_empty() || bytes.len() > 32 {
+        return false;
+    }
+    match bytes.len() {
+        1 => bytes == b"\x1b",
+        2 => bytes == b"\x1b[",
+        3 => bytes == b"\x1b[<",
+        _ => {
+            if !bytes.starts_with(b"\x1b[<") {
+                return false;
+            }
+            let rest = &bytes[3..];
+            if rest.contains(&b'M') || rest.contains(&b'm') {
+                return false;
+            }
+            let semicolon_count = rest.iter().filter(|&&b| b == b';').count();
+            if semicolon_count > 2 {
+                return false;
+            }
+            rest.iter().all(|&b| b.is_ascii_digit() || b == b';')
+        }
+    }
+}
+
 /// Decodes raw input bytes into a sequence of crossterm `Event`s (Key, Paste, Mouse)
 /// for consumption by modal dialogues and the dashboard.
 pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
@@ -433,7 +459,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             if let Some(tilde_pos) = rest.iter().position(|&b| b == b'~') {
                 if let Ok(param_str) = std::str::from_utf8(&rest[..tilde_pos]) {
                     let parts: Vec<&str> = param_str.split(';').collect();
-                    if parts.len() == 3 && parts.get(0).and_then(|s| s.split(':').next()) == Some("27") {
+                    if parts.len() == 3 && parts.first().and_then(|s| s.split(':').next()) == Some("27") {
                         let mod_num = parts
                             .get(1)
                             .and_then(|s| s.split(':').next())
@@ -462,7 +488,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
                             continue;
                         }
                     } else {
-                        let key_num = parts.get(0).and_then(|s| s.split(':').next()).and_then(|s| s.parse::<u32>().ok());
+                        let key_num = parts.first().and_then(|s| s.split(':').next()).and_then(|s| s.parse::<u32>().ok());
                         let mod_num = parts
                             .get(1)
                             .and_then(|s| s.split(':').next())
@@ -503,7 +529,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             if let Some(u_pos) = rest.iter().position(|&b| b == b'u') {
                 if let Ok(param_str) = std::str::from_utf8(&rest[..u_pos]) {
                     let parts: Vec<&str> = param_str.split(';').collect();
-                    let cp_str = parts.get(0).and_then(|s| s.split(':').next()).unwrap_or("");
+                    let cp_str = parts.first().and_then(|s| s.split(':').next()).unwrap_or("");
                     let codepoint = cp_str.parse::<u32>().ok();
                     let mod_num = parts
                         .get(1)
@@ -945,11 +971,13 @@ mod tests {
 
         // Esc or any unrecognized byte -> CancelLeader
         decoder.set_leader_active(true);
-        assert_eq!(decoder.decode(&[0x1b]), vec![RawAction::CancelLeader]);
+        assert_eq!(decoder.decode(b"z"), vec![RawAction::CancelLeader]);
         assert!(!decoder.is_leader_active());
 
+        // Single Esc in leader mode buffers pending escape and flushes as CancelLeader
         decoder.set_leader_active(true);
-        assert_eq!(decoder.decode(b"z"), vec![RawAction::CancelLeader]);
+        assert_eq!(decoder.decode(&[0x1b]), vec![]);
+        assert_eq!(decoder.flush(), vec![RawAction::CancelLeader]);
         assert!(!decoder.is_leader_active());
     }
 
@@ -1412,11 +1440,53 @@ mod tests {
         let flushed = decoder.flush();
         assert_eq!(flushed, vec![RawAction::Passthrough(vec![0x1b])]);
 
-        // 6. Active leader mode: single \x1b cancels leader immediately
+        // 6. Active leader mode: single \x1b followed by flush cancels leader
         decoder.set_leader_active(true);
         let actions_esc = decoder.decode(b"\x1b");
-        assert_eq!(actions_esc, vec![RawAction::CancelLeader]);
+        assert_eq!(actions_esc, vec![]);
+        assert!(decoder.is_leader_active());
+        let flushed = decoder.flush();
+        assert_eq!(flushed, vec![RawAction::CancelLeader]);
         assert!(!decoder.is_leader_active());
+
+        // 7. Active leader mode: split on \x1b followed by [32;5u -> emits Passthrough(0x00)
+        decoder.set_leader_active(true);
+        let actions_split1 = decoder.decode(b"\x1b");
+        assert_eq!(actions_split1, vec![]);
+        assert!(decoder.is_leader_active());
+        let actions_split2 = decoder.decode(b"[32;5u");
+        assert_eq!(actions_split2, vec![RawAction::Passthrough(vec![0x00])]);
+        assert!(!decoder.is_leader_active());
+    }
+
+    #[test]
+    fn test_is_incomplete_sgr_mouse() {
+        // Valid incomplete prefixes
+        assert!(is_incomplete_sgr_mouse(b"\x1b"));
+        assert!(is_incomplete_sgr_mouse(b"\x1b["));
+        assert!(is_incomplete_sgr_mouse(b"\x1b[<"));
+        assert!(is_incomplete_sgr_mouse(b"\x1b[<64"));
+        assert!(is_incomplete_sgr_mouse(b"\x1b[<64;"));
+        assert!(is_incomplete_sgr_mouse(b"\x1b[<64;10"));
+        assert!(is_incomplete_sgr_mouse(b"\x1b[<64;10;"));
+        assert!(is_incomplete_sgr_mouse(b"\x1b[<64;10;20"));
+
+        // Complete SGR mouse sequences (not incomplete)
+        assert!(!is_incomplete_sgr_mouse(b"\x1b[<64;10;20M"));
+        assert!(!is_incomplete_sgr_mouse(b"\x1b[<64;10;20m"));
+        assert!(!is_incomplete_sgr_mouse(b"\x1b[<0;1;1M"));
+        assert!(!is_incomplete_sgr_mouse(b"\x1b[<0;1;1m"));
+
+        // Invalid prefixes
+        assert!(!is_incomplete_sgr_mouse(b""));
+        assert!(!is_incomplete_sgr_mouse(b"a"));
+        assert!(!is_incomplete_sgr_mouse(b"hello"));
+        assert!(!is_incomplete_sgr_mouse(b"\x1b[A"));
+        assert!(!is_incomplete_sgr_mouse(b"\x1b[13;2u"));
+        assert!(!is_incomplete_sgr_mouse(b"\x1b[27;2;13~"));
+        assert!(!is_incomplete_sgr_mouse(b"\x1b[<64;10;20;30"));
+        assert!(!is_incomplete_sgr_mouse(b"\x1b[<invalid"));
+        assert!(!is_incomplete_sgr_mouse(&[b'x'; 33]));
     }
 
     #[test]

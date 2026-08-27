@@ -171,8 +171,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Encodes and decodes modified key events using standard Xterm / CSI-u modifier parameter values:
     `modifier_code = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0) + (Super/Meta ? 8 : 0)`.
     - Handles progressive Kitty sub-parameters (`\x1b[<codepoint>:<shifted>;<modifiers>:<event_type>u`) and masks out lock keys (Caps Lock `64`, Num Lock `128`) to accurately detect modifiers under all keyboard states.
-    - Buffers split escape sequences across chunk boundaries (including single `\x1b` byte splits) in `RawLeaderDecoder` to prevent raw escape leakages.
-    - Stream-demuxes mixed input buffers containing interleaved SGR mouse sequences (`\x1b[<...M/m`) and keystrokes without dropping trailing keys.
+    - Buffers split escape sequences across chunk boundaries (including single `\x1b` byte splits) in `RawLeaderDecoder` symmetrically across inactive and active leader modes to prevent raw escape leakages.
+    - Stream-demuxes mixed input buffers containing interleaved SGR mouse sequences (`\x1b[<...M/m`) and keystrokes, buffering incomplete cross-chunk SGR mouse prefixes without dropping trailing keys or leaking coordinates.
   - **Modified Enter, Shift+Enter, and Newlines**:
     - Unmodified Enter (`KeyCode::Enter` with no modifiers): `\r` (`0x0D`, CR).
     - Unmodified Newline (`KeyCode::Char('\n')` with no modifiers): `\n` (`0x0A`, LF / Ctrl+J).
