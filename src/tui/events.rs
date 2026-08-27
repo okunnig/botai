@@ -564,36 +564,18 @@ mod tests {
     #[test]
     fn test_is_ctrl_space_recognition() {
         // Ctrl+Space
-        assert!(is_ctrl_space(&make_key(
-            KeyCode::Char(' '),
-            KeyModifiers::CONTROL
-        )));
+        assert!(is_ctrl_space(&make_key(KeyCode::Char(' '), KeyModifiers::CONTROL)));
         // Ctrl+@
-        assert!(is_ctrl_space(&make_key(
-            KeyCode::Char('@'),
-            KeyModifiers::CONTROL
-        )));
+        assert!(is_ctrl_space(&make_key(KeyCode::Char('@'), KeyModifiers::CONTROL)));
         // Char('\0')
-        assert!(is_ctrl_space(&make_key(
-            KeyCode::Char('\0'),
-            KeyModifiers::NONE
-        )));
-        assert!(is_ctrl_space(&make_key(
-            KeyCode::Char('\0'),
-            KeyModifiers::CONTROL
-        )));
+        assert!(is_ctrl_space(&make_key(KeyCode::Char('\0'), KeyModifiers::NONE)));
+        assert!(is_ctrl_space(&make_key(KeyCode::Char('\0'), KeyModifiers::CONTROL)));
         // KeyCode::Null
         assert!(is_ctrl_space(&make_key(KeyCode::Null, KeyModifiers::NONE)));
 
         // Non-Ctrl+Space
-        assert!(!is_ctrl_space(&make_key(
-            KeyCode::Char(' '),
-            KeyModifiers::NONE
-        )));
-        assert!(!is_ctrl_space(&make_key(
-            KeyCode::Char('a'),
-            KeyModifiers::CONTROL
-        )));
+        assert!(!is_ctrl_space(&make_key(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(!is_ctrl_space(&make_key(KeyCode::Char('a'), KeyModifiers::CONTROL)));
         assert!(!is_ctrl_space(&make_key(KeyCode::Esc, KeyModifiers::NONE)));
     }
 
@@ -882,10 +864,7 @@ mod tests {
         assert_eq!(modifier_code(KeyModifiers::ALT), 3);
         assert_eq!(modifier_code(KeyModifiers::SHIFT | KeyModifiers::ALT), 4);
         assert_eq!(modifier_code(KeyModifiers::CONTROL), 5);
-        assert_eq!(
-            modifier_code(KeyModifiers::CONTROL | KeyModifiers::SHIFT),
-            6
-        );
+        assert_eq!(modifier_code(KeyModifiers::CONTROL | KeyModifiers::SHIFT), 6);
         assert_eq!(modifier_code(KeyModifiers::CONTROL | KeyModifiers::ALT), 7);
         assert_eq!(
             modifier_code(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT),
@@ -893,10 +872,7 @@ mod tests {
         );
         assert_eq!(modifier_code(KeyModifiers::SUPER), 9);
         assert_eq!(modifier_code(KeyModifiers::META), 9);
-        assert_eq!(
-            modifier_code(KeyModifiers::CONTROL | KeyModifiers::SUPER),
-            13
-        );
+        assert_eq!(modifier_code(KeyModifiers::CONTROL | KeyModifiers::SUPER), 13);
         assert_eq!(
             KeyHandler::modifier_code(KeyModifiers::CONTROL | KeyModifiers::SHIFT),
             6

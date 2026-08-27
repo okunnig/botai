@@ -107,8 +107,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     assert!(!rendered_text.contains("Project Templates"));
     assert!(rendered_text.contains("payment-gateway"));
     assert!(rendered_text.contains("user-auth-service"));
-    assert!(rendered_text
-        .contains("↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"));
+    assert!(rendered_text.contains("↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"));
 
     // 5. Navigate to second project and attach
     state.handle_key(key(KeyCode::Down));
@@ -233,8 +232,7 @@ fn test_integration_dashboard_empty_state_rendering() {
     let tmp = tempdir().expect("Failed to create tempdir");
     let cwd = tmp.path();
 
-    let config =
-        Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \"/repos\"\n").unwrap();
+    let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \"/repos\"\n").unwrap();
     let state = DashboardState::from_env(&config, cwd);
 
     let backend = TestBackend::new(100, 20);
@@ -255,9 +253,7 @@ fn test_integration_dashboard_empty_state_rendering() {
         .collect::<String>();
 
     assert!(text.contains("Local Projects"));
-    assert!(
-        text.contains("No local projects found in CWD. Press [n] or [c] to create a new project.")
-    );
+    assert!(text.contains("No local projects found in CWD. Press [n] or [c] to create a new project."));
 }
 
 #[test]
@@ -453,11 +449,7 @@ repos = []
         .unwrap();
 
     let buffer = terminal.backend().buffer();
-    let rendered = buffer
-        .content()
-        .iter()
-        .map(ratatui::buffer::Cell::symbol)
-        .collect::<String>();
+    let rendered = buffer.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
 
     assert!(rendered.contains("svc-running"));
     assert!(rendered.contains("svc-stopped"));

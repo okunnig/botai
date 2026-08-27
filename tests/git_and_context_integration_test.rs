@@ -202,8 +202,8 @@ fn test_template_agents_md_append_integration() {
         .with_repos(vec![RepoMapping::new("service", &repo, &service_wt)])
         .with_agents_md_append(custom_instructions);
 
-    let agents_md_path =
-        generate_agents_md(&project_root, &context).expect("Failed to generate AGENTS.md");
+    let agents_md_path = generate_agents_md(&project_root, &context)
+        .expect("Failed to generate AGENTS.md");
     assert!(agents_md_path.exists());
 
     let content = fs::read_to_string(&agents_md_path).expect("Failed to read AGENTS.md");
@@ -236,12 +236,9 @@ fn test_project_destruction_clean_removal_of_central_repo_worktrees_and_metadata
     create_worktree(&central_repo, &worktree_path, project_name)
         .expect("Failed to create worktree");
 
-    let repo_mappings = vec![RepoMapping::new(
-        "central_service",
-        &central_repo,
-        &worktree_path,
-    )];
-    let context = ProjectContext::new(project_name, "my-template").with_repos(repo_mappings);
+    let repo_mappings = vec![RepoMapping::new("central_service", &central_repo, &worktree_path)];
+    let context = ProjectContext::new(project_name, "my-template")
+        .with_repos(repo_mappings);
     let _ = generate_agents_md(&project_root, &context).expect("generate agents.md");
 
     // 3. Verify resolve_main_repo discovers central_repo
@@ -295,10 +292,7 @@ fn test_project_destruction_clean_removal_of_central_repo_worktrees_and_metadata
     );
 
     // c. Central repo's .git/worktrees entry is pruned
-    let central_wt_dir = central_repo
-        .join(".git")
-        .join("worktrees")
-        .join("central_service");
+    let central_wt_dir = central_repo.join(".git").join("worktrees").join("central_service");
     assert!(
         !central_wt_dir.exists(),
         "Central repo .git/worktrees/<name> must be pruned"
@@ -318,10 +312,7 @@ fn test_project_destruction_clean_removal_of_central_repo_worktrees_and_metadata
         .expect("git branch -D");
     assert!(delete_branch_status.success());
 
-    let new_project_root = temp_dir
-        .path()
-        .join("projects")
-        .join("feature-xyz-recreated");
+    let new_project_root = temp_dir.path().join("projects").join("feature-xyz-recreated");
     fs::create_dir_all(&new_project_root).expect("create new project root");
     let new_wt_path = new_project_root.join("central_service");
 
@@ -336,3 +327,4 @@ fn test_project_destruction_clean_removal_of_central_repo_worktrees_and_metadata
     // Cleanup recreated worktree
     botai::git::remove_worktree_auto(&new_wt_path, false).expect("cleanup recreated");
 }
+

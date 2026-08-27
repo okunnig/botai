@@ -66,27 +66,23 @@ impl QuickLauncherState {
         local_projects: Vec<String>,
         default_template: Option<&str>,
     ) -> Self {
-        let mut config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                });
+        let mut config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+            .unwrap_or_else(|_| Config {
+                default_agent: "claude".to_string(),
+                theme: "tokyo-night".to_string(),
+                repos_dir: PathBuf::from(".botai_repos"),
+                agents: HashMap::new(),
+                templates: HashMap::new(),
+            });
 
         for tpl in &templates {
-            config
-                .templates
-                .entry(tpl.clone())
-                .or_insert_with(|| crate::config::TemplateConfig {
-                    description: None,
-                    default_agent: None,
-                    agents_md_append: None,
-                    repos: Vec::new(),
-                    env: HashMap::new(),
-                });
+            config.templates.entry(tpl.clone()).or_insert_with(|| crate::config::TemplateConfig {
+                description: None,
+                default_agent: None,
+                agents_md_append: None,
+                repos: Vec::new(),
+                env: HashMap::new(),
+            });
         }
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let mut creation_modal = ProjectCreationModal::new(&config, &cwd, default_template);
@@ -130,13 +126,19 @@ impl QuickLauncherState {
     }
 
     /// Sets the map of currently running sessions.
-    pub fn with_running_sessions(mut self, running: HashMap<String, SessionStatus>) -> Self {
+    pub fn with_running_sessions(
+        mut self,
+        running: HashMap<String, SessionStatus>,
+    ) -> Self {
         self.running_sessions = running;
         self
     }
 
     /// Updates the map of currently running sessions in-place.
-    pub fn set_running_sessions(&mut self, running: HashMap<String, SessionStatus>) {
+    pub fn set_running_sessions(
+        &mut self,
+        running: HashMap<String, SessionStatus>,
+    ) {
         self.running_sessions = running;
     }
 
@@ -189,13 +191,9 @@ impl QuickLauncherState {
             match self.focus {
                 LauncherFocus::ProjectName => {
                     let prefix_len = 16u16;
-                    let cursor_x = body_area.x
-                        + prefix_len
-                        + self.creation_modal.project_name_input.chars().count() as u16;
+                    let cursor_x = body_area.x + prefix_len + self.creation_modal.project_name_input.chars().count() as u16;
                     let cursor_y = body_area.y + 2;
-                    if cursor_x < body_area.x + body_area.width
-                        && cursor_y < body_area.y + body_area.height
-                    {
+                    if cursor_x < body_area.x + body_area.width && cursor_y < body_area.y + body_area.height {
                         Some(Position::new(cursor_x, cursor_y))
                     } else {
                         Some(Position::new(
@@ -206,16 +204,13 @@ impl QuickLauncherState {
                 }
                 LauncherFocus::Prompt => {
                     let prompt_text_width = (body_area.width.saturating_sub(18) as usize).max(10);
-                    let (line_idx, col_idx) =
-                        self.creation_modal.cursor_to_line_col(prompt_text_width);
+                    let (line_idx, col_idx) = self.creation_modal.cursor_to_line_col(prompt_text_width);
                     let scroll_offset = self.creation_modal.prompt_scroll_offset.min(line_idx);
                     let visible_line = line_idx.saturating_sub(scroll_offset);
                     if visible_line < crate::tui::creation_modal::PROMPT_VISIBLE_LINES {
                         let cursor_x = body_area.x + 18 + col_idx as u16;
                         let cursor_y = body_area.y + 4 + visible_line as u16;
-                        if cursor_x < body_area.x + body_area.width
-                            && cursor_y < body_area.y + body_area.height
-                        {
+                        if cursor_x < body_area.x + body_area.width && cursor_y < body_area.y + body_area.height {
                             Some(Position::new(cursor_x, cursor_y))
                         } else {
                             Some(Position::new(
@@ -307,15 +302,9 @@ impl QuickLauncherState {
             }
         }
         match self.focus {
-            LauncherFocus::Template => {
-                self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Template
-            }
-            LauncherFocus::ProjectName => {
-                self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::ProjectName
-            }
-            LauncherFocus::Prompt => {
-                self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt
-            }
+            LauncherFocus::Template => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Template,
+            LauncherFocus::ProjectName => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::ProjectName,
+            LauncherFocus::Prompt => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt,
             _ => {}
         }
     }
@@ -341,15 +330,9 @@ impl QuickLauncherState {
             }
         }
         match self.focus {
-            LauncherFocus::Template => {
-                self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Template
-            }
-            LauncherFocus::ProjectName => {
-                self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::ProjectName
-            }
-            LauncherFocus::Prompt => {
-                self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt
-            }
+            LauncherFocus::Template => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Template,
+            LauncherFocus::ProjectName => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::ProjectName,
+            LauncherFocus::Prompt => self.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt,
             _ => {}
         }
     }
@@ -416,16 +399,12 @@ impl QuickLauncherState {
                     self.clear_error();
                     return QuickLauncherAction::None;
                 }
-                KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
-                    if has_shift || has_alt =>
-                {
+                KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') if has_shift || has_alt => {
                     self.creation_modal.insert_newline_prompt();
                     self.clear_error();
                     return QuickLauncherAction::None;
                 }
-                KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
-                    if !has_shift && !has_alt =>
-                {
+                KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') if !has_shift && !has_alt => {
                     let trimmed_name = self.creation_modal.project_name_input.trim();
                     if trimmed_name.is_empty() {
                         self.set_error("Project name cannot be empty");
@@ -515,7 +494,8 @@ impl QuickLauncherState {
                     }
                     LauncherTab::Attach => {
                         if self.focus == LauncherFocus::ProjectList {
-                            self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
+                            self.selected_project_idx =
+                                self.selected_project_idx.saturating_sub(1);
                         } else {
                             self.focus = LauncherFocus::TabBar;
                         }
@@ -563,11 +543,15 @@ impl QuickLauncherState {
                 }
                 QuickLauncherAction::None
             }
-            KeyCode::Char('1') if self.focus == LauncherFocus::TabBar && !has_ctrl && !has_alt => {
+            KeyCode::Char('1')
+                if self.focus == LauncherFocus::TabBar && !has_ctrl && !has_alt =>
+            {
                 self.switch_tab(LauncherTab::Create);
                 QuickLauncherAction::None
             }
-            KeyCode::Char('2') if self.focus == LauncherFocus::TabBar && !has_ctrl && !has_alt => {
+            KeyCode::Char('2')
+                if self.focus == LauncherFocus::TabBar && !has_ctrl && !has_alt =>
+            {
                 self.switch_tab(LauncherTab::Attach);
                 QuickLauncherAction::None
             }
@@ -655,11 +639,10 @@ impl QuickLauncherState {
                     self.selected_project_idx = self.selected_project_idx.saturating_sub(1);
                 } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template {
                     self.cycle_template_prev();
-                } else if self.tab == LauncherTab::Create
-                    && self.focus == LauncherFocus::Prompt
-                    && !self.creation_modal.move_prompt_cursor_up()
-                {
-                    self.prev_focus();
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Prompt {
+                    if !self.creation_modal.move_prompt_cursor_up() {
+                        self.prev_focus();
+                    }
                 }
                 QuickLauncherAction::None
             }
@@ -672,11 +655,10 @@ impl QuickLauncherState {
                     }
                 } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Template {
                     self.cycle_template_next();
-                } else if self.tab == LauncherTab::Create
-                    && self.focus == LauncherFocus::Prompt
-                    && !self.creation_modal.move_prompt_cursor_down()
-                {
-                    self.next_focus();
+                } else if self.tab == LauncherTab::Create && self.focus == LauncherFocus::Prompt {
+                    if !self.creation_modal.move_prompt_cursor_down() {
+                        self.next_focus();
+                    }
                 }
                 QuickLauncherAction::None
             }
@@ -686,12 +668,7 @@ impl QuickLauncherState {
 }
 
 /// Renders the floating Quick Launcher modal on top of the given area in the buffer.
-pub fn render_quick_launcher(
-    state: &QuickLauncherState,
-    area: Rect,
-    buf: &mut Buffer,
-    theme: &Theme,
-) {
+pub fn render_quick_launcher(state: &QuickLauncherState, area: Rect, buf: &mut Buffer, theme: &Theme) {
     let width = 72.min(area.width.saturating_sub(4));
     let height = 16.min(area.height.saturating_sub(2));
 
@@ -877,33 +854,26 @@ pub fn render_quick_launcher(
                 )
             };
 
-            let proj_display =
-                if state.creation_modal.project_name_input.is_empty() && !proj_focused {
-                    Span::styled(
-                        "<enter project name>",
-                        Style::default().fg(theme.input_placeholder),
-                    )
-                } else {
-                    let cursor = if proj_focused { " " } else { "" };
-                    Span::styled(
-                        format!("{}{}", state.creation_modal.project_name_input, cursor),
-                        Style::default()
-                            .fg(theme.input_text)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                };
+            let proj_display = if state.creation_modal.project_name_input.is_empty() && !proj_focused {
+                Span::styled(
+                    "<enter project name>",
+                    Style::default().fg(theme.input_placeholder),
+                )
+            } else {
+                let cursor = if proj_focused { " " } else { "" };
+                Span::styled(
+                    format!("{}{}", state.creation_modal.project_name_input, cursor),
+                    Style::default()
+                        .fg(theme.input_text)
+                        .add_modifier(Modifier::BOLD),
+                )
+            };
 
             let prompt_text_width = (body_area.width.saturating_sub(18) as usize).max(10);
-            let prompt_lines = state
-                .creation_modal
-                .compute_wrapped_prompt_lines(prompt_text_width);
+            let prompt_lines = state.creation_modal.compute_wrapped_prompt_lines(prompt_text_width);
             let visible_count = crate::tui::creation_modal::PROMPT_VISIBLE_LINES;
-            let scroll_offset = state
-                .creation_modal
-                .prompt_scroll_offset
-                .min(prompt_lines.len().saturating_sub(1));
-            let is_empty_and_unfocused =
-                state.creation_modal.prompt_input.is_empty() && !prompt_focused;
+            let scroll_offset = state.creation_modal.prompt_scroll_offset.min(prompt_lines.len().saturating_sub(1));
+            let is_empty_and_unfocused = state.creation_modal.prompt_input.is_empty() && !prompt_focused;
 
             let mut prompt_row_spans = Vec::new();
             for i in 0..visible_count {
@@ -915,10 +885,7 @@ pub fn render_quick_launcher(
                             Style::default().fg(theme.input_placeholder),
                         )
                     } else if line_idx < prompt_lines.len() {
-                        Span::styled(
-                            &prompt_lines[line_idx].text,
-                            Style::default().fg(theme.input_text),
-                        )
+                        Span::styled(&prompt_lines[line_idx].text, Style::default().fg(theme.input_text))
                     } else {
                         Span::raw("")
                     };
@@ -930,10 +897,7 @@ pub fn render_quick_launcher(
                     let content_span = if is_empty_and_unfocused {
                         Span::raw("")
                     } else if line_idx < prompt_lines.len() {
-                        Span::styled(
-                            &prompt_lines[line_idx].text,
-                            Style::default().fg(theme.input_text),
-                        )
+                        Span::styled(&prompt_lines[line_idx].text, Style::default().fg(theme.input_text))
                     } else {
                         Span::raw("")
                     };
@@ -1224,19 +1188,13 @@ mod tests {
         for c in "billing-service".chars() {
             launcher.handle_key(key(KeyCode::Char(c)));
         }
-        assert_eq!(
-            launcher.creation_modal.project_name_input,
-            "billing-service"
-        );
+        assert_eq!(launcher.creation_modal.project_name_input, "billing-service");
 
         // Backspace
         launcher.handle_key(key(KeyCode::Backspace));
         assert_eq!(launcher.creation_modal.project_name_input, "billing-servic");
         launcher.handle_key(key(KeyCode::Char('e')));
-        assert_eq!(
-            launcher.creation_modal.project_name_input,
-            "billing-service"
-        );
+        assert_eq!(launcher.creation_modal.project_name_input, "billing-service");
 
         // Switch to Prompt
         launcher.handle_key(key(KeyCode::Tab));
@@ -1245,16 +1203,10 @@ mod tests {
         for c in "Implement stripe checkout".chars() {
             launcher.handle_key(key(KeyCode::Char(c)));
         }
-        assert_eq!(
-            launcher.creation_modal.prompt_input,
-            "Implement stripe checkout"
-        );
+        assert_eq!(launcher.creation_modal.prompt_input, "Implement stripe checkout");
 
         launcher.handle_key(key(KeyCode::Backspace));
-        assert_eq!(
-            launcher.creation_modal.prompt_input,
-            "Implement stripe checkou"
-        );
+        assert_eq!(launcher.creation_modal.prompt_input, "Implement stripe checkou");
     }
 
     #[test]
@@ -1534,9 +1486,8 @@ mod tests {
         running.insert("proj-a".to_string(), SessionStatus::Busy);
         running.insert("proj-b".to_string(), SessionStatus::Done);
 
-        let launcher =
-            QuickLauncherState::new(vec!["ws".to_string()], vec!["proj-a".to_string()], None)
-                .with_running_sessions(running.clone());
+        let launcher = QuickLauncherState::new(vec!["ws".to_string()], vec!["proj-a".to_string()], None)
+            .with_running_sessions(running.clone());
 
         assert_eq!(launcher.running_sessions.len(), 2);
         assert_eq!(
@@ -1629,11 +1580,7 @@ mod tests {
 
         let mut state = QuickLauncherState::new(
             vec!["tpl1".to_string(), "tpl2".to_string(), "tpl3".to_string()],
-            vec![
-                "proj1".to_string(),
-                "proj2".to_string(),
-                "proj3".to_string(),
-            ],
+            vec!["proj1".to_string(), "proj2".to_string(), "proj3".to_string()],
             None,
         );
 
@@ -1688,8 +1635,11 @@ mod tests {
 
     #[test]
     fn test_quick_launcher_prompt_cursor_navigation_and_editing() {
-        let mut state =
-            QuickLauncherState::new(vec!["tpl1".to_string()], vec!["proj1".to_string()], None);
+        let mut state = QuickLauncherState::new(
+            vec!["tpl1".to_string()],
+            vec!["proj1".to_string()],
+            None,
+        );
 
         state.focus = LauncherFocus::Prompt;
         state.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt;
@@ -1751,29 +1701,25 @@ mod tests {
 
     #[test]
     fn test_quick_launcher_prompt_paste_and_multiline_render() {
-        let mut state =
-            QuickLauncherState::new(vec!["tpl1".to_string()], vec!["proj1".to_string()], None);
+        let mut state = QuickLauncherState::new(
+            vec!["tpl1".to_string()],
+            vec!["proj1".to_string()],
+            None,
+        );
 
         state.focus = LauncherFocus::Prompt;
         state.creation_modal.focus = crate::tui::creation_modal::CreationFocus::Prompt;
 
         // Paste multiline text
         state.handle_paste("First line of instructions\r\nSecond line of instructions");
-        assert_eq!(
-            state.creation_modal.prompt_input,
-            "First line of instructions\nSecond line of instructions"
-        );
+        assert_eq!(state.creation_modal.prompt_input, "First line of instructions\nSecond line of instructions");
 
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
 
         render_quick_launcher(&state, area, &mut buf, &theme);
-        let content = buf
-            .content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect::<String>();
+        let content = buf.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
         assert!(content.contains("First line of instructions"));
         assert!(content.contains("Second line of instructions"));
     }

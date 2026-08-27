@@ -262,7 +262,9 @@ impl PtySession {
         };
 
         if !canonical_working_dir.exists() {
-            return Err(SessionError::InvalidWorkingDirectory(canonical_working_dir));
+            return Err(SessionError::InvalidWorkingDirectory(
+                canonical_working_dir,
+            ));
         }
         if config.size.cols == 0 || config.size.rows == 0 {
             return Err(SessionError::InvalidSize {

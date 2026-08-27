@@ -142,10 +142,7 @@ impl SetupModalState {
 
     /// Scrolls the log viewport upwards (into older log lines).
     pub fn scroll_up(&mut self, lines: usize) {
-        self.scroll_offset = self
-            .scroll_offset
-            .saturating_add(lines)
-            .min(self.logs.len());
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(self.logs.len());
     }
 
     /// Scrolls the log viewport downwards (towards latest log lines).
@@ -252,7 +249,12 @@ pub fn run_setup_worker(
 }
 
 /// Renders the live setup progress and log modal into the given `Buffer`.
-pub fn render_setup_modal(modal: &SetupModalState, area: Rect, buf: &mut Buffer, theme: &Theme) {
+pub fn render_setup_modal(
+    modal: &SetupModalState,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+) {
     let width = 76.min(area.width.saturating_sub(4));
     let height = 18.min(area.height.saturating_sub(2));
 
@@ -362,9 +364,7 @@ pub fn render_setup_modal(modal: &SetupModalState, area: Rect, buf: &mut Buffer,
 
     let total_logs = modal.logs.len();
     let max_lines = log_inner.height as usize;
-    let effective_offset = modal
-        .scroll_offset
-        .min(total_logs.saturating_sub(max_lines));
+    let effective_offset = modal.scroll_offset.min(total_logs.saturating_sub(max_lines));
     let end_idx = total_logs.saturating_sub(effective_offset);
     let start_idx = end_idx.saturating_sub(max_lines);
     let log_slice: Vec<&String> = if total_logs > 0 {
@@ -376,18 +376,20 @@ pub fn render_setup_modal(modal: &SetupModalState, area: Rect, buf: &mut Buffer,
     let log_lines: Vec<Line> = log_slice
         .into_iter()
         .map(|line| {
-            let style =
-                if line.starts_with('✗') || line.contains("Error") || line.contains("Failed") {
-                    Style::default().fg(theme.status_error)
-                } else if line.starts_with('✓') {
-                    Style::default()
-                        .fg(theme.status_done)
-                        .add_modifier(Modifier::BOLD)
-                } else if line.starts_with('[') {
-                    Style::default().fg(theme.status_busy)
-                } else {
-                    Style::default().fg(theme.input_text)
-                };
+            let style = if line.starts_with('✗')
+                || line.contains("Error")
+                || line.contains("Failed")
+            {
+                Style::default().fg(theme.status_error)
+            } else if line.starts_with('✓') {
+                Style::default()
+                    .fg(theme.status_done)
+                    .add_modifier(Modifier::BOLD)
+            } else if line.starts_with('[') {
+                Style::default().fg(theme.status_busy)
+            } else {
+                Style::default().fg(theme.input_text)
+            };
             Line::from(Span::styled(line, style))
         })
         .collect();

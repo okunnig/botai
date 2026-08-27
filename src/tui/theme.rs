@@ -35,30 +35,30 @@ impl Theme {
     pub fn tokyo_night() -> Self {
         Self {
             name: "tokyo-night".to_string(),
-            status_bar_bg: Color::Rgb(26, 27, 38),    // #1a1b26
-            status_bar_fg: Color::Rgb(169, 177, 214), // #a9b1d6
-            tab_active_bg: Color::Rgb(122, 162, 247), // #7aa2f7
-            tab_active_fg: Color::Rgb(26, 27, 38),    // #1a1b26
-            tab_inactive_bg: Color::Rgb(36, 40, 59),  // #24283b
+            status_bar_bg: Color::Rgb(26, 27, 38),       // #1a1b26
+            status_bar_fg: Color::Rgb(169, 177, 214),   // #a9b1d6
+            tab_active_bg: Color::Rgb(122, 162, 247),   // #7aa2f7
+            tab_active_fg: Color::Rgb(26, 27, 38),       // #1a1b26
+            tab_inactive_bg: Color::Rgb(36, 40, 59),     // #24283b
             tab_inactive_fg: Color::Rgb(169, 177, 214), // #a9b1d6
-            leader_bg: Color::Rgb(224, 175, 104),     // #e0af68
-            leader_fg: Color::Rgb(26, 27, 38),        // #1a1b26
-            status_busy: Color::Rgb(224, 175, 104),   // #e0af68
-            status_waiting: Color::Rgb(122, 162, 247), // #7aa2f7
-            status_done: Color::Rgb(158, 206, 106),   // #9ece6a
-            status_error: Color::Rgb(247, 118, 142),  // #f7768e
-            border_focused: Color::Rgb(187, 154, 247), // #bb9af7
-            border_unfocused: Color::Rgb(65, 72, 104), // #414868
-            selection_bg: Color::Rgb(122, 162, 247),  // #7aa2f7
-            selection_fg: Color::Rgb(26, 27, 38),     // #1a1b26
+            leader_bg: Color::Rgb(224, 175, 104),       // #e0af68
+            leader_fg: Color::Rgb(26, 27, 38),          // #1a1b26
+            status_busy: Color::Rgb(224, 175, 104),      // #e0af68
+            status_waiting: Color::Rgb(122, 162, 247),   // #7aa2f7
+            status_done: Color::Rgb(158, 206, 106),      // #9ece6a
+            status_error: Color::Rgb(247, 118, 142),     // #f7768e
+            border_focused: Color::Rgb(187, 154, 247),   // #bb9af7
+            border_unfocused: Color::Rgb(65, 72, 104),   // #414868
+            selection_bg: Color::Rgb(122, 162, 247),     // #7aa2f7
+            selection_fg: Color::Rgb(26, 27, 38),       // #1a1b26
             selection_indicator: Color::Rgb(122, 162, 247), // #7aa2f7
-            modal_title: Color::Rgb(187, 154, 247),   // #bb9af7
-            modal_label: Color::Rgb(122, 162, 247),   // #7aa2f7
-            input_text: Color::Rgb(224, 175, 104),    // #e0af68
-            input_placeholder: Color::Rgb(86, 95, 137), // #565f89
-            key_hint: Color::Rgb(122, 162, 247),      // #7aa2f7
-            error_banner_bg: Color::Rgb(247, 118, 142), // #f7768e
-            error_banner_fg: Color::Rgb(26, 27, 38),  // #1a1b26
+            modal_title: Color::Rgb(187, 154, 247),      // #bb9af7
+            modal_label: Color::Rgb(122, 162, 247),      // #7aa2f7
+            input_text: Color::Rgb(224, 175, 104),       // #e0af68
+            input_placeholder: Color::Rgb(86, 95, 137),  // #565f89
+            key_hint: Color::Rgb(122, 162, 247),        // #7aa2f7
+            error_banner_bg: Color::Rgb(247, 118, 142),  // #f7768e
+            error_banner_fg: Color::Rgb(26, 27, 38),     // #1a1b26
         }
     }
 
@@ -66,30 +66,30 @@ impl Theme {
     pub fn catppuccin() -> Self {
         Self {
             name: "catppuccin".to_string(),
-            status_bar_bg: Color::Rgb(17, 17, 27), // #11111b (Crust)
-            status_bar_fg: Color::Rgb(205, 214, 244), // #cdd6f4 (Text)
-            tab_active_bg: Color::Rgb(137, 220, 235), // #89dceb (Sky)
-            tab_active_fg: Color::Rgb(17, 17, 27), // #11111b (Crust)
-            tab_inactive_bg: Color::Rgb(30, 30, 46), // #1e1e2e (Base)
+            status_bar_bg: Color::Rgb(17, 17, 27),       // #11111b (Crust)
+            status_bar_fg: Color::Rgb(205, 214, 244),   // #cdd6f4 (Text)
+            tab_active_bg: Color::Rgb(137, 220, 235),   // #89dceb (Sky)
+            tab_active_fg: Color::Rgb(17, 17, 27),       // #11111b (Crust)
+            tab_inactive_bg: Color::Rgb(30, 30, 46),     // #1e1e2e (Base)
             tab_inactive_fg: Color::Rgb(186, 194, 222), // #bac2de (Subtext1)
-            leader_bg: Color::Rgb(249, 226, 175),  // #f9e2af (Yellow)
-            leader_fg: Color::Rgb(17, 17, 27),     // #11111b
-            status_busy: Color::Rgb(249, 226, 175), // #f9e2af (Yellow)
-            status_waiting: Color::Rgb(137, 220, 235), // #89dceb (Sky)
-            status_done: Color::Rgb(166, 227, 161), // #a6e3a1 (Green)
-            status_error: Color::Rgb(243, 139, 168), // #f38ba8 (Red)
-            border_focused: Color::Rgb(203, 166, 247), // #cba6f7 (Mauve)
-            border_unfocused: Color::Rgb(88, 91, 112), // #585b70 (Surface2)
-            selection_bg: Color::Rgb(137, 220, 235), // #89dceb (Sky)
-            selection_fg: Color::Rgb(17, 17, 27),  // #11111b
+            leader_bg: Color::Rgb(249, 226, 175),       // #f9e2af (Yellow)
+            leader_fg: Color::Rgb(17, 17, 27),          // #11111b
+            status_busy: Color::Rgb(249, 226, 175),      // #f9e2af (Yellow)
+            status_waiting: Color::Rgb(137, 220, 235),   // #89dceb (Sky)
+            status_done: Color::Rgb(166, 227, 161),      // #a6e3a1 (Green)
+            status_error: Color::Rgb(243, 139, 168),     // #f38ba8 (Red)
+            border_focused: Color::Rgb(203, 166, 247),   // #cba6f7 (Mauve)
+            border_unfocused: Color::Rgb(88, 91, 112),   // #585b70 (Surface2)
+            selection_bg: Color::Rgb(137, 220, 235),     // #89dceb (Sky)
+            selection_fg: Color::Rgb(17, 17, 27),       // #11111b
             selection_indicator: Color::Rgb(137, 220, 235), // #89dceb
-            modal_title: Color::Rgb(203, 166, 247), // #cba6f7 (Mauve)
-            modal_label: Color::Rgb(137, 220, 235), // #89dceb (Sky)
-            input_text: Color::Rgb(250, 179, 135), // #fab387 (Peach)
+            modal_title: Color::Rgb(203, 166, 247),      // #cba6f7 (Mauve)
+            modal_label: Color::Rgb(137, 220, 235),      // #89dceb (Sky)
+            input_text: Color::Rgb(250, 179, 135),       // #fab387 (Peach)
             input_placeholder: Color::Rgb(108, 112, 134), // #6c7086 (Overlay0)
-            key_hint: Color::Rgb(137, 220, 235),   // #89dceb (Sky)
-            error_banner_bg: Color::Rgb(243, 139, 168), // #f38ba8 (Red)
-            error_banner_fg: Color::Rgb(17, 17, 27), // #11111b
+            key_hint: Color::Rgb(137, 220, 235),        // #89dceb (Sky)
+            error_banner_bg: Color::Rgb(243, 139, 168),  // #f38ba8 (Red)
+            error_banner_fg: Color::Rgb(17, 17, 27),     // #11111b
         }
     }
 
@@ -97,30 +97,30 @@ impl Theme {
     pub fn cyberpunk() -> Self {
         Self {
             name: "cyberpunk".to_string(),
-            status_bar_bg: Color::Rgb(10, 10, 15),    // #0a0a0f
-            status_bar_fg: Color::Rgb(240, 240, 245), // #f0f0f5
-            tab_active_bg: Color::Rgb(0, 240, 255),   // #00f0ff (Neon Cyan)
-            tab_active_fg: Color::Rgb(10, 10, 15),    // #0a0a0f
-            tab_inactive_bg: Color::Rgb(24, 24, 37),  // #181825
-            tab_inactive_fg: Color::Rgb(255, 0, 127), // #ff007f (Neon Magenta)
-            leader_bg: Color::Rgb(255, 230, 0),       // #ffe600 (Acid Yellow)
-            leader_fg: Color::Rgb(10, 10, 15),        // #0a0a0f
-            status_busy: Color::Rgb(255, 230, 0),     // #ffe600
-            status_waiting: Color::Rgb(0, 240, 255),  // #00f0ff
-            status_done: Color::Rgb(0, 255, 102),     // #00ff66
-            status_error: Color::Rgb(255, 0, 85),     // #ff0055
-            border_focused: Color::Rgb(255, 0, 127),  // #ff007f
-            border_unfocused: Color::Rgb(50, 50, 70), // #323246
-            selection_bg: Color::Rgb(255, 0, 127),    // #ff007f
-            selection_fg: Color::Rgb(255, 255, 255),  // #ffffff
+            status_bar_bg: Color::Rgb(10, 10, 15),       // #0a0a0f
+            status_bar_fg: Color::Rgb(240, 240, 245),   // #f0f0f5
+            tab_active_bg: Color::Rgb(0, 240, 255),      // #00f0ff (Neon Cyan)
+            tab_active_fg: Color::Rgb(10, 10, 15),       // #0a0a0f
+            tab_inactive_bg: Color::Rgb(24, 24, 37),     // #181825
+            tab_inactive_fg: Color::Rgb(255, 0, 127),    // #ff007f (Neon Magenta)
+            leader_bg: Color::Rgb(255, 230, 0),         // #ffe600 (Acid Yellow)
+            leader_fg: Color::Rgb(10, 10, 15),          // #0a0a0f
+            status_busy: Color::Rgb(255, 230, 0),        // #ffe600
+            status_waiting: Color::Rgb(0, 240, 255),     // #00f0ff
+            status_done: Color::Rgb(0, 255, 102),        // #00ff66
+            status_error: Color::Rgb(255, 0, 85),        // #ff0055
+            border_focused: Color::Rgb(255, 0, 127),     // #ff007f
+            border_unfocused: Color::Rgb(50, 50, 70),    // #323246
+            selection_bg: Color::Rgb(255, 0, 127),       // #ff007f
+            selection_fg: Color::Rgb(255, 255, 255),     // #ffffff
             selection_indicator: Color::Rgb(0, 240, 255), // #00f0ff
-            modal_title: Color::Rgb(255, 0, 127),     // #ff007f
-            modal_label: Color::Rgb(0, 240, 255),     // #00f0ff
-            input_text: Color::Rgb(255, 230, 0),      // #ffe600
+            modal_title: Color::Rgb(255, 0, 127),        // #ff007f
+            modal_label: Color::Rgb(0, 240, 255),        // #00f0ff
+            input_text: Color::Rgb(255, 230, 0),         // #ffe600
             input_placeholder: Color::Rgb(120, 120, 150), // #787896
-            key_hint: Color::Rgb(0, 240, 255),        // #00f0ff
-            error_banner_bg: Color::Rgb(255, 0, 85),  // #ff0055
-            error_banner_fg: Color::Rgb(255, 255, 255), // #ffffff
+            key_hint: Color::Rgb(0, 240, 255),          // #00f0ff
+            error_banner_bg: Color::Rgb(255, 0, 85),     // #ff0055
+            error_banner_fg: Color::Rgb(255, 255, 255),  // #ffffff
         }
     }
 
@@ -128,30 +128,30 @@ impl Theme {
     pub fn gruvbox() -> Self {
         Self {
             name: "gruvbox".to_string(),
-            status_bar_bg: Color::Rgb(40, 40, 40),    // #282828
-            status_bar_fg: Color::Rgb(235, 219, 178), // #ebdbb2
-            tab_active_bg: Color::Rgb(254, 128, 25),  // #fe8019
-            tab_active_fg: Color::Rgb(40, 40, 40),    // #282828
-            tab_inactive_bg: Color::Rgb(60, 56, 54),  // #3c3836
+            status_bar_bg: Color::Rgb(40, 40, 40),       // #282828
+            status_bar_fg: Color::Rgb(235, 219, 178),   // #ebdbb2
+            tab_active_bg: Color::Rgb(254, 128, 25),     // #fe8019
+            tab_active_fg: Color::Rgb(40, 40, 40),       // #282828
+            tab_inactive_bg: Color::Rgb(60, 56, 54),     // #3c3836
             tab_inactive_fg: Color::Rgb(213, 196, 161), // #d5c4a1
-            leader_bg: Color::Rgb(250, 189, 47),      // #fabd2f
-            leader_fg: Color::Rgb(40, 40, 40),        // #282828
-            status_busy: Color::Rgb(250, 189, 47),    // #fabd2f
-            status_waiting: Color::Rgb(131, 165, 152), // #83a598
-            status_done: Color::Rgb(184, 187, 38),    // #b8bb26
-            status_error: Color::Rgb(251, 73, 52),    // #fb4934
-            border_focused: Color::Rgb(254, 128, 25), // #fe8019
-            border_unfocused: Color::Rgb(102, 92, 84), // #665c54
-            selection_bg: Color::Rgb(184, 187, 38),   // #b8bb26
-            selection_fg: Color::Rgb(40, 40, 40),     // #282828
+            leader_bg: Color::Rgb(250, 189, 47),        // #fabd2f
+            leader_fg: Color::Rgb(40, 40, 40),          // #282828
+            status_busy: Color::Rgb(250, 189, 47),       // #fabd2f
+            status_waiting: Color::Rgb(131, 165, 152),   // #83a598
+            status_done: Color::Rgb(184, 187, 38),       // #b8bb26
+            status_error: Color::Rgb(251, 73, 52),       // #fb4934
+            border_focused: Color::Rgb(254, 128, 25),    // #fe8019
+            border_unfocused: Color::Rgb(102, 92, 84),   // #665c54
+            selection_bg: Color::Rgb(184, 187, 38),      // #b8bb26
+            selection_fg: Color::Rgb(40, 40, 40),       // #282828
             selection_indicator: Color::Rgb(254, 128, 25), // #fe8019
-            modal_title: Color::Rgb(250, 189, 47),    // #fabd2f
-            modal_label: Color::Rgb(254, 128, 25),    // #fe8019
-            input_text: Color::Rgb(250, 189, 47),     // #fabd2f
+            modal_title: Color::Rgb(250, 189, 47),       // #fabd2f
+            modal_label: Color::Rgb(254, 128, 25),       // #fe8019
+            input_text: Color::Rgb(250, 189, 47),        // #fabd2f
             input_placeholder: Color::Rgb(146, 131, 116), // #928374
-            key_hint: Color::Rgb(131, 165, 152),      // #83a598
-            error_banner_bg: Color::Rgb(251, 73, 52), // #fb4934
-            error_banner_fg: Color::Rgb(235, 219, 178), // #ebdbb2
+            key_hint: Color::Rgb(131, 165, 152),        // #83a598
+            error_banner_bg: Color::Rgb(251, 73, 52),    // #fb4934
+            error_banner_fg: Color::Rgb(235, 219, 178),  // #ebdbb2
         }
     }
 
@@ -159,30 +159,30 @@ impl Theme {
     pub fn monochrome() -> Self {
         Self {
             name: "monochrome".to_string(),
-            status_bar_bg: Color::Rgb(24, 24, 27), // #18181b (Zinc 900)
-            status_bar_fg: Color::Rgb(244, 244, 245), // #f4f4f5 (Zinc 100)
-            tab_active_bg: Color::Rgb(244, 244, 245), // #f4f4f5 (Zinc 100)
-            tab_active_fg: Color::Rgb(24, 24, 27), // #18181b (Zinc 900)
-            tab_inactive_bg: Color::Rgb(39, 39, 42), // #27272a (Zinc 800)
+            status_bar_bg: Color::Rgb(24, 24, 27),       // #18181b (Zinc 900)
+            status_bar_fg: Color::Rgb(244, 244, 245),   // #f4f4f5 (Zinc 100)
+            tab_active_bg: Color::Rgb(244, 244, 245),   // #f4f4f5 (Zinc 100)
+            tab_active_fg: Color::Rgb(24, 24, 27),       // #18181b (Zinc 900)
+            tab_inactive_bg: Color::Rgb(39, 39, 42),     // #27272a (Zinc 800)
             tab_inactive_fg: Color::Rgb(161, 161, 170), // #a1a1aa (Zinc 400)
-            leader_bg: Color::Rgb(228, 228, 231),  // #e4e4e7 (Zinc 200)
-            leader_fg: Color::Rgb(24, 24, 27),     // #18181b
-            status_busy: Color::Rgb(228, 228, 231), // #e4e4e7
-            status_waiting: Color::Rgb(186, 230, 253), // #bae6fd (Ice blue)
-            status_done: Color::Rgb(244, 244, 245), // #f4f4f5
-            status_error: Color::Rgb(248, 113, 113), // #f87171
-            border_focused: Color::Rgb(244, 244, 245), // #f4f4f5
-            border_unfocused: Color::Rgb(82, 82, 91), // #52525b (Zinc 600)
-            selection_bg: Color::Rgb(244, 244, 245), // #f4f4f5
-            selection_fg: Color::Rgb(24, 24, 27),  // #18181b
+            leader_bg: Color::Rgb(228, 228, 231),       // #e4e4e7 (Zinc 200)
+            leader_fg: Color::Rgb(24, 24, 27),          // #18181b
+            status_busy: Color::Rgb(228, 228, 231),      // #e4e4e7
+            status_waiting: Color::Rgb(186, 230, 253),   // #bae6fd (Ice blue)
+            status_done: Color::Rgb(244, 244, 245),      // #f4f4f5
+            status_error: Color::Rgb(248, 113, 113),     // #f87171
+            border_focused: Color::Rgb(244, 244, 245),   // #f4f4f5
+            border_unfocused: Color::Rgb(82, 82, 91),    // #52525b (Zinc 600)
+            selection_bg: Color::Rgb(244, 244, 245),     // #f4f4f5
+            selection_fg: Color::Rgb(24, 24, 27),       // #18181b
             selection_indicator: Color::Rgb(186, 230, 253), // #bae6fd
-            modal_title: Color::Rgb(244, 244, 245), // #f4f4f5
-            modal_label: Color::Rgb(228, 228, 231), // #e4e4e7
-            input_text: Color::Rgb(244, 244, 245), // #f4f4f5
+            modal_title: Color::Rgb(244, 244, 245),      // #f4f4f5
+            modal_label: Color::Rgb(228, 228, 231),      // #e4e4e7
+            input_text: Color::Rgb(244, 244, 245),       // #f4f4f5
             input_placeholder: Color::Rgb(113, 113, 122), // #71717a (Zinc 500)
-            key_hint: Color::Rgb(186, 230, 253),   // #bae6fd (Ice blue)
-            error_banner_bg: Color::Rgb(248, 113, 113), // #f87171
-            error_banner_fg: Color::Rgb(24, 24, 27), // #18181b
+            key_hint: Color::Rgb(186, 230, 253),        // #bae6fd (Ice blue)
+            error_banner_bg: Color::Rgb(248, 113, 113),  // #f87171
+            error_banner_fg: Color::Rgb(24, 24, 27),     // #18181b
         }
     }
 

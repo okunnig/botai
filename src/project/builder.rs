@@ -5,9 +5,7 @@ use thiserror::Error;
 
 use crate::config::{Config, ConfigError, ResolvedRepo};
 use crate::context::{generate_agents_md, ContextError, ProjectContext, RepoMapping};
-use crate::git::{
-    create_worktree, remove_worktree_auto, GitError, GitWorktreeManager, WorktreeManager,
-};
+use crate::git::{create_worktree, remove_worktree_auto, GitError, GitWorktreeManager, WorktreeManager};
 use crate::session::{ProjectSession, PtyConfig, PtySession, SessionError, VtScreen};
 
 /// Errors that can occur during project creation, validation, or rollback.
@@ -103,10 +101,7 @@ impl ProjectValidation {
 
     /// Returns the primary error or warning message for single-line display.
     pub fn primary_message(&self) -> Option<&str> {
-        self.errors
-            .first()
-            .or_else(|| self.warnings.first())
-            .map(|s| s.as_str())
+        self.errors.first().or_else(|| self.warnings.first()).map(|s| s.as_str())
     }
 }
 
@@ -246,10 +241,7 @@ impl ProjectBuilder {
         }
 
         if !self.config.templates.contains_key(&self.template_name) {
-            validation.add_error(format!(
-                "Template '{}' not found in config",
-                self.template_name
-            ));
+            validation.add_error(format!("Template '{}' not found in config", self.template_name));
             return validation;
         }
 
@@ -296,10 +288,7 @@ impl ProjectBuilder {
     /// Returns the canonical project root directory and repository mappings.
     /// On any error, triggers atomic rollback by removing any created worktrees
     /// with `remove_worktree_auto` and deleting the project directory.
-    pub fn create_workspace<F>(
-        &self,
-        progress_sink: F,
-    ) -> anyhow::Result<(PathBuf, Vec<RepoMapping>)>
+    pub fn create_workspace<F>(&self, progress_sink: F) -> anyhow::Result<(PathBuf, Vec<RepoMapping>)>
     where
         F: Fn(ProjectSetupEvent),
     {
@@ -308,10 +297,7 @@ impl ProjectBuilder {
             progress_sink(ProjectSetupEvent::Step {
                 current: 1,
                 total: 4,
-                message: format!(
-                    "Checking repositories for template '{}'...",
-                    self.template_name
-                ),
+                message: format!("Checking repositories for template '{}'...", self.template_name),
             });
             progress_sink(ProjectSetupEvent::Log(format!(
                 "[1/4] Checking repositories for template '{}'...",
@@ -325,8 +311,9 @@ impl ProjectBuilder {
                 .get_template(&self.template_name)
                 .ok_or_else(|| ProjectError::TemplateNotFound(self.template_name.clone()))?;
 
-            let resolved_repos: Vec<ResolvedRepo> =
-                self.config.resolve_template_repos(&self.template_name)?;
+            let resolved_repos: Vec<ResolvedRepo> = self
+                .config
+                .resolve_template_repos(&self.template_name)?;
 
             // Step 2: Auto-cloning missing repos & fetching updates
             progress_sink(ProjectSetupEvent::Step {
@@ -381,9 +368,7 @@ impl ProjectBuilder {
                     worktree_path.display()
                 )));
 
-                if let Err(err) =
-                    create_worktree(&repo.local_path, &worktree_path, trimmed_project_name)
-                {
+                if let Err(err) = create_worktree(&repo.local_path, &worktree_path, trimmed_project_name) {
                     // Rollback partially created worktrees & project_dir
                     for mapping in &created_mappings {
                         let _ = remove_worktree_auto(&mapping.worktree_path, true);
@@ -450,10 +435,7 @@ impl ProjectBuilder {
     ///
     /// On any error during steps 1-5, triggers atomic rollback by removing any created
     /// worktrees with `remove_worktree_auto` and deleting the project directory.
-    pub fn build<F>(
-        &self,
-        progress_sink: F,
-    ) -> anyhow::Result<(ProjectSession, PtySession, VtScreen)>
+    pub fn build<F>(&self, progress_sink: F) -> anyhow::Result<(ProjectSession, PtySession, VtScreen)>
     where
         F: Fn(ProjectSetupEvent) + Send + Sync + 'static,
     {
@@ -548,8 +530,7 @@ mod tests {
 
     #[test]
     fn test_project_builder_validation_empty_name() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let builder = ProjectBuilder::new(config, "ecommerce", "   ");
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
@@ -558,8 +539,7 @@ mod tests {
 
     #[test]
     fn test_project_builder_validation_template_not_found() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let builder = ProjectBuilder::new(config, "nonexistent", "my-project");
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
@@ -614,10 +594,7 @@ mod tests {
 
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
-        assert!(val
-            .primary_message()
-            .unwrap()
-            .contains("already exists in repository"));
+        assert!(val.primary_message().unwrap().contains("already exists in repository"));
     }
 
     #[test]
@@ -652,36 +629,22 @@ mod tests {
             events_clone.lock().unwrap().push(event);
         });
 
-        assert!(
-            res.is_ok(),
-            "create_workspace should succeed: {:?}",
-            res.err()
-        );
+        assert!(res.is_ok(), "create_workspace should succeed: {:?}", res.err());
         let (project_dir_canon, mappings) = res.unwrap();
         let expected_project_dir = project_cwd.join("checkout-feat").canonicalize().unwrap();
         assert_eq!(project_dir_canon, expected_project_dir);
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].name, "backend");
-        assert_eq!(
-            mappings[0].worktree_path,
-            expected_project_dir.join("backend")
-        );
+        assert_eq!(mappings[0].worktree_path, expected_project_dir.join("backend"));
 
         assert!(expected_project_dir.exists());
         assert!(expected_project_dir.join("AGENTS.md").exists());
         assert!(expected_project_dir.join("backend").exists());
-        assert!(expected_project_dir
-            .join("backend")
-            .join("README.md")
-            .exists());
+        assert!(expected_project_dir.join("backend").join("README.md").exists());
 
         let ev_list = events.lock().unwrap();
-        assert!(ev_list
-            .iter()
-            .any(|e| matches!(e, ProjectSetupEvent::Step { current: 1, .. })));
-        assert!(ev_list
-            .iter()
-            .any(|e| matches!(e, ProjectSetupEvent::Step { current: 4, .. })));
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Step { current: 1, .. })));
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Step { current: 4, .. })));
     }
 
     #[test]
@@ -710,8 +673,8 @@ mod tests {
         let project_cwd = temp_dir.path().join("workspaces");
         fs::create_dir_all(&project_cwd).unwrap();
 
-        let builder =
-            ProjectBuilder::new(config, "failing_tpl", "clashing_project").with_cwd(&project_cwd);
+        let builder = ProjectBuilder::new(config, "failing_tpl", "clashing_project")
+            .with_cwd(&project_cwd);
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_clone = Arc::clone(&events);
@@ -722,15 +685,10 @@ mod tests {
 
         assert!(res.is_err());
         let project_dir = project_cwd.join("clashing_project");
-        assert!(
-            !project_dir.exists(),
-            "project_dir must be cleaned up on rollback"
-        );
+        assert!(!project_dir.exists(), "project_dir must be cleaned up on rollback");
 
         let ev_list = events.lock().unwrap();
-        assert!(ev_list
-            .iter()
-            .any(|e| matches!(e, ProjectSetupEvent::Error(_))));
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Error(_))));
     }
 
     #[test]
@@ -784,15 +742,9 @@ mod tests {
         assert!(project_dir.join("backend").join("README.md").exists());
 
         let ev_list = events.lock().unwrap();
-        assert!(ev_list
-            .iter()
-            .any(|e| matches!(e, ProjectSetupEvent::Success)));
-        assert!(ev_list
-            .iter()
-            .any(|e| matches!(e, ProjectSetupEvent::Step { current: 1, .. })));
-        assert!(ev_list
-            .iter()
-            .any(|e| matches!(e, ProjectSetupEvent::Step { current: 4, .. })));
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Success)));
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Step { current: 1, .. })));
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Step { current: 4, .. })));
     }
 
     #[test]
@@ -821,8 +773,8 @@ mod tests {
         let project_cwd = temp_dir.path().join("workspaces");
         fs::create_dir_all(&project_cwd).unwrap();
 
-        let builder =
-            ProjectBuilder::new(config, "failing_tpl", "clashing_project").with_cwd(&project_cwd);
+        let builder = ProjectBuilder::new(config, "failing_tpl", "clashing_project")
+            .with_cwd(&project_cwd);
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_clone = Arc::clone(&events);
@@ -833,14 +785,9 @@ mod tests {
 
         assert!(res.is_err());
         let project_dir = project_cwd.join("clashing_project");
-        assert!(
-            !project_dir.exists(),
-            "project_dir must be cleaned up on rollback"
-        );
+        assert!(!project_dir.exists(), "project_dir must be cleaned up on rollback");
 
         let ev_list = events.lock().unwrap();
-        assert!(ev_list
-            .iter()
-            .any(|e| matches!(e, ProjectSetupEvent::Error(_))));
+        assert!(ev_list.iter().any(|e| matches!(e, ProjectSetupEvent::Error(_))));
     }
 }

@@ -267,8 +267,7 @@ impl ProjectCreationModal {
             CreationStep::ConfigureDetails => {
                 if !self.templates.is_empty() {
                     self.selected_template_idx =
-                        (self.selected_template_idx + self.templates.len() - 1)
-                            % self.templates.len();
+                        (self.selected_template_idx + self.templates.len() - 1) % self.templates.len();
                     self.sync_agent_with_template();
                     self.revalidate();
                 }
@@ -297,10 +296,7 @@ impl ProjectCreationModal {
     fn sync_agent_with_template(&mut self) {
         if let Some(tpl_name) = self.selected_template() {
             if let Some(tpl) = self.config.get_template(tpl_name) {
-                let target = tpl
-                    .default_agent
-                    .as_deref()
-                    .unwrap_or(&self.config.default_agent);
+                let target = tpl.default_agent.as_deref().unwrap_or(&self.config.default_agent);
                 if let Some(pos) = self.agent_list.iter().position(|a| a == target) {
                     self.selected_agent_idx = pos;
                 }
@@ -410,8 +406,7 @@ impl ProjectCreationModal {
                         });
                         i = space_pos + 1;
                     } else {
-                        let text: String =
-                            line_chars[line_start..line_start + width].iter().collect();
+                        let text: String = line_chars[line_start..line_start + width].iter().collect();
                         result.push(PromptLine {
                             text,
                             start_char_idx: start_idx + line_start,
@@ -711,8 +706,7 @@ impl ProjectCreationModal {
         match self.step {
             CreationStep::SelectTemplate => {
                 let prefix_len = 8u16; // "Filter: "
-                let cursor_x =
-                    inner.x + prefix_len + self.template_search_query.chars().count() as u16;
+                let cursor_x = inner.x + prefix_len + self.template_search_query.chars().count() as u16;
                 let cursor_y = inner.y;
                 if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                     Some(Position::new(cursor_x, cursor_y))
@@ -726,8 +720,7 @@ impl ProjectCreationModal {
             CreationStep::ConfigureDetails => match self.focus {
                 CreationFocus::ProjectName => {
                     let prefix_len = 16u16; // "▶ Project Name: "
-                    let cursor_x =
-                        inner.x + prefix_len + self.project_name_input.chars().count() as u16;
+                    let cursor_x = inner.x + prefix_len + self.project_name_input.chars().count() as u16;
                     let cursor_y = inner.y + 3;
                     if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                         Some(Position::new(cursor_x, cursor_y))
@@ -828,8 +821,7 @@ impl ProjectCreationModal {
                 KeyCode::Enter => {
                     let matching = self.matching_template_indices();
                     if !matching.is_empty() {
-                        let target_idx =
-                            matching[self.selected_template_idx.min(matching.len() - 1)];
+                        let target_idx = matching[self.selected_template_idx.min(matching.len() - 1)];
                         self.selected_template_idx = target_idx;
                         self.sync_agent_with_template();
                         self.revalidate();
@@ -851,9 +843,7 @@ impl ProjectCreationModal {
                                 if let Some(tpl) = cur_tpl {
                                     self.selected_template_idx = matching
                                         .iter()
-                                        .position(|&i| {
-                                            self.templates.get(i).map(String::as_str) == Some(&tpl)
-                                        })
+                                        .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
                                         .unwrap_or(0);
                                 } else {
                                     self.selected_template_idx = 0;
@@ -907,15 +897,11 @@ impl ProjectCreationModal {
                             self.delete_prompt_char_at_cursor();
                             return CreationModalAction::None;
                         }
-                        KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
-                            if has_shift || has_alt =>
-                        {
+                        KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') if has_shift || has_alt => {
                             self.insert_newline_prompt();
                             return CreationModalAction::None;
                         }
-                        KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
-                            if !has_shift && !has_alt =>
-                        {
+                        KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r') if !has_shift && !has_alt => {
                             self.revalidate();
                             if self.validation.is_valid {
                                 let trimmed = self.project_name_input.trim();
@@ -963,9 +949,7 @@ impl ProjectCreationModal {
                             if let Some(tpl) = cur_tpl {
                                 self.selected_template_idx = matching
                                     .iter()
-                                    .position(|&i| {
-                                        self.templates.get(i).map(String::as_str) == Some(&tpl)
-                                    })
+                                    .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
                                     .unwrap_or(0);
                             } else {
                                 self.selected_template_idx = 0;
@@ -1237,12 +1221,7 @@ impl ProjectCreationModal {
                 )
             },
         ]);
-        buf.set_line(
-            filter_area.x,
-            filter_area.y,
-            &filter_line,
-            filter_area.width,
-        );
+        buf.set_line(filter_area.x, filter_area.y, &filter_line, filter_area.width);
 
         // 2. Top Divider
         let divider_str = "─".repeat(top_divider_area.width as usize);
@@ -1287,18 +1266,12 @@ impl ProjectCreationModal {
         } else {
             let max_display = (left_area.height as usize).saturating_sub(2);
             let start_idx = if self.selected_template_idx >= max_display {
-                self.selected_template_idx
-                    .saturating_sub(max_display.saturating_sub(1))
+                self.selected_template_idx.saturating_sub(max_display.saturating_sub(1))
             } else {
                 0
             };
 
-            for (match_i, &tpl_idx) in matching
-                .iter()
-                .enumerate()
-                .skip(start_idx)
-                .take(max_display)
-            {
+            for (match_i, &tpl_idx) in matching.iter().enumerate().skip(start_idx).take(max_display) {
                 let tpl_name = &self.templates[tpl_idx];
                 let is_selected = match_i == self.selected_template_idx;
                 if is_selected {
@@ -1368,12 +1341,14 @@ impl ProjectCreationModal {
                     Span::styled(agent_name, Style::default().fg(theme.input_text)),
                 ]));
 
-                right_lines.push(Line::from(vec![Span::styled(
-                    format!("Repositories ({}):", tpl.repos.len()),
-                    Style::default()
-                        .fg(theme.modal_label)
-                        .add_modifier(Modifier::BOLD),
-                )]));
+                right_lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("Repositories ({}):", tpl.repos.len()),
+                        Style::default()
+                            .fg(theme.modal_label)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
 
                 if tpl.repos.is_empty() {
                     right_lines.push(Line::from(Span::styled(
@@ -1398,12 +1373,14 @@ impl ProjectCreationModal {
                 if let Some(ref custom) = tpl.agents_md_append {
                     let trimmed = custom.trim();
                     if !trimmed.is_empty() {
-                        right_lines.push(Line::from(vec![Span::styled(
-                            "Custom Instructions:",
-                            Style::default()
-                                .fg(theme.modal_label)
-                                .add_modifier(Modifier::BOLD),
-                        )]));
+                        right_lines.push(Line::from(vec![
+                            Span::styled(
+                                "Custom Instructions:",
+                                Style::default()
+                                    .fg(theme.modal_label)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
                         for line in trimmed.lines().take(2) {
                             right_lines.push(Line::from(Span::styled(
                                 format!("  {line}"),
@@ -1442,12 +1419,7 @@ impl ProjectCreationModal {
                 .fg(theme.key_hint)
                 .add_modifier(Modifier::BOLD),
         ));
-        buf.set_line(
-            footer_area.x,
-            footer_area.y,
-            &footer_line,
-            footer_area.width,
-        );
+        buf.set_line(footer_area.x, footer_area.y, &footer_line, footer_area.width);
     }
 
     /// Renders Step 2: Project Details & Configuration.
@@ -1504,8 +1476,7 @@ impl ProjectCreationModal {
         let prompt_prefix = if prompt_focused { "▶ " } else { "  " };
 
         // 1. Template summary info
-        let (repo_preview_str, tpl_desc_str) = if let Some(tpl) = self.config.get_template(tpl_name)
-        {
+        let (repo_preview_str, tpl_desc_str) = if let Some(tpl) = self.config.get_template(tpl_name) {
             let repo_count = tpl.repos.len();
             let repo_names = tpl
                 .repos
@@ -1517,11 +1488,7 @@ impl ProjectCreationModal {
                 "  Template: {} | Repos ({}): {}",
                 tpl_name,
                 repo_count,
-                if repo_names.is_empty() {
-                    "none"
-                } else {
-                    &repo_names
-                }
+                if repo_names.is_empty() { "none" } else { &repo_names }
             );
             let d_str = tpl
                 .description
@@ -1590,9 +1557,7 @@ impl ProjectCreationModal {
         let prompt_text_width = (inner.width.saturating_sub(18) as usize).max(10);
         let prompt_lines = self.compute_wrapped_prompt_lines(prompt_text_width);
         let visible_count = PROMPT_VISIBLE_LINES;
-        let scroll_offset = self
-            .prompt_scroll_offset
-            .min(prompt_lines.len().saturating_sub(1));
+        let scroll_offset = self.prompt_scroll_offset.min(prompt_lines.len().saturating_sub(1));
         let is_empty_and_unfocused = self.prompt_input.is_empty() && !prompt_focused;
 
         let mut prompt_row_spans = Vec::new();
@@ -1605,28 +1570,19 @@ impl ProjectCreationModal {
                         Style::default().fg(theme.input_placeholder),
                     )
                 } else if line_idx < prompt_lines.len() {
-                    Span::styled(
-                        &prompt_lines[line_idx].text,
-                        Style::default().fg(theme.input_text),
-                    )
+                    Span::styled(&prompt_lines[line_idx].text, Style::default().fg(theme.input_text))
                 } else {
                     Span::raw("")
                 };
                 prompt_row_spans.push(Line::from(vec![
-                    Span::styled(
-                        format!("{prompt_prefix}Initial Prompt: "),
-                        prompt_label_style,
-                    ),
+                    Span::styled(format!("{prompt_prefix}Initial Prompt: "), prompt_label_style),
                     content_span,
                 ]));
             } else {
                 let content_span = if is_empty_and_unfocused {
                     Span::raw("")
                 } else if line_idx < prompt_lines.len() {
-                    Span::styled(
-                        &prompt_lines[line_idx].text,
-                        Style::default().fg(theme.input_text),
-                    )
+                    Span::styled(&prompt_lines[line_idx].text, Style::default().fg(theme.input_text))
                 } else {
                     Span::raw("")
                 };
@@ -1641,12 +1597,7 @@ impl ProjectCreationModal {
         let banner_line = if let Some(msg) = self.validation.primary_message() {
             if self.validation.is_valid {
                 Line::from(vec![
-                    Span::styled(
-                        " ✓ ",
-                        Style::default()
-                            .fg(theme.status_done)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(" ✓ ", Style::default().fg(theme.status_done).add_modifier(Modifier::BOLD)),
                     Span::styled(msg, Style::default().fg(theme.status_done)),
                 ])
             } else if self.project_name_input.trim().is_empty() {
@@ -1656,27 +1607,14 @@ impl ProjectCreationModal {
                 ])
             } else {
                 Line::from(vec![
-                    Span::styled(
-                        " ✗ ",
-                        Style::default()
-                            .fg(theme.status_error)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(" ✗ ", Style::default().fg(theme.status_error).add_modifier(Modifier::BOLD)),
                     Span::styled(msg, Style::default().fg(theme.status_error)),
                 ])
             }
         } else if self.validation.is_valid {
             Line::from(vec![
-                Span::styled(
-                    " ✓ ",
-                    Style::default()
-                        .fg(theme.status_done)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "Ready to initialize project worktrees and spawn agent",
-                    Style::default().fg(theme.status_done),
-                ),
+                Span::styled(" ✓ ", Style::default().fg(theme.status_done).add_modifier(Modifier::BOLD)),
+                Span::styled("Ready to initialize project worktrees and spawn agent", Style::default().fg(theme.status_done)),
             ])
         } else {
             Line::from("")
@@ -2137,11 +2075,7 @@ mod tests {
         }
 
         assert!(!modal.validation.is_valid);
-        assert!(modal
-            .validation
-            .primary_message()
-            .unwrap()
-            .contains("already exists in repository"));
+        assert!(modal.validation.primary_message().unwrap().contains("already exists in repository"));
 
         // Pressing Enter on invalid input should return None
         let act = modal.handle_key(key(KeyCode::Enter));
@@ -2157,15 +2091,12 @@ mod tests {
 
         assert!(modal.validation.is_valid);
         let act = modal.handle_key(key(KeyCode::Enter));
-        assert!(
-            matches!(act, CreationModalAction::Submit { project, .. } if project == "clean-branch")
-        );
+        assert!(matches!(act, CreationModalAction::Submit { project, .. } if project == "clean-branch"));
     }
 
     #[test]
     fn test_creation_modal_cursor_position_calculation() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
 
@@ -2195,8 +2126,7 @@ mod tests {
 
     #[test]
     fn test_prompt_helper_methods_cursor_editing() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
 
@@ -2267,8 +2197,7 @@ mod tests {
 
     #[test]
     fn test_prompt_word_wrapping_and_coordinate_mapping() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
 
@@ -2310,8 +2239,7 @@ mod tests {
 
     #[test]
     fn test_prompt_vertical_cursor_navigation_and_focus_transitions() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.focus = CreationFocus::Prompt;
@@ -2348,8 +2276,7 @@ mod tests {
 
     #[test]
     fn test_prompt_vertical_scrolling_and_scroll_offset_sync() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.focus = CreationFocus::Prompt;
@@ -2385,8 +2312,7 @@ mod tests {
 
     #[test]
     fn test_prompt_shift_alt_enter_and_emacs_shortcuts() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.focus = CreationFocus::Prompt;
@@ -2431,8 +2357,7 @@ mod tests {
 
     #[test]
     fn test_prompt_multiline_rendering_and_placeholder() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
 
@@ -2443,25 +2368,15 @@ mod tests {
         // 1. Render empty & unfocused -> shows placeholder
         modal.focus = CreationFocus::ProjectName;
         modal.render_modal(area, &mut buf, &theme);
-        let content = buf
-            .content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect::<String>();
+        let content = buf.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
         assert!(content.contains("<optional task instruction prompt>"));
 
         // 2. Render multi-line prompt
         modal.focus = CreationFocus::Prompt;
-        modal.insert_str_prompt(
-            "First instruction line\nSecond instruction line\nThird instruction line",
-        );
+        modal.insert_str_prompt("First instruction line\nSecond instruction line\nThird instruction line");
         let mut buf2 = Buffer::empty(area);
         modal.render_modal(area, &mut buf2, &theme);
-        let content2 = buf2
-            .content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect::<String>();
+        let content2 = buf2.content().iter().map(ratatui::buffer::Cell::symbol).collect::<String>();
         assert!(content2.contains("First instruction line"));
         assert!(content2.contains("Second instruction line"));
         assert!(content2.contains("Third instruction line"));

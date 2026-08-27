@@ -353,8 +353,7 @@ impl Config {
                     original_entry: trimmed.to_string(),
                 }
             } else if path_obj.exists() {
-                let canonical =
-                    std::fs::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf());
+                let canonical = std::fs::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf());
                 ResolvedRepo {
                     name,
                     local_path: canonical,
@@ -374,10 +373,7 @@ impl Config {
     }
 
     /// Resolves and validates all repositories declared in a given template.
-    pub fn resolve_template_repos(
-        &self,
-        template_name: &str,
-    ) -> Result<Vec<ResolvedRepo>, ConfigError> {
+    pub fn resolve_template_repos(&self, template_name: &str) -> Result<Vec<ResolvedRepo>, ConfigError> {
         let tpl = self
             .get_template(template_name)
             .ok_or_else(|| ConfigError::TemplateNotFound(template_name.to_string()))?;
@@ -406,10 +402,7 @@ impl Config {
     }
 
     /// Alias for `resolve_template_repos` for backward compatibility.
-    pub fn resolve_workspace_repos(
-        &self,
-        workspace_name: &str,
-    ) -> Result<Vec<ResolvedRepo>, ConfigError> {
+    pub fn resolve_workspace_repos(&self, workspace_name: &str) -> Result<Vec<ResolvedRepo>, ConfigError> {
         self.resolve_template_repos(workspace_name)
     }
 
@@ -578,9 +571,7 @@ repos = ["/tmp/legacy-repo"]
             .expect("Legacy config with [workspaces] should parse via alias");
 
         assert_eq!(config.templates.len(), 1);
-        let tpl = config
-            .get_template("legacy")
-            .expect("Template 'legacy' should be found");
+        let tpl = config.get_template("legacy").expect("Template 'legacy' should be found");
         assert_eq!(tpl.description.as_deref(), Some("Legacy workspace entry"));
         assert_eq!(tpl.repos, vec!["/tmp/legacy-repo".to_string()]);
     }
@@ -806,8 +797,14 @@ repos_dir = "/custom/repos/storage"
             derive_repo_name("ssh://git@github.com/org/payment-core.git"),
             "payment-core"
         );
-        assert_eq!(derive_repo_name("/home/user/code/shared-lib"), "shared-lib");
-        assert_eq!(derive_repo_name("custom-tool"), "custom-tool");
+        assert_eq!(
+            derive_repo_name("/home/user/code/shared-lib"),
+            "shared-lib"
+        );
+        assert_eq!(
+            derive_repo_name("custom-tool"),
+            "custom-tool"
+        );
         assert_eq!(
             derive_repo_name("https://example.com/repo.git?token=123"),
             "repo"
@@ -859,10 +856,7 @@ repos = [
 
         // Absolute path
         assert_eq!(resolved[2].name, "shared-db");
-        assert_eq!(
-            resolved[2].local_path,
-            PathBuf::from("/opt/local/shared-db")
-        );
+        assert_eq!(resolved[2].local_path, PathBuf::from("/opt/local/shared-db"));
         assert_eq!(resolved[2].clone_url, None);
 
         // Relative name resolved into repos_dir
@@ -1058,7 +1052,9 @@ repos = "not-a-list"
         match err {
             ConfigError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
             ConfigError::NotFound(p) => assert_eq!(p, non_existent_path),
-            other => panic!("Expected ConfigError::Io or ConfigError::NotFound, got: {other:?}"),
+            other => panic!(
+                "Expected ConfigError::Io or ConfigError::NotFound, got: {other:?}"
+            ),
         }
     }
 
@@ -1120,7 +1116,10 @@ env = { GREETING = "こんにちは" }
             ws.description.as_deref(),
             Some("Тестовый воркспейс с юникодом 🚀")
         );
-        assert_eq!(ws.repos[0], "/home/пользователь/проекты/тест-репо");
+        assert_eq!(
+            ws.repos[0],
+            "/home/пользователь/проекты/тест-репо"
+        );
         assert_eq!(ws.repos[1], "/home/user/日本語/リポジトリ");
         assert_eq!(ws.env.get("GREETING"), Some(&"こんにちは".to_string()));
     }
@@ -1253,11 +1252,7 @@ repos_dir = "/tmp/repos"
     #[test]
     fn test_init_file_creates_new_file_and_directories() {
         let temp_dir = tempfile::tempdir().expect("Failed to create tempdir");
-        let nested_config = temp_dir
-            .path()
-            .join("nested")
-            .join("sub")
-            .join("config.toml");
+        let nested_config = temp_dir.path().join("nested").join("sub").join("config.toml");
 
         assert!(!nested_config.exists());
 
@@ -1324,8 +1319,7 @@ agents_md_append = """
 """
 repos = ["/path/to/repo"]
 "#;
-        let config =
-            Config::load_from_str(toml).expect("Config with agents_md_append should parse");
+        let config = Config::load_from_str(toml).expect("Config with agents_md_append should parse");
         let ws = config
             .get_template("custom_instructions")
             .expect("Template should exist");
