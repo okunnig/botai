@@ -167,9 +167,9 @@ impl RawLeaderDecoder {
                         self.leader_active = true;
                         actions.push(RawAction::EnterLeader);
                         i += Self::KITTY_CTRL_SPACE.len();
-                    } else if rest.starts_with(b"\x1b[") && Self::KITTY_CTRL_SPACE.starts_with(rest)
+                    } else if rest.starts_with(b"\x1b") && Self::KITTY_CTRL_SPACE.starts_with(rest)
                     {
-                        // Could be start of Kitty Ctrl+Space
+                        // Incomplete prefix of Kitty Ctrl+Space at the end of input (including single 0x1b)
                         self.flush_passthrough(&mut actions, &mut passthrough_buf);
                         self.pending_escape.extend_from_slice(rest);
                         break;
@@ -211,9 +211,57 @@ impl RawLeaderDecoder {
 
 /// Returns whether the given raw byte sequence represents a Shift+Enter key event.
 pub fn is_shift_enter(bytes: &[u8]) -> bool {
-    bytes == RawLeaderDecoder::KITTY_SHIFT_ENTER
+    // 1. Exact slice equality fallbacks
+    if bytes == RawLeaderDecoder::KITTY_SHIFT_ENTER
         || bytes == RawLeaderDecoder::KITTY_SHIFT_ENTER_ALT
         || bytes == RawLeaderDecoder::XTERM_SHIFT_ENTER
+    {
+        return true;
+    }
+
+    // 2. Kitty keyboard protocol: \x1b[...u
+    if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"u") && bytes.len() >= 4 {
+        if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
+            let parts: Vec<&str> = param_str.split(';').collect();
+            let key_code = parts.get(0).and_then(|s| s.split(':').next()).unwrap_or("");
+            if key_code == "13" || key_code == "10" {
+                if let Some(mod_part) = parts.get(1) {
+                    if let Some(mod_str) = mod_part.split(':').next() {
+                        if let Ok(m) = mod_str.parse::<u32>() {
+                            let mod_bits = m.saturating_sub(1);
+                            if (mod_bits & 1) != 0 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Xterm modifyOtherKeys format: \x1b[27;<mod>;13~ or \x1b[27;<mod>;10~
+    if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"~") && bytes.len() >= 6 {
+        if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
+            let parts: Vec<&str> = param_str.split(';').collect();
+            if parts.len() == 3 && parts.get(0).and_then(|s| s.split(':').next()) == Some("27") {
+                let key_code = parts.get(2).and_then(|s| s.split(':').next()).unwrap_or("");
+                if key_code == "13" || key_code == "10" {
+                    if let Some(mod_part) = parts.get(1) {
+                        if let Some(mod_str) = mod_part.split(':').next() {
+                            if let Ok(m) = mod_str.parse::<u32>() {
+                                let mod_bits = m.saturating_sub(1);
+                                if (mod_bits & 1) != 0 {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
 }
 
 fn make_key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -225,24 +273,85 @@ fn make_key_event(code: KeyCode, modifiers: KeyModifiers) -> Event {
     })
 }
 
-fn decode_csi_modifiers(m: u8) -> KeyModifiers {
+fn decode_csi_modifiers(m: u32) -> KeyModifiers {
     let mut modifiers = KeyModifiers::empty();
-    if m > 1 {
-        let mod_bits = m - 1;
-        if (mod_bits & 1) != 0 {
-            modifiers |= KeyModifiers::SHIFT;
-        }
-        if (mod_bits & 2) != 0 {
-            modifiers |= KeyModifiers::ALT;
-        }
-        if (mod_bits & 4) != 0 {
-            modifiers |= KeyModifiers::CONTROL;
-        }
-        if (mod_bits & 8) != 0 {
-            modifiers |= KeyModifiers::SUPER;
-        }
+    let mod_bits = m.saturating_sub(1);
+    if (mod_bits & 1) != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if (mod_bits & 2) != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if (mod_bits & 4) != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    if (mod_bits & 8) != 0 {
+        modifiers |= KeyModifiers::SUPER;
     }
     modifiers
+}
+
+/// Attempts to parse an SGR mouse sequence at the beginning of `bytes`.
+/// Returns `Some((consumed_len, MouseEvent))` on success.
+pub fn parse_sgr_mouse(bytes: &[u8]) -> Option<(usize, MouseEvent)> {
+    if !bytes.starts_with(b"\x1b[<") {
+        return None;
+    }
+    let rest = &bytes[3..];
+    let end_pos = rest.iter().position(|&b| b == b'M' || b == b'm')?;
+    let term = rest[end_pos];
+    let is_release = term == b'm';
+    let param_str = std::str::from_utf8(&rest[..end_pos]).ok()?;
+    let parts: Vec<&str> = param_str.split(';').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let btn = parts[0].parse::<u16>().ok()?;
+    let col = parts[1].parse::<u16>().ok()?;
+    let row = parts[2].parse::<u16>().ok()?;
+
+    let mut modifiers = KeyModifiers::empty();
+    if (btn & 4) != 0 {
+        modifiers |= KeyModifiers::SHIFT;
+    }
+    if (btn & 8) != 0 {
+        modifiers |= KeyModifiers::ALT;
+    }
+    if (btn & 16) != 0 {
+        modifiers |= KeyModifiers::CONTROL;
+    }
+    let btn_base = btn & !(4 | 8 | 16);
+    let kind = if is_release {
+        match btn_base {
+            0 => MouseEventKind::Up(MouseButton::Left),
+            1 => MouseEventKind::Up(MouseButton::Middle),
+            2 => MouseEventKind::Up(MouseButton::Right),
+            _ => MouseEventKind::Up(MouseButton::Left),
+        }
+    } else {
+        match btn_base {
+            0 => MouseEventKind::Down(MouseButton::Left),
+            1 => MouseEventKind::Down(MouseButton::Middle),
+            2 => MouseEventKind::Down(MouseButton::Right),
+            32 => MouseEventKind::Drag(MouseButton::Left),
+            33 => MouseEventKind::Drag(MouseButton::Middle),
+            34 => MouseEventKind::Drag(MouseButton::Right),
+            35 => MouseEventKind::Moved,
+            64 => MouseEventKind::ScrollUp,
+            65 => MouseEventKind::ScrollDown,
+            66 => MouseEventKind::ScrollLeft,
+            67 => MouseEventKind::ScrollRight,
+            _ => MouseEventKind::Moved,
+        }
+    };
+    let mouse = MouseEvent {
+        kind,
+        column: col.saturating_sub(1),
+        row: row.saturating_sub(1),
+        modifiers,
+    };
+    let total_len = 3 + end_pos + 1;
+    Some((total_len, mouse))
 }
 
 /// Decodes raw input bytes into a sequence of crossterm `Event`s (Key, Paste, Mouse)
@@ -268,64 +377,10 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
         }
 
         // 2. SGR Mouse reporting: \x1b[<Btn;Col;Row[Mm]
-        if bytes[i..].starts_with(b"\x1b[<") {
-            let rest = &bytes[i + 3..];
-            if let Some(end_pos) = rest.iter().position(|&b| b == b'M' || b == b'm') {
-                let term = rest[end_pos];
-                let is_release = term == b'm';
-                if let Ok(param_str) = std::str::from_utf8(&rest[..end_pos]) {
-                    let parts: Vec<&str> = param_str.split(';').collect();
-                    if parts.len() == 3 {
-                        let btn_res = parts[0].parse::<u16>();
-                        let col_res = parts[1].parse::<u16>();
-                        let row_res = parts[2].parse::<u16>();
-                        if let (Ok(btn), Ok(col), Ok(row)) = (btn_res, col_res, row_res) {
-                            let mut modifiers = KeyModifiers::empty();
-                            if (btn & 4) != 0 {
-                                modifiers |= KeyModifiers::SHIFT;
-                            }
-                            if (btn & 8) != 0 {
-                                modifiers |= KeyModifiers::ALT;
-                            }
-                            if (btn & 16) != 0 {
-                                modifiers |= KeyModifiers::CONTROL;
-                            }
-                            let btn_base = btn & !(4 | 8 | 16);
-                            let kind = if is_release {
-                                match btn_base {
-                                    0 => MouseEventKind::Up(MouseButton::Left),
-                                    1 => MouseEventKind::Up(MouseButton::Middle),
-                                    2 => MouseEventKind::Up(MouseButton::Right),
-                                    _ => MouseEventKind::Up(MouseButton::Left),
-                                }
-                            } else {
-                                match btn_base {
-                                    0 => MouseEventKind::Down(MouseButton::Left),
-                                    1 => MouseEventKind::Down(MouseButton::Middle),
-                                    2 => MouseEventKind::Down(MouseButton::Right),
-                                    32 => MouseEventKind::Drag(MouseButton::Left),
-                                    33 => MouseEventKind::Drag(MouseButton::Middle),
-                                    34 => MouseEventKind::Drag(MouseButton::Right),
-                                    35 => MouseEventKind::Moved,
-                                    64 => MouseEventKind::ScrollUp,
-                                    65 => MouseEventKind::ScrollDown,
-                                    66 => MouseEventKind::ScrollLeft,
-                                    67 => MouseEventKind::ScrollRight,
-                                    _ => MouseEventKind::Moved,
-                                }
-                            };
-                            events.push(Event::Mouse(MouseEvent {
-                                kind,
-                                column: col.saturating_sub(1),
-                                row: row.saturating_sub(1),
-                                modifiers,
-                            }));
-                            i += 3 + end_pos + 1;
-                            continue;
-                        }
-                    }
-                }
-            }
+        if let Some((consumed, mouse)) = parse_sgr_mouse(&bytes[i..]) {
+            events.push(Event::Mouse(mouse));
+            i += consumed;
+            continue;
         }
 
         // 3. CSI sequences starting with \x1b[
@@ -378,10 +433,15 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             if let Some(tilde_pos) = rest.iter().position(|&b| b == b'~') {
                 if let Ok(param_str) = std::str::from_utf8(&rest[..tilde_pos]) {
                     let parts: Vec<&str> = param_str.split(';').collect();
-                    if parts.len() == 3 && parts[0] == "27" {
-                        let mod_num = parts[1].parse::<u8>().unwrap_or(1);
+                    if parts.len() == 3 && parts.get(0).and_then(|s| s.split(':').next()) == Some("27") {
+                        let mod_num = parts
+                            .get(1)
+                            .and_then(|s| s.split(':').next())
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(1);
                         let modifiers = decode_csi_modifiers(mod_num);
-                        if let Ok(cp) = parts[2].parse::<u32>() {
+                        let cp_str = parts.get(2).and_then(|s| s.split(':').next()).unwrap_or("");
+                        if let Ok(cp) = cp_str.parse::<u32>() {
                             let code = match cp {
                                 13 => KeyCode::Enter,
                                 9 => {
@@ -402,8 +462,12 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
                             continue;
                         }
                     } else {
-                        let key_num = parts[0].parse::<u32>().ok();
-                        let mod_num = parts.get(1).and_then(|s| s.parse::<u8>().ok()).unwrap_or(1);
+                        let key_num = parts.get(0).and_then(|s| s.split(':').next()).and_then(|s| s.parse::<u32>().ok());
+                        let mod_num = parts
+                            .get(1)
+                            .and_then(|s| s.split(':').next())
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(1);
                         let modifiers = decode_csi_modifiers(mod_num);
 
                         if let Some(num) = key_num {
@@ -439,9 +503,13 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             if let Some(u_pos) = rest.iter().position(|&b| b == b'u') {
                 if let Ok(param_str) = std::str::from_utf8(&rest[..u_pos]) {
                     let parts: Vec<&str> = param_str.split(';').collect();
-                    let cp_str = parts[0].split(':').next().unwrap_or(parts[0]);
+                    let cp_str = parts.get(0).and_then(|s| s.split(':').next()).unwrap_or("");
                     let codepoint = cp_str.parse::<u32>().ok();
-                    let mod_num = parts.get(1).and_then(|s| s.parse::<u8>().ok()).unwrap_or(1);
+                    let mod_num = parts
+                        .get(1)
+                        .and_then(|s| s.split(':').next())
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(1);
                     let modifiers = decode_csi_modifiers(mod_num);
 
                     if let Some(cp) = codepoint {
@@ -472,29 +540,30 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
                 let after = &rest[2..];
                 if let Some(end_idx) = after.iter().position(|&b| b.is_ascii_alphabetic()) {
                     let term = after[end_idx];
-                    if let Ok(mod_num) = std::str::from_utf8(&after[..end_idx])
-                        .unwrap_or("")
-                        .parse::<u8>()
-                    {
-                        let modifiers = decode_csi_modifiers(mod_num);
-                        let code = match term {
-                            b'A' => Some(KeyCode::Up),
-                            b'B' => Some(KeyCode::Down),
-                            b'C' => Some(KeyCode::Right),
-                            b'D' => Some(KeyCode::Left),
-                            b'H' => Some(KeyCode::Home),
-                            b'F' => Some(KeyCode::End),
-                            b'P' => Some(KeyCode::F(1)),
-                            b'Q' => Some(KeyCode::F(2)),
-                            b'R' => Some(KeyCode::F(3)),
-                            b'S' => Some(KeyCode::F(4)),
-                            _ => None,
-                        };
-                        if let Some(c) = code {
-                            events.push(make_key_event(c, modifiers));
-                            i += 2 + 2 + end_idx + 1;
-                            continue;
-                        }
+                    let mod_str = std::str::from_utf8(&after[..end_idx]).unwrap_or("");
+                    let mod_num = mod_str
+                        .split(':')
+                        .next()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .unwrap_or(1);
+                    let modifiers = decode_csi_modifiers(mod_num);
+                    let code = match term {
+                        b'A' => Some(KeyCode::Up),
+                        b'B' => Some(KeyCode::Down),
+                        b'C' => Some(KeyCode::Right),
+                        b'D' => Some(KeyCode::Left),
+                        b'H' => Some(KeyCode::Home),
+                        b'F' => Some(KeyCode::End),
+                        b'P' => Some(KeyCode::F(1)),
+                        b'Q' => Some(KeyCode::F(2)),
+                        b'R' => Some(KeyCode::F(3)),
+                        b'S' => Some(KeyCode::F(4)),
+                        _ => None,
+                    };
+                    if let Some(c) = code {
+                        events.push(make_key_event(c, modifiers));
+                        i += 2 + 2 + end_idx + 1;
+                        continue;
                     }
                 }
             }
@@ -1299,5 +1368,120 @@ mod tests {
             mouse_event_to_sgr_bytes(&left_up),
             b"\x1b[<0;21;11m".to_vec()
         );
+    }
+
+    #[test]
+    fn test_raw_leader_decoder_single_byte_escape_split() {
+        let mut decoder = RawLeaderDecoder::new();
+
+        // 1. Chunk 1: b"\x1b", Chunk 2: b"[32;5u" -> should buffer and enter leader mode
+        let actions1 = decoder.decode(b"\x1b");
+        assert_eq!(actions1, vec![]);
+        assert!(!decoder.is_leader_active());
+
+        let actions2 = decoder.decode(b"[32;5u");
+        assert_eq!(actions2, vec![RawAction::EnterLeader]);
+        assert!(decoder.is_leader_active());
+
+        // 2. In leader mode: Chunk 1: b"\x1b[32", Chunk 2: b";5u" -> should emit Passthrough(vec![0x00])
+        decoder.set_leader_active(true);
+        let actions3 = decoder.decode(b"\x1b[32");
+        assert_eq!(actions3, vec![]);
+        assert!(decoder.is_leader_active());
+
+        let actions4 = decoder.decode(b";5u");
+        assert_eq!(actions4, vec![RawAction::Passthrough(vec![0x00])]);
+        assert!(!decoder.is_leader_active());
+
+        // 3. Chunk 1: b"\x1b", Chunk 2: b"a" -> should passthrough \x1ba
+        let actions5 = decoder.decode(b"\x1b");
+        assert_eq!(actions5, vec![]);
+        let actions6 = decoder.decode(b"a");
+        assert_eq!(actions6, vec![RawAction::Passthrough(b"\x1ba".to_vec())]);
+
+        // 4. Inactive leader mode: Chunk 1: b"\x1b[32", Chunk 2: b";5u"
+        let actions7 = decoder.decode(b"\x1b[32");
+        assert_eq!(actions7, vec![]);
+        let actions8 = decoder.decode(b";5u");
+        assert_eq!(actions8, vec![RawAction::EnterLeader]);
+        assert!(decoder.is_leader_active());
+
+        // 5. Inactive leader mode: Chunk 1: b"\x1b", flush()
+        decoder.set_leader_active(false);
+        let _ = decoder.decode(b"\x1b");
+        let flushed = decoder.flush();
+        assert_eq!(flushed, vec![RawAction::Passthrough(vec![0x1b])]);
+
+        // 6. Active leader mode: single \x1b cancels leader immediately
+        decoder.set_leader_active(true);
+        let actions_esc = decoder.decode(b"\x1b");
+        assert_eq!(actions_esc, vec![RawAction::CancelLeader]);
+        assert!(!decoder.is_leader_active());
+    }
+
+    #[test]
+    fn test_parse_raw_events_csi_u_with_event_types_and_locks() {
+        // \x1b[13;2:1u -> Enter with Shift (event type 1: press)
+        assert_eq!(
+            parse_raw_events(b"\x1b[13;2:1u"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::SHIFT)]
+        );
+
+        // \x1b[13;66u -> Enter with Shift and CapsLock (mod 66 = 1 + 1 (Shift) + 64 (CapsLock))
+        assert_eq!(
+            parse_raw_events(b"\x1b[13;66u"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::SHIFT)]
+        );
+
+        // \x1b[32;5:1u -> Space with Control (event type 1: press)
+        assert_eq!(
+            parse_raw_events(b"\x1b[32;5:1u"),
+            vec![make_key_event(KeyCode::Char(' '), KeyModifiers::CONTROL)]
+        );
+
+        // \x1b[13:10;2:1u -> Enter with Shift (Kitty alternate codepoints + event type)
+        assert_eq!(
+            parse_raw_events(b"\x1b[13:10;2:1u"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::SHIFT)]
+        );
+
+        // \x1b[9;131u -> Tab with Alt and NumLock (mod 131 = 1 + 2 (Alt) + 128 (NumLock))
+        assert_eq!(
+            parse_raw_events(b"\x1b[9;131u"),
+            vec![make_key_event(KeyCode::Tab, KeyModifiers::ALT)]
+        );
+
+        // \x1b[9;66:1u -> BackTab with Shift and CapsLock (mod 66 = 1 + 1 (Shift) + 64 (CapsLock))
+        assert_eq!(
+            parse_raw_events(b"\x1b[9;66:1u"),
+            vec![make_key_event(KeyCode::BackTab, KeyModifiers::SHIFT)]
+        );
+    }
+
+    #[test]
+    fn test_is_shift_enter_with_event_types_and_locks() {
+        // Kitty format with Shift and sub-parameters
+        assert!(is_shift_enter(b"\x1b[13;2:1u"));
+        assert!(is_shift_enter(b"\x1b[13;66u"));
+        assert!(is_shift_enter(b"\x1b[13:10;2:1u"));
+        assert!(is_shift_enter(b"\x1b[13:text;2:1u"));
+        assert!(is_shift_enter(b"\x1b[10;2:1u"));
+        assert!(is_shift_enter(b"\x1b[10;66u"));
+
+        // Exact slice fallbacks
+        assert!(is_shift_enter(b"\x1b[13;2u"));
+        assert!(is_shift_enter(b"\x1b[13:10;2u"));
+        assert!(is_shift_enter(b"\x1b[27;2;13~"));
+
+        // Xterm format with Shift and lock modifiers
+        assert!(is_shift_enter(b"\x1b[27;66;13~"));
+        assert!(is_shift_enter(b"\x1b[27;2;10~"));
+
+        // Negative cases
+        assert!(!is_shift_enter(b"\x1b[13;5u")); // Ctrl+Enter
+        assert!(!is_shift_enter(b"\x1b[13;1u")); // Unmodified Enter
+        assert!(!is_shift_enter(b"\r"));
+        assert!(!is_shift_enter(b"\n"));
+        assert!(!is_shift_enter(b"\x1b[32;5u")); // Ctrl+Space
     }
 }

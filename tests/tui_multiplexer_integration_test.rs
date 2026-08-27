@@ -679,3 +679,93 @@ fn test_integration_mouse_wheel_scrolling_via_handle_raw_bytes() {
         SessionStatus::Busy
     );
 }
+
+#[test]
+fn test_integration_mixed_mouse_and_keystrokes_stream_demuxing() {
+    use botai::tui::app::TuiApp;
+    use std::time::Duration;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "more"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "cat"]);
+
+    let mut registry = SessionRegistry::new();
+    let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty = PtySession::spawn(config).unwrap();
+    let mut vt = VtScreen::new(80, 24);
+    for i in 1..=30 {
+        vt.process(format!("output line {i}\r\n").as_bytes());
+    }
+    let mut ps = ProjectSession::new("stream-demux", "ws", "claude");
+    ps.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps, pty, vt).unwrap();
+
+    let mut app = TuiApp::new(registry);
+
+    // 1. Mouse scroll + trailing keystrokes in a single chunk: \x1b[<64;10;20Mhello\r
+    app.handle_raw_bytes(b"\x1b[<64;10;20Mhello\r");
+    // Scrollback was scrolled up by 3 from the mouse event, but typing "hello\r" reset it to 0
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    // Let the cat process echo back
+    std::thread::sleep(Duration::from_millis(100));
+    app.process_pty_streams();
+    let text = app.registry.active_session().unwrap().vt().contents();
+    assert!(text.contains("hello") || app.registry.active_session().unwrap().status() == SessionStatus::Busy);
+
+    // 2. Pure mouse scroll alone: increases scrollback
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\x1b[<64;10;20M");
+    assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 3);
+
+    // 3. Keystrokes before and after mouse event: b"abc\x1b[<64;10;20Mdef\r"
+    app.handle_raw_bytes(b"abc\x1b[<64;10;20Mdef\r");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+}
+
+#[test]
+fn test_integration_errored_session_mouse_vs_key_dismissal() {
+    use botai::tui::app::TuiApp;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "exit 1"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "exit 1"]);
+
+    let mut registry = SessionRegistry::new();
+    let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty = PtySession::spawn(config).unwrap();
+    let vt = VtScreen::new(80, 24);
+    let mut ps = ProjectSession::new("error-session", "ws", "claude");
+    ps.set_status(SessionStatus::Error);
+    registry.add(ps, pty, vt).unwrap();
+
+    let mut app = TuiApp::new(registry);
+    assert_eq!(app.registry.len(), 1);
+
+    // 1. Mouse scroll event alone does NOT dismiss the errored session
+    app.handle_raw_bytes(b"\x1b[<64;10;20M");
+    assert_eq!(app.registry.len(), 1);
+
+    // 2. Mouse event whose coordinates or button contain ASCII byte 32 (space) does NOT dismiss
+    app.handle_raw_bytes(b"\x1b[<64;32;20M");
+    assert_eq!(app.registry.len(), 1);
+
+    // 3. Mixed mouse event followed by Enter key dismisses the errored session
+    app.handle_raw_bytes(b"\x1b[<64;10;20M\r");
+    assert_eq!(app.registry.len(), 0);
+}

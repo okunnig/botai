@@ -30,7 +30,9 @@ use crate::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
 };
 use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
-use crate::tui::events::{is_shift_enter, parse_raw_events, RawAction, RawLeaderDecoder};
+use crate::tui::events::{
+    is_shift_enter, parse_raw_events, parse_sgr_mouse, RawAction, RawLeaderDecoder,
+};
 use crate::tui::quick_launcher::{render_quick_launcher, QuickLauncherAction, QuickLauncherState};
 use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
 use crate::tui::status_bar::StatusBar;
@@ -936,8 +938,13 @@ impl TuiApp {
         }
     }
 
-    /// Feeds raw stdin bytes directly into the `RawLeaderDecoder` and processes the resulting actions.
-    pub fn handle_raw_bytes(&mut self, bytes: &[u8]) {
+    /// Processes a slice of non-mouse raw input bytes (errored session dismiss check + leader decoder).
+    /// Returns `true` if an active errored session was dismissed.
+    fn process_non_mouse_bytes(&mut self, segment: &[u8]) -> bool {
+        if segment.is_empty() {
+            return false;
+        }
+
         let is_active_errored = self
             .registry
             .active_session()
@@ -946,34 +953,52 @@ impl TuiApp {
 
         // If the active session is errored, dismiss it on Enter (\r, \n) or plain Space (when leader is inactive)
         if is_active_errored && !self.leader_active {
-            let is_dismiss = bytes.iter().any(|&b| b == b'\r' || b == b'\n' || b == b' ');
+            let is_dismiss = segment.iter().any(|&b| b == b'\r' || b == b'\n' || b == b' ');
             if is_dismiss {
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
                     self.close_session(&id);
-                    return;
+                    return true;
                 }
-            }
-        }
-
-        // Handle SGR mouse sequences (\x1b[<...)
-        if bytes.starts_with(b"\x1b[<") {
-            let events = parse_raw_events(bytes);
-            let has_mouse = events.iter().any(|e| matches!(e, Event::Mouse(_)));
-            if has_mouse {
-                for event in events {
-                    if let Event::Mouse(mouse) = event {
-                        self.handle_mouse_event(mouse);
-                    }
-                }
-                return;
             }
         }
 
         self.raw_decoder.set_leader_active(self.leader_active);
-        let actions = self.raw_decoder.decode(bytes);
+        let actions = self.raw_decoder.decode(segment);
         for action in actions {
             self.handle_raw_action(action);
+        }
+        false
+    }
+
+    /// Feeds raw stdin bytes directly into the `RawLeaderDecoder` and processes the resulting actions,
+    /// demuxing SGR mouse sequences so they are dispatched to `handle_mouse_event` without dropping
+    /// interleaved or trailing keystrokes.
+    pub fn handle_raw_bytes(&mut self, bytes: &[u8]) {
+        let mut i = 0;
+        let mut seg_start = 0;
+
+        while i < bytes.len() {
+            if bytes[i..].starts_with(b"\x1b[<") {
+                if let Some((consumed, mouse)) = parse_sgr_mouse(&bytes[i..]) {
+                    // Process non-mouse key bytes accumulated before this mouse sequence
+                    if seg_start < i {
+                        if self.process_non_mouse_bytes(&bytes[seg_start..i]) {
+                            return; // Errored session dismissed
+                        }
+                    }
+                    self.handle_mouse_event(mouse);
+                    i += consumed;
+                    seg_start = i;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+
+        // Process trailing non-mouse key bytes
+        if seg_start < bytes.len() {
+            self.process_non_mouse_bytes(&bytes[seg_start..]);
         }
     }
 

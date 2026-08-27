@@ -167,9 +167,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Mode 2 (`\x1b[>4;2m`): Enabled when running inside `tmux` (detected via `TMUX` environment variable) to guarantee modifier reporting through tmux's internal terminal multiplexing layer.
     - None (no escape sequence emitted): For Alacritty 0.13+, WezTerm, Kitty, Ghostty, and standard terminals, relying on the native Kitty Keyboard Protocol (`\x1b[>1u`) rather than sending `modifyOtherKeys` Mode 1 (`\x1b[>4;1m`) which would override Alacritty/WezTerm's Kitty mode and suppress Shift+Enter escape sequences.
   - Ensures `PopKeyboardEnhancementFlags` and disabling `modifyOtherKeys` (`\x1b[>4;0m`) are executed during teardown and in `TerminalCleanupGuard::drop`, guaranteeing the host terminal's original keyboard state is fully restored even on unexpected exit or error.
-- **Full CSI-u / ANSI Modifier Key Passthrough**:
-  - Encodes modified key events using standard Xterm / CSI-u modifier parameter values:
+- **Full CSI-u / ANSI Modifier Key Passthrough & Stream Demuxing**:
+  - Encodes and decodes modified key events using standard Xterm / CSI-u modifier parameter values:
     `modifier_code = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0) + (Super/Meta ? 8 : 0)`.
+    - Handles progressive Kitty sub-parameters (`\x1b[<codepoint>:<shifted>;<modifiers>:<event_type>u`) and masks out lock keys (Caps Lock `64`, Num Lock `128`) to accurately detect modifiers under all keyboard states.
+    - Buffers split escape sequences across chunk boundaries (including single `\x1b` byte splits) in `RawLeaderDecoder` to prevent raw escape leakages.
+    - Stream-demuxes mixed input buffers containing interleaved SGR mouse sequences (`\x1b[<...M/m`) and keystrokes without dropping trailing keys.
   - **Modified Enter, Shift+Enter, and Newlines**:
     - Unmodified Enter (`KeyCode::Enter` with no modifiers): `\r` (`0x0D`, CR).
     - Unmodified Newline (`KeyCode::Char('\n')` with no modifiers): `\n` (`0x0A`, LF / Ctrl+J).
@@ -177,7 +180,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Ctrl+J (`KeyCode::Char('j')` with Ctrl, or unmodified `\n`): `0x0A` (LF).
     - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`; `Super+Enter` -> `\x1b[13;9u`).
     - **Seamless Agent-Aware Shift+Enter Multiline Routing**:
-      - Inspects the active session (`active.project_session.agent`) when receiving raw Shift+Enter sequences (`\x1b[13;2u`, `\x1b[13:10;2u`, or `\x1b[27;2;13~`):
+      - Inspects the active session (`active.project_session.agent`) when receiving raw Shift+Enter sequences (Kitty CSI-u `\x1b[13;<mod>u` with Shift bit, sub-parameters `\x1b[13;2:1u`, alternate codepoints `\x1b[13:10;2u`, or xterm modifyOtherKeys `\x1b[27;<mod>;13~`):
         - For `claude` (or non-Kitty agents): Sends `b"\n"` (`0x0A` / Line Feed) so Claude Code inserts a clean multiline newline instead of submitting.
         - For `agy`: Forwards `b"\x1b[13;2u"` (native Kitty protocol multiline newline sequence).
         - Default/other agents: Sends `b"\n"`.
