@@ -64,6 +64,13 @@ pub enum Commands {
         stdout: bool,
     },
 
+    /// Open the configuration file in the user's editor of choice.
+    Edit {
+        /// Override the editor executable or command (e.g. 'nano', 'vim', 'code --wait').
+        #[arg(short, long)]
+        editor: Option<String>,
+    },
+
     /// Safely teardown a project by removing its git worktrees and directory.
     Destroy {
         /// Name of the project directory to destroy.
@@ -350,6 +357,62 @@ mod tests {
                 assert!(force);
             }
             _ => panic!("Expected Destroy command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_edit_subcommand_defaults() {
+        let cli = Cli::try_parse_from(["botai", "edit"]).expect("Failed to parse edit defaults");
+        match cli.command {
+            Some(Commands::Edit { editor }) => {
+                assert_eq!(editor, None);
+            }
+            _ => panic!("Expected Edit command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_edit_subcommand_with_long_editor_flag() {
+        let cli = Cli::try_parse_from(["botai", "edit", "--editor", "nvim"])
+            .expect("Failed to parse edit with --editor");
+        match cli.command {
+            Some(Commands::Edit { editor }) => {
+                assert_eq!(editor, Some("nvim".to_string()));
+            }
+            _ => panic!("Expected Edit command with nvim"),
+        }
+    }
+
+    #[test]
+    fn test_cli_edit_subcommand_with_short_editor_flag() {
+        let cli = Cli::try_parse_from(["botai", "edit", "-e", "code --wait"])
+            .expect("Failed to parse edit with -e");
+        match cli.command {
+            Some(Commands::Edit { editor }) => {
+                assert_eq!(editor, Some("code --wait".to_string()));
+            }
+            _ => panic!("Expected Edit command with code --wait"),
+        }
+    }
+
+    #[test]
+    fn test_cli_edit_subcommand_with_global_config_flag() {
+        let cli = Cli::try_parse_from([
+            "botai",
+            "--config",
+            "/custom/path/config.toml",
+            "edit",
+            "-e",
+            "vim",
+        ])
+        .expect("Failed to parse global config with edit");
+
+        assert_eq!(cli.config, Some(PathBuf::from("/custom/path/config.toml")));
+        match cli.command {
+            Some(Commands::Edit { editor }) => {
+                assert_eq!(editor, Some("vim".to_string()));
+            }
+            _ => panic!("Expected Edit command with vim"),
         }
     }
 }

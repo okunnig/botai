@@ -278,6 +278,24 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Automatically creates parent directories if they do not exist.
   - Refuses to overwrite an existing configuration file unless `--force` (`-f`) is passed.
   - `--stdout` (`-s`): Outputs the configuration template directly to `stdout` without creating or modifying files on disk.
+- **`botai edit [--editor <cmd> / -e <cmd>]`**:
+  - Opens the `botai` configuration file in the user's text editor of choice.
+  - **Configuration Path Resolution**:
+    - Uses the path specified via global `--config <FILE>` if provided, or the standard platform default (`~/.config/botai/config.toml` or `%APPDATA%\botai\config.toml`).
+    - If the configuration file does not exist at the target path, automatically initializes the file with the full documented default template (creating parent directories if necessary) before opening the editor.
+  - **Editor Resolution Order & Precedence**:
+    1. CLI `--editor <cmd>` / `-e <cmd>` argument.
+    2. `$VISUAL` environment variable if set and non-empty.
+    3. `$EDITOR` environment variable if set and non-empty.
+    4. Platform fallbacks:
+       - Unix / macOS: Checks `$PATH` sequentially for `nano`, `vim`, then `vi`.
+       - Windows: `notepad.exe`.
+    5. If no editor can be resolved or found in `$PATH`, terminates with an informative error message and non-zero exit code.
+  - **Command & Argument Parsing**:
+    - Multi-word editor variables (e.g. `EDITOR="code --wait"` or `VISUAL="subl -w"`) are split into executable binary and arguments according to shell word splitting rules, with the configuration file path appended as the final argument.
+  - **Execution & Lifecycle**:
+    - Spawns the editor process with inherited standard I/O (stdin, stdout, stderr) and waits synchronously for the process to exit.
+    - Exits `botai` with the editor process's exit status code (silent pass-through without blocking on syntax validation).
 - **`botai destroy <project-name> [--force]`**:
   - Validates all child worktrees for uncommitted changes upfront and refuses deletion unless `--force` is specified.
   - Automatically resolves the underlying source repository in `repos_dir` (or local path) for every child worktree via `resolve_main_repo`.

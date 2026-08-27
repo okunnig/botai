@@ -36,7 +36,26 @@ pub enum ConfigError {
         source1: String,
         source2: String,
     },
+
+    #[error("No editor found. Please set $VISUAL or $EDITOR, or pass --editor <cmd>.")]
+    NoEditorFound,
+
+    #[error("Editor command is empty")]
+    EmptyEditorCommand,
+
+    #[error("Failed to execute editor '{command}': {source}")]
+    EditorExecutionFailed {
+        command: String,
+        #[source]
+        source: std::io::Error,
+    },
 }
+
+pub mod editor;
+pub use editor::{
+    find_executable_in_path, is_executable_in_path, resolve_editor, resolve_editor_with_platform,
+    run_editor, split_command_words, TargetPlatform,
+};
 
 /// Backward compatibility alias for ConfigError::TemplateNotFound.
 #[allow(non_upper_case_globals)]

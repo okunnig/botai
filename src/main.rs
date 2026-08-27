@@ -20,6 +20,10 @@ fn main() -> Result<()> {
         return cmd_init(cli.config.as_deref(), force, stdout);
     }
 
+    if let Some(Commands::Edit { editor }) = cli.command {
+        return cmd_edit(cli.config.as_deref(), editor.as_deref());
+    }
+
     let config_path = match cli.config {
         Some(path) => path,
         None => Config::default_path().context(
@@ -37,7 +41,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => run_default_dashboard(&config),
-        Some(Commands::Init { .. }) => unreachable!(),
+        Some(Commands::Init { .. }) | Some(Commands::Edit { .. }) => unreachable!(),
         Some(Commands::Create {
             template,
             project,
@@ -77,6 +81,33 @@ fn cmd_init(config_override: Option<&Path>, force: bool, stdout: bool) -> Result
         .with_context(|| format!("Failed to initialize configuration at {target_path:?}"))?;
 
     println!("Initialized botai configuration at: {target_path:?}");
+    Ok(())
+}
+
+/// `botai edit [--editor <cmd>]`
+fn cmd_edit(config_override: Option<&Path>, editor_override: Option<&str>) -> Result<()> {
+    let target_path = match config_override {
+        Some(path) => path.to_path_buf(),
+        None => Config::default_path().context(
+            "Could not determine default configuration directory. Please specify --config <FILE>.",
+        )?,
+    };
+
+    if !target_path.exists() {
+        Config::init_file(&target_path, false)
+            .with_context(|| format!("Failed to initialize configuration at {target_path:?}"))?;
+    }
+
+    let editor_cmd = botai::config::resolve_editor(editor_override)?;
+    let status = botai::config::run_editor(&editor_cmd, &target_path)?;
+
+    let exit_code = status
+        .code()
+        .unwrap_or(if status.success() { 0 } else { 1 });
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+
     Ok(())
 }
 

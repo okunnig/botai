@@ -9,6 +9,7 @@ pub mod project;
 pub mod session;
 pub mod tui;
 
+pub use config::{resolve_editor, run_editor, split_command_words, Config, ConfigError};
 pub use git::{remove_worktree_auto, resolve_main_repo};
 pub use project::{ProjectBuilder, ProjectError, ProjectSetupEvent, ProjectValidation};
 pub use tui::Theme;
