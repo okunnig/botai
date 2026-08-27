@@ -956,7 +956,9 @@ impl TuiApp {
 
         // If the active session is errored, dismiss it on Enter (\r, \n) or plain Space (when leader is inactive)
         if is_active_errored && !self.leader_active {
-            let is_dismiss = segment.iter().any(|&b| b == b'\r' || b == b'\n' || b == b' ');
+            let is_dismiss = segment
+                .iter()
+                .any(|&b| b == b'\r' || b == b'\n' || b == b' ');
             if is_dismiss {
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();

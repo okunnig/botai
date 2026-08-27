@@ -246,9 +246,7 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
         bail!("Project directory '{project_dir:?}' does not exist.");
     }
 
-    let project_dir = project_dir
-        .canonicalize()
-        .unwrap_or(project_dir);
+    let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
 
     let agent = config
         .get_agent(&config.default_agent)

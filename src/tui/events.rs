@@ -223,7 +223,10 @@ pub fn is_shift_enter(bytes: &[u8]) -> bool {
     if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"u") && bytes.len() >= 4 {
         if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
             let parts: Vec<&str> = param_str.split(';').collect();
-            let key_code = parts.first().and_then(|s| s.split(':').next()).unwrap_or("");
+            let key_code = parts
+                .first()
+                .and_then(|s| s.split(':').next())
+                .unwrap_or("");
             if key_code == "13" || key_code == "10" {
                 if let Some(mod_part) = parts.get(1) {
                     if let Some(mod_str) = mod_part.split(':').next() {
@@ -459,7 +462,9 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             if let Some(tilde_pos) = rest.iter().position(|&b| b == b'~') {
                 if let Ok(param_str) = std::str::from_utf8(&rest[..tilde_pos]) {
                     let parts: Vec<&str> = param_str.split(';').collect();
-                    if parts.len() == 3 && parts.first().and_then(|s| s.split(':').next()) == Some("27") {
+                    if parts.len() == 3
+                        && parts.first().and_then(|s| s.split(':').next()) == Some("27")
+                    {
                         let mod_num = parts
                             .get(1)
                             .and_then(|s| s.split(':').next())
@@ -488,7 +493,10 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
                             continue;
                         }
                     } else {
-                        let key_num = parts.first().and_then(|s| s.split(':').next()).and_then(|s| s.parse::<u32>().ok());
+                        let key_num = parts
+                            .first()
+                            .and_then(|s| s.split(':').next())
+                            .and_then(|s| s.parse::<u32>().ok());
                         let mod_num = parts
                             .get(1)
                             .and_then(|s| s.split(':').next())
@@ -529,7 +537,10 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             if let Some(u_pos) = rest.iter().position(|&b| b == b'u') {
                 if let Ok(param_str) = std::str::from_utf8(&rest[..u_pos]) {
                     let parts: Vec<&str> = param_str.split(';').collect();
-                    let cp_str = parts.first().and_then(|s| s.split(':').next()).unwrap_or("");
+                    let cp_str = parts
+                        .first()
+                        .and_then(|s| s.split(':').next())
+                        .unwrap_or("");
                     let codepoint = cp_str.parse::<u32>().ok();
                     let mod_num = parts
                         .get(1)

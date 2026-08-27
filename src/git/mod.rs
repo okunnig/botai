@@ -245,7 +245,9 @@ impl GitWorktreeManager {
                 .map(|cwd| cwd.join(worktree_path))
                 .unwrap_or_else(|_| worktree_path.to_path_buf())
         };
-        let wt_arg = abs_worktree_path.canonicalize().unwrap_or(abs_worktree_path);
+        let wt_arg = abs_worktree_path
+            .canonicalize()
+            .unwrap_or(abs_worktree_path);
 
         let mut cmd = Command::new("git");
         cmd.arg("worktree").arg("remove");
@@ -996,7 +998,8 @@ mod tests {
 
         // Create worktree on cloned repo - should branch off origin/main
         let wt_path = client_temp.path().join("wt_from_clone");
-        create_worktree(&cloned_path, &wt_path, "feature-cloned").expect("create worktree from clone");
+        create_worktree(&cloned_path, &wt_path, "feature-cloned")
+            .expect("create worktree from clone");
         assert!(wt_path.exists());
         assert_eq!(
             get_current_branch(&wt_path).expect("current branch"),
@@ -1008,8 +1011,11 @@ mod tests {
     fn test_clone_repo_invalid_url_fails() {
         let temp = TempDir::new().expect("tempdir");
         let target = temp.path().join("invalid");
-        let err = clone_repo("https://invalid.domain.that.does.not.exist.botai/repo.git", &target)
-            .expect_err("Cloning invalid URL should fail");
+        let err = clone_repo(
+            "https://invalid.domain.that.does.not.exist.botai/repo.git",
+            &target,
+        )
+        .expect_err("Cloning invalid URL should fail");
 
         match err {
             GitError::CloneFailed { url, path, .. } => {
@@ -1097,7 +1103,10 @@ mod tests {
         assert!(branch_exists(&repo_path, "feat-auto-clean").expect("branch exists"));
 
         // Worktrees metadata directory should not contain the pruned entry
-        let wt_meta_dir = repo_path.join(".git").join("worktrees").join("wt_auto_clean");
+        let wt_meta_dir = repo_path
+            .join(".git")
+            .join("worktrees")
+            .join("wt_auto_clean");
         assert!(!wt_meta_dir.exists());
     }
 

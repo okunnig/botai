@@ -717,7 +717,10 @@ fn test_integration_mixed_mouse_and_keystrokes_stream_demuxing() {
     std::thread::sleep(Duration::from_millis(100));
     app.process_pty_streams();
     let text = app.registry.active_session().unwrap().vt().contents();
-    assert!(text.contains("hello") || app.registry.active_session().unwrap().status() == SessionStatus::Busy);
+    assert!(
+        text.contains("hello")
+            || app.registry.active_session().unwrap().status() == SessionStatus::Busy
+    );
 
     // 2. Pure mouse scroll alone: increases scrollback
     app.registry
@@ -825,6 +828,8 @@ fn test_integration_split_sgr_mouse_and_keystrokes_across_chunks() {
     std::thread::sleep(Duration::from_millis(100));
     app.process_pty_streams();
     let text = app.registry.active_session().unwrap().vt().contents();
-    assert!(text.contains("hello") || app.registry.active_session().unwrap().status() == SessionStatus::Busy);
+    assert!(
+        text.contains("hello")
+            || app.registry.active_session().unwrap().status() == SessionStatus::Busy
+    );
 }
-

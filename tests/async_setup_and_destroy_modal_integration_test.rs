@@ -12,7 +12,6 @@ use botai::tui::setup_modal::render_setup_modal;
 use botai::tui::theme::Theme;
 use botai::tui::TuiApp;
 
-
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -75,10 +74,7 @@ fn test_integration_destroy_confirmation_modal_lifecycle() {
     state.handle_key(key(KeyCode::Char('d')));
     assert!(state.destroy_modal.is_some());
     let action = state.handle_key(key(KeyCode::Enter));
-    assert_eq!(
-        action,
-        DashboardAction::Destroy("service-del".to_string())
-    );
+    assert_eq!(action, DashboardAction::Destroy("service-del".to_string()));
     assert!(state.destroy_modal.is_none());
 
     // Execute destroy on TuiApp
@@ -172,8 +168,14 @@ fn test_integration_destroy_project_with_git_worktrees_cleans_central_repo() {
         "Central repo must not list destroyed worktree"
     );
 
-    let wt_meta = central_repo.join(".git").join("worktrees").join("my_service");
-    assert!(!wt_meta.exists(), "Central repo worktree metadata must be pruned");
+    let wt_meta = central_repo
+        .join(".git")
+        .join("worktrees")
+        .join("my_service");
+    assert!(
+        !wt_meta.exists(),
+        "Central repo worktree metadata must be pruned"
+    );
 
     assert!(
         botai::git::branch_exists(&central_repo, project_name).expect("branch exists"),
@@ -226,7 +228,10 @@ repos = []
     let initial_modal = app.setup_modal.as_ref().unwrap();
     assert_eq!(initial_modal.project_name, "microservice-alpha");
     assert_eq!(initial_modal.template_name, "cloud_ws");
-    assert_eq!(initial_modal.prompt.as_deref(), Some("Initialize API endpoints"));
+    assert_eq!(
+        initial_modal.prompt.as_deref(),
+        Some("Initialize API endpoints")
+    );
 
     // Poll until completion
     let start = std::time::Instant::now();
@@ -244,8 +249,6 @@ repos = []
         active.project_session.prompt.as_deref(),
         Some("Initialize API endpoints")
     );
-
-
 
     let created_dir = cwd.join("microservice-alpha");
     assert!(created_dir.exists());
