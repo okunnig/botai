@@ -35,22 +35,22 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
 
 ## Key Features
 
-- 🌳 **Multi-Repo Workspace Isolation**  
+- **Multi-Repo Workspace Isolation**  
   Define project stacks in declarative TOML templates. `botai` automatically clones missing repositories to a central cache (`repos_dir`), fetches upstream branches, and provisions independent Git worktrees checked out to a clean feature branch inside `CWD/<project_name>`.
-- 🧠 **Automated Context Synthesis (`AGENTS.md`)**  
+- **Automated Context Synthesis (`AGENTS.md`)**  
   Every project environment is automatically seeded with an orientation document detailing the directory layout, repository roles, inter-service relationships, and optional custom instructions (`agents_md_append`).
-- ⚡ **Native Terminal Multiplexer**  
+- **Native Terminal Multiplexer**  
   Built-in terminal session multiplexing with tabbed navigation, dynamic terminal resizing, full mouse wheel scrolling, hardware cursor tracking, and an intuitive `Ctrl+Space` leader key menu.
-- 🔔 **Real-Time Agent State Monitoring**  
+- **Real-Time Agent State Monitoring**  
   Live visual status dot indicators (`●`) track agent lifecycles in real time:
   - **Thinking / Busy**: Agent is generating code or running commands.
   - **Waiting for Input**: Agent requires user approval or prompt response.
   - **Done / Idle**: Agent finished its task cleanly.
   - **Error / Interrupted**: Process crashed or exited with a non-zero status code (output preserved for inspection).
   Native OS desktop notifications alert you immediately when tasks finish or need attention.
-- 🎨 **Multiple Built-in Color Themes**  
+- **Multiple Built-in Color Themes**  
   Ship with carefully crafted palettes: **Tokyo Night** (default), **Catppuccin Mocha**, **Cyberpunk**, **Gruvbox Dark**, **Monochrome / Slate**, and standard **ANSI 16-color**.
-- 🚀 **Interactive TUI Dashboard & CLI Suite**  
+- **Interactive TUI Dashboard & CLI Suite**  
   Launch `botai` without arguments for a full-screen interactive project switcher and creation wizard, or use fast, scriptable CLI commands (`botai create`, `botai sync`, `botai list`, `botai attach`, `botai destroy`).
 
 ---
