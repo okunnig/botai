@@ -74,16 +74,14 @@ cargo install --path .
 
 ### Initial Configuration
 
-Generate a self-documenting starter configuration template:
+Generate a starter configuration and open it in your editor:
 
 ```bash
-# Create default configuration (~/.config/botai/config.toml or %APPDATA%\botai\config.toml)
+# Create default configuration
 botai init
-```
 
-To print the configuration template to stdout without writing to disk:
-```bash
-botai init --stdout
+# Open and edit configuration in your default editor ($VISUAL / $EDITOR)
+botai edit
 ```
 
 ---
@@ -108,6 +106,12 @@ From the dashboard you can:
 ### 2. Command-Line Interface (CLI)
 
 ```bash
+# Initialize starter configuration
+botai init
+
+# Open and edit configuration in your default editor
+botai edit
+
 # Create a new multi-repo workspace from a template (without launching agent)
 botai create ecommerce feat-checkout
 
@@ -180,13 +184,9 @@ When working inside an active terminal session, press `Ctrl + Space` to enter **
 
 ---
 
-## Configuration (`config.toml`)
+## Configuration
 
-Configuration is stored at:
-- **Linux / macOS**: `~/.config/botai/config.toml` (or `$XDG_CONFIG_HOME/botai/config.toml`)
-- **Windows**: `%APPDATA%\botai\config.toml`
-
-### Example Configuration
+Use `botai edit` to open and customize your configuration. Below is an example configuration file:
 
 ```toml
 # ==============================================================================
