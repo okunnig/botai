@@ -28,8 +28,8 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
 | :--- | :--- | :--- |
 | **Multi-Repo Workflows** | Manual cloning, switching branches across multiple repos, accidental dirty working tree clobbering. | **Declarative Templates & Git Worktrees**: One command provisions isolated worktrees across all template repos under `CWD/<project_name>`. |
 | **Agent Context & Orientation** | Agents lack awareness of peer repositories, cross-project dependencies, and service contracts. | **Automated Context Synthesis**: Automatically generates `AGENTS.md` with directory trees, repo purposes, and custom template rules. |
-| **Multiplexing Dependencies** | Requires installing, configuring, and maintaining external multiplexers (`tmux`, `zellij`). | **Zero-Dependency Rust PTY**: Built-in ConPTY / UNIX PTY multiplexer with `Ctrl+Space` leader navigation and mouse scroll passthrough. |
-| **Agent Monitoring** | Constantly switching terminals to check if long-running agent tasks have finished or need input. | **Real-Time Visual Badges & OS Notifications**: Tab indicators (`● Thinking`, `● Waiting`, `● Done`, `● Error`) and native desktop alerts via `notify-rust`. |
+| **Multiplexing Dependencies** | Requires installing, configuring, and maintaining external multiplexers (`tmux`, `zellij`). | **Native Built-in Multiplexer**: Full terminal session multiplexing with `Ctrl+Space` leader navigation, tab switching, and mouse scroll support. |
+| **Agent Monitoring** | Constantly switching terminals to check if long-running agent tasks have finished or need input. | **Real-Time Visual Badges & OS Notifications**: Tab indicators (`● Thinking`, `● Waiting`, `● Done`, `● Error`) and native desktop alerts. |
 
 ---
 
@@ -39,8 +39,8 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
   Define project stacks in declarative TOML templates. `botai` automatically clones missing repositories to a central cache (`repos_dir`), fetches upstream branches, and provisions independent Git worktrees checked out to a clean feature branch inside `CWD/<project_name>`.
 - 🧠 **Automated Context Synthesis (`AGENTS.md`)**  
   Every project environment is automatically seeded with an orientation document detailing the directory layout, repository roles, inter-service relationships, and optional custom instructions (`agents_md_append`).
-- ⚡ **Embedded Rust PTY Multiplexer**  
-  Built with `portable-pty`, `vt100`, and `ratatui`. Features dynamic viewport resizing (`SIGWINCH` / `ResizePseudoConsole`), accurate hardware cursor positioning, ANSI mouse scroll forwarding, and an intuitive `Ctrl+Space` leader key architecture.
+- ⚡ **Native Terminal Multiplexer**  
+  Built-in terminal session multiplexing with tabbed navigation, dynamic terminal resizing, full mouse wheel scrolling, hardware cursor tracking, and an intuitive `Ctrl+Space` leader key menu.
 - 🔔 **Real-Time Agent State Monitoring**  
   Live visual status dot indicators (`●`) track agent lifecycles in real time:
   - **Thinking / Busy**: Agent is generating code or running commands.
@@ -52,32 +52,6 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
   Ship with carefully crafted palettes: **Tokyo Night** (default), **Catppuccin Mocha**, **Cyberpunk**, **Gruvbox Dark**, **Monochrome / Slate**, and standard **ANSI 16-color**.
 - 🚀 **Interactive TUI Dashboard & CLI Suite**  
   Launch `botai` without arguments for a full-screen interactive project switcher and creation wizard, or use fast, scriptable CLI commands (`botai create`, `botai sync`, `botai list`, `botai attach`, `botai destroy`).
-
----
-
-## Architecture & Workflow
-
-```mermaid
-flowchart TD
-    Config["📁 Declarative Config<br/>(config.toml)"] -->|Templates, Repos & Agents| Engine["⚙️ Unified Engine<br/>(ProjectBuilder)"]
-
-    subgraph Provisioning ["1. Workspace Provisioning & Synthesis"]
-        Engine -->|Auto-clone & fetch| Cache["📦 Central Repositories Cache<br/>(repos_dir)"]
-        Cache -->|git worktree add -b &lt;project&gt;| Worktrees["🌿 Isolated Git Worktrees<br/>(CWD/&lt;project&gt;/repo-*)"]
-        Engine -->|Synthesize multi-repo map| AgentsMD["📄 AGENTS.md Context Map<br/>(CWD/&lt;project&gt;/AGENTS.md)"]
-    end
-
-    subgraph Multiplexer ["2. PTY Multiplexing & Agent Execution"]
-        Worktrees & AgentsMD --> PTY["⚡ Master/Slave PTY Session<br/>(portable-pty + vt100)"]
-        PTY --> Agent["🤖 AI Coding Agent<br/>(agy / claude / aider / copilot)"]
-    end
-
-    subgraph Interface ["3. TUI Dashboard & Notifications"]
-        Agent --> TUI["🖥️ Native Ratatui TUI Multiplexer<br/>(Ctrl+Space Leader Navigation)"]
-        Agent --> Badges["● Real-Time Status Badges<br/>(Thinking / Waiting / Done / Error)"]
-        Agent --> OSNotify["🔔 OS Desktop Notifications<br/>(notify-rust)"]
-    end
-```
 
 ---
 
@@ -304,9 +278,9 @@ repos = [
 
 ---
 
-## Technical Specifications & Architecture
+## Full Technical Specifications
 
-For in-depth technical requirements, Git worktree lifecycle management, ConPTY integration, and test matrices, refer to [REQS.md](REQS.md).
+For in-depth technical requirements, Git worktree lifecycle management, terminal protocols, and full CLI flag specifications, refer to [REQS.md](REQS.md).
 
 ---
 
