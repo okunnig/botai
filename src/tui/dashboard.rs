@@ -13,6 +13,7 @@ use ratatui::{
 use crate::config::Config;
 use crate::session::SessionStatus;
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
+use crate::tui::status_bar::TopBar;
 use crate::tui::theme::Theme;
 
 /// Backward compatibility alias for ProjectCreationModal.
@@ -355,18 +356,7 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     let header_area = chunks[0];
     let main_area = chunks[1];
 
-    // 1. Render Top Header Status Bar
-    let bg_style = Style::default()
-        .bg(theme.status_bar_bg)
-        .fg(theme.status_bar_fg);
-    for x in header_area.left()..header_area.right() {
-        for y in header_area.top()..header_area.bottom() {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_style(bg_style).set_char(' ');
-            }
-        }
-    }
-
+    // 1. Render Top Header Status Bar using unified TopBar component
     let brand_text = " botai ";
     let brand_len = brand_text.chars().count() as u16;
     let brand_line = Line::from(Span::styled(
@@ -376,7 +366,6 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
             .bg(theme.status_bar_bg)
             .add_modifier(Modifier::BOLD),
     ));
-    buf.set_line(header_area.x, header_area.y, &brand_line, header_area.width);
 
     let full_hints = "↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit";
     let compact_hints = "Enter: Attach | n: New | d: Destroy | q: Quit";
@@ -396,12 +385,13 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
         None
     };
 
+    let mut top_bar = TopBar::new(brand_line).with_theme(theme);
     if let Some((hint_str, hint_len)) = hint_to_render {
-        let start_x = header_area.right().saturating_sub(hint_len + 1);
         let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
         let hint_line = Line::from(Span::styled(hint_str, hint_style));
-        buf.set_line(start_x, header_area.y, &hint_line, hint_len);
+        top_bar = top_bar.with_right(hint_line, hint_len);
     }
+    top_bar.render(header_area, buf);
 
     // 2. Render Full-Width Main Panel (Local Projects)
     let border_style = Style::default()

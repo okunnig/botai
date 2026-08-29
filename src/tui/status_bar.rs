@@ -2,11 +2,172 @@ use crate::session::{SessionEntry, SessionRegistry};
 use crate::tui::theme::Theme;
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::Widget,
+    widgets::{Block, Paragraph, Widget},
 };
+
+/// A reusable, declarative top bar / header widget for the TUI.
+///
+/// Handles background styling via `Block`, horizontal layout splitting via `Layout::horizontal`,
+/// and right-aligned action / navigation hints via `Paragraph::new(...).alignment(Alignment::Right)`.
+#[derive(Debug, Clone)]
+pub struct TopBar<'a> {
+    left: Line<'a>,
+    right: Option<Line<'a>>,
+    right_len: u16,
+    right_padding: bool,
+    theme: Option<&'a Theme>,
+}
+
+impl<'a> TopBar<'a> {
+    /// Creates a new `TopBar` widget with the given left-aligned line.
+    pub fn new(left: impl Into<Line<'a>>) -> Self {
+        Self {
+            left: left.into(),
+            right: None,
+            right_len: 0,
+            right_padding: true,
+            theme: None,
+        }
+    }
+
+    /// Configures right-aligned content with default trailing 1-character padding.
+    pub fn with_right(mut self, right: impl Into<Line<'a>>, len: u16) -> Self {
+        self.right = Some(right.into());
+        self.right_len = len;
+        self.right_padding = true;
+        self
+    }
+
+    /// Configures right-aligned content and whether to include trailing 1-character padding.
+    pub fn with_right_and_padding(
+        mut self,
+        right: impl Into<Line<'a>>,
+        len: u16,
+        padding: bool,
+    ) -> Self {
+        self.right = Some(right.into());
+        self.right_len = len;
+        self.right_padding = padding;
+        self
+    }
+
+    /// Configures the theme used by the top bar.
+    pub fn with_theme(mut self, theme: &'a Theme) -> Self {
+        self.theme = Some(theme);
+        self
+    }
+
+    /// Renders the top bar into the given buffer area.
+    pub fn render_to_buffer(&self, area: Rect, buf: &mut Buffer) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+
+        let default_theme = Theme::default();
+        let theme = self.theme.unwrap_or(&default_theme);
+
+        // 1. Block-based background styling
+        let bg_style = Style::default()
+            .bg(theme.status_bar_bg)
+            .fg(theme.status_bar_fg);
+        Block::default().style(bg_style).render(area, buf);
+
+        // 2. Declarative horizontal layout & right-aligned paragraph
+        if let Some(ref right_line) = self.right {
+            let pad = if self.right_padding { 1 } else { 0 };
+            let needed_right_width = self.right_len + pad;
+
+            if area.width >= needed_right_width {
+                let chunks = Layout::horizontal([
+                    Constraint::Fill(1),
+                    Constraint::Length(needed_right_width),
+                ])
+                .split(area);
+
+                // Render left content
+                Paragraph::new(self.left.clone()).render(chunks[0], buf);
+
+                // Render right content with right alignment
+                let right_to_render = if self.right_padding {
+                    let mut spans = right_line.spans.clone();
+                    spans.push(Span::styled(" ", Style::default().bg(theme.status_bar_bg)));
+                    Line::from(spans)
+                } else {
+                    right_line.clone()
+                };
+
+                Paragraph::new(right_to_render)
+                    .alignment(ratatui::layout::Alignment::Right)
+                    .render(chunks[1], buf);
+                return;
+            }
+        }
+
+        // Single full-width left paragraph if right content is absent or cannot fit
+        Paragraph::new(self.left.clone()).render(area, buf);
+    }
+}
+
+impl<'a> Widget for TopBar<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.render_to_buffer(area, buf);
+    }
+}
+
+impl<'a> Widget for &TopBar<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.render_to_buffer(area, buf);
+    }
+}
+
+/// Computes the sliding window `(start, end)` of visible tab indices centered around `active_idx`
+/// such that the total length of visible tabs fits within `max_width`.
+pub fn compute_visible_tab_range(
+    tab_lens: &[usize],
+    active_idx: usize,
+    max_width: u16,
+) -> (usize, usize) {
+    if tab_lens.is_empty() || max_width == 0 {
+        return (0, 0);
+    }
+
+    let total_len: usize = tab_lens.iter().sum();
+    if total_len as u16 <= max_width {
+        return (0, tab_lens.len());
+    }
+
+    let act = active_idx.min(tab_lens.len().saturating_sub(1));
+    let mut start = act;
+    let mut end = act + 1;
+    let mut used_width = tab_lens[act] as u16;
+
+    // Expand rightwards as much as possible
+    while end < tab_lens.len() {
+        let next_len = tab_lens[end] as u16;
+        if used_width + next_len <= max_width {
+            used_width += next_len;
+            end += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Expand leftwards as much as possible
+    while start > 0 {
+        let prev_len = tab_lens[start - 1] as u16;
+        if used_width + prev_len <= max_width {
+            used_width += prev_len;
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
+    (start, end)
+}
 
 /// Status bar widget displaying active project tabs, agent status badges, and multiplexer hotkeys.
 pub struct StatusBar<'a> {
@@ -95,71 +256,18 @@ impl<'a> StatusBar<'a> {
         }
     }
 
-    /// Renders the status bar directly into a Ratatui `Buffer` using the default theme.
-    pub fn render_to_buffer(
-        registry: &SessionRegistry,
-        leader_active: bool,
-        area: Rect,
-        buf: &mut Buffer,
-    ) {
-        let default_theme = Theme::default();
-        Self::render_to_buffer_with_theme(registry, leader_active, &default_theme, area, buf);
-    }
-
-    /// Renders the status bar directly into a Ratatui `Buffer` using the specified `Theme`.
-    pub fn render_to_buffer_with_theme(
-        registry: &SessionRegistry,
-        leader_active: bool,
-        theme: &Theme,
-        area: Rect,
-        buf: &mut Buffer,
-    ) {
-        if area.height == 0 || area.width == 0 {
-            return;
+    /// Builds the styled `Line` for all visible session tabs within the given available width.
+    pub fn build_tabs_line<'b>(
+        sessions: &[&SessionEntry],
+        active_idx: usize,
+        max_width: u16,
+        theme: &'b Theme,
+    ) -> Line<'b> {
+        if sessions.is_empty() {
+            return Line::default();
         }
 
-        // Fill entire background cleanly
-        let bg_style = Style::default()
-            .bg(theme.status_bar_bg)
-            .fg(theme.status_bar_fg);
-        for x in area.left()..area.right() {
-            for y in area.top()..area.bottom() {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_style(bg_style).set_char(' ');
-                }
-            }
-        }
-
-        if registry.is_empty() {
-            if leader_active {
-                let leader_msg = "[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]";
-                let line = Line::from(Span::styled(
-                    leader_msg,
-                    Style::default()
-                        .fg(theme.leader_fg)
-                        .bg(theme.leader_bg)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                buf.set_line(area.x, area.y, &line, area.width);
-            } else {
-                let msg = " [No Active Sessions] - Press Ctrl+Space then q to quit ";
-                let line = Line::from(Span::styled(
-                    msg,
-                    Style::default()
-                        .fg(theme.modal_title)
-                        .bg(theme.status_bar_bg)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                buf.set_line(area.x, area.y, &line, area.width);
-            }
-            return;
-        }
-
-        let active_idx = registry.active_index().unwrap_or(0);
-        let sessions = registry.list();
-
-        // Format all tabs using themed spans
-        let tab_spans_list: Vec<Vec<Span>> = sessions
+        let tab_spans_list: Vec<Vec<Span<'b>>> = sessions
             .iter()
             .enumerate()
             .map(|(i, session)| {
@@ -168,51 +276,19 @@ impl<'a> StatusBar<'a> {
             })
             .collect();
 
-        // Tab character length calculations
-        let tab_lens: Vec<usize> = sessions
+        let tab_lens: Vec<usize> = tab_spans_list
             .iter()
-            .enumerate()
-            .map(|(i, session)| {
-                let is_active = i == active_idx;
-                Self::format_tab(i, session, is_active).chars().count() + 1
+            .map(|spans| {
+                spans
+                    .iter()
+                    .map(|s| s.content.chars().count())
+                    .sum::<usize>()
+                    + 1
             })
             .collect();
 
-        let total_tabs_len: usize = tab_lens.iter().sum();
-
-        let (visible_start, visible_end) = if total_tabs_len as u16 <= area.width {
-            (0, tab_spans_list.len())
-        } else {
-            // Find window of tabs centered around active_idx that fits in area.width
-            let act = active_idx.min(tab_spans_list.len().saturating_sub(1));
-            let mut start = act;
-            let mut end = act + 1;
-            let mut used_width = tab_lens[act] as u16;
-
-            // Expand right as much as possible
-            while end < tab_spans_list.len() {
-                let next_len = tab_lens[end] as u16;
-                if used_width + next_len <= area.width {
-                    used_width += next_len;
-                    end += 1;
-                } else {
-                    break;
-                }
-            }
-
-            // Expand left as much as possible
-            while start > 0 {
-                let prev_len = tab_lens[start - 1] as u16;
-                if used_width + prev_len <= area.width {
-                    used_width += prev_len;
-                    start -= 1;
-                } else {
-                    break;
-                }
-            }
-
-            (start, end)
-        };
+        let (visible_start, visible_end) =
+            compute_visible_tab_range(&tab_lens, active_idx, max_width);
 
         let mut spans = Vec::new();
         if visible_start > 0 {
@@ -240,40 +316,95 @@ impl<'a> StatusBar<'a> {
             ));
         }
 
-        let line = Line::from(spans);
-        let tabs_width = line.width() as u16;
-        buf.set_line(area.x, area.y, &line, area.width);
+        Line::from(spans)
+    }
+
+    /// Renders the status bar directly into a Ratatui `Buffer` using the default theme.
+    pub fn render_to_buffer(
+        registry: &SessionRegistry,
+        leader_active: bool,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        let default_theme = Theme::default();
+        Self::render_to_buffer_with_theme(registry, leader_active, &default_theme, area, buf);
+    }
+
+    /// Renders the status bar directly into a Ratatui `Buffer` using the specified `Theme`.
+    pub fn render_to_buffer_with_theme(
+        registry: &SessionRegistry,
+        leader_active: bool,
+        theme: &Theme,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+
+        if registry.is_empty() {
+            if leader_active {
+                let leader_msg = "[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]";
+                let line = Line::from(Span::styled(
+                    leader_msg,
+                    Style::default()
+                        .fg(theme.leader_fg)
+                        .bg(theme.leader_bg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                TopBar::new(line)
+                    .with_theme(theme)
+                    .render_to_buffer(area, buf);
+            } else {
+                let msg = " [No Active Sessions] - Press Ctrl+Space then q to quit ";
+                let line = Line::from(Span::styled(
+                    msg,
+                    Style::default()
+                        .fg(theme.modal_title)
+                        .bg(theme.status_bar_bg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                TopBar::new(line)
+                    .with_theme(theme)
+                    .render_to_buffer(area, buf);
+            }
+            return;
+        }
+
+        let active_idx = registry.active_index().unwrap_or(0);
+        let sessions = registry.list();
+
+        let tabs_line = Self::build_tabs_line(&sessions, active_idx, area.width, theme);
+        let tabs_width = tabs_line.width() as u16;
+
+        let mut top_bar = TopBar::new(tabs_line).with_theme(theme);
 
         if leader_active {
             let leader_msg = "[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]";
             let leader_len = leader_msg.chars().count() as u16;
+            let leader_style = Style::default()
+                .fg(theme.leader_fg)
+                .bg(theme.leader_bg)
+                .add_modifier(Modifier::BOLD);
+
             if area.width >= tabs_width + leader_len + 2 {
-                let start_x = area.right().saturating_sub(leader_len + 1);
-                let leader_style = Style::default()
-                    .fg(theme.leader_fg)
-                    .bg(theme.leader_bg)
-                    .add_modifier(Modifier::BOLD);
                 let leader_line = Line::from(Span::styled(leader_msg, leader_style));
-                buf.set_line(start_x, area.y, &leader_line, leader_len);
+                top_bar = top_bar.with_right_and_padding(leader_line, leader_len, true);
             } else if area.width >= leader_len {
-                let start_x = area.right().saturating_sub(leader_len);
-                let leader_style = Style::default()
-                    .fg(theme.leader_fg)
-                    .bg(theme.leader_bg)
-                    .add_modifier(Modifier::BOLD);
                 let leader_line = Line::from(Span::styled(leader_msg, leader_style));
-                buf.set_line(start_x, area.y, &leader_line, leader_len);
+                top_bar = top_bar.with_right_and_padding(leader_line, leader_len, false);
             }
         } else {
             let hint = "Ctrl+Space: Actions";
             let hint_len = hint.chars().count() as u16;
             if area.width >= tabs_width + hint_len + 2 {
-                let start_x = area.right().saturating_sub(hint_len + 1);
                 let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
                 let hint_line = Line::from(Span::styled(hint, hint_style));
-                buf.set_line(start_x, area.y, &hint_line, hint_len);
+                top_bar = top_bar.with_right_and_padding(hint_line, hint_len, true);
             }
         }
+
+        top_bar.render_to_buffer(area, buf);
     }
 }
 
@@ -650,5 +781,112 @@ mod tests {
                 assert_eq!(dot_cell.bg, theme.tab_active_bg);
             }
         }
+    }
+
+    #[test]
+    fn test_compute_visible_tab_range() {
+        // 1. Empty and zero width cases
+        assert_eq!(compute_visible_tab_range(&[], 0, 100), (0, 0));
+        assert_eq!(compute_visible_tab_range(&[10, 20], 0, 0), (0, 0));
+
+        // 2. All tabs fit
+        let lens = vec![15, 15, 15];
+        assert_eq!(compute_visible_tab_range(&lens, 0, 50), (0, 3));
+        assert_eq!(compute_visible_tab_range(&lens, 1, 45), (0, 3));
+
+        // 3. Active index 0, expands rightwards
+        let ten_tabs = vec![10; 10]; // 100 total
+        assert_eq!(compute_visible_tab_range(&ten_tabs, 0, 35), (0, 3));
+
+        // 4. Active index 9 (last), expands leftwards
+        assert_eq!(compute_visible_tab_range(&ten_tabs, 9, 35), (7, 10));
+
+        // 5. Active index 5 (middle), expands right then left
+        // Start at 5 (len 10), expand right: 6 (20), 7 (30), 8 (40), stop right. Left 4 cannot fit (50 > 45) -> (5, 9)
+        assert_eq!(compute_visible_tab_range(&ten_tabs, 5, 45), (5, 9));
+
+        // 6. Active index out of bounds clamped safely
+        assert_eq!(compute_visible_tab_range(&ten_tabs, 99, 30), (7, 10));
+    }
+
+    #[test]
+    fn test_top_bar_widget_rendering() {
+        let theme = Theme::tokyo_night();
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+
+        let left_line = Line::from("Left Content");
+        let right_line = Line::from("Right Hint");
+
+        let top_bar = TopBar::new(left_line)
+            .with_right(right_line, 10)
+            .with_theme(&theme);
+
+        top_bar.render_to_buffer(area, &mut buf);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("Left Content"));
+        assert!(rendered.contains("Right Hint"));
+
+        // Background of empty cell in the middle matches theme
+        let mid_cell = buf.cell((40, 0)).unwrap();
+        assert_eq!(mid_cell.bg, theme.status_bar_bg);
+
+        // Trailing cell at x = 79 has padding space with status_bar_bg
+        let last_cell = buf.cell((79, 0)).unwrap();
+        assert_eq!(last_cell.symbol(), " ");
+        assert_eq!(last_cell.bg, theme.status_bar_bg);
+    }
+
+    #[test]
+    fn test_top_bar_tight_width_omits_right_content() {
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+
+        let top_bar = TopBar::new(Line::from("Long Left Content"))
+            .with_right(Line::from("Very Long Right Action Hint"), 27);
+
+        top_bar.render_to_buffer(area, &mut buf);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("Long Left"));
+        assert!(!rendered.contains("Very Long Right Action Hint"));
+    }
+
+    #[test]
+    fn test_top_bar_widget_trait_implementations() {
+        let area = Rect::new(0, 0, 50, 1);
+        let mut buf1 = Buffer::empty(area);
+        let mut buf2 = Buffer::empty(area);
+
+        let top_bar = TopBar::new(Line::from("Test Bar"));
+        // Value render
+        top_bar.clone().render(area, &mut buf1);
+        // Ref render
+        (&top_bar).render(area, &mut buf2);
+
+        let str1 = buf1
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        let str2 = buf2
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert_eq!(str1, str2);
+        assert!(str1.contains("Test Bar"));
     }
 }
