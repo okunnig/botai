@@ -269,6 +269,16 @@ impl QuickLauncherState {
         self.creation_modal.cycle_template_prev();
     }
 
+    /// Polls pending background validation checks in the embedded creation modal.
+    pub fn poll_validation(&mut self) {
+        self.creation_modal.poll_validation();
+    }
+
+    /// Advances tick-based state and background validation polling.
+    pub fn tick(&mut self) {
+        self.poll_validation();
+    }
+
     /// Switches the active modal tab.
     pub fn switch_tab(&mut self, new_tab: LauncherTab) {
         self.tab = new_tab;
@@ -356,6 +366,8 @@ impl QuickLauncherState {
 
     /// Handles a keyboard event and returns any triggered `QuickLauncherAction`.
     pub fn handle_key(&mut self, key: KeyEvent) -> QuickLauncherAction {
+        self.poll_validation();
+
         let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let has_alt = key.modifiers.contains(KeyModifiers::ALT);
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);

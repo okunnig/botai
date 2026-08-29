@@ -319,7 +319,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Unified Backend Engine (`ProjectBuilder`)**:
   - Single, centralized project initialization pipeline in `src/project/` used across CLI `botai create` (both non-attached and attached modes), the TUI Dashboard, and In-Session Quick Launcher.
   - **Sequential Pipeline Steps**:
-    1. **Pre-Validation**: Live checking of directory non-existence and git branch availability across all constituent template repositories.
+    1. **Pre-Validation**: Multi-tier validation with `validate_fast` (immediate 0ms local validation of project name, template existence, and CWD directory collision) and `check_branch_collisions` / `validate_detailed` (git branch collision verification across constituent template repositories).
     2. **Repository Resolution & Cloning**: Clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch for existing repos.
     3. **Worktree Checkout**: Creates a git worktree for each repository checked out to branch `<project_name>` at `<project_dir>/<repo_name>`.
     4. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md`.
@@ -331,6 +331,10 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Atomic Rollback**: On any initialization error (e.g. branch collision, clone failure, process crash), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory.
 - **Unified Interactive Project Creation Modal (Two-Step Flow)**:
   - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session Quick Launcher.
+  - **Asynchronous Non-Blocking Pre-Validation**:
+    - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
+    - Git branch collisions are checked asynchronously in background worker threads with generation counters to prevent stale results and UI freezing.
+    - Non-blocking `poll_validation()` drains validation worker responses on TUI loop ticks.
   - **Two-Step Dialog Progression**:
     1. **Step 1: Searchable Template Selection (`CreationStep::SelectTemplate`)**:
        - **Top Filter Search Bar**: Real-time search filter query (`Filter: <query>`).

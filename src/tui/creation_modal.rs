@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -53,8 +54,14 @@ pub struct PromptLine {
     pub char_count: usize,
 }
 
+/// Result payload emitted by background branch validation worker: `(generation, branch_errors)`.
+pub type ValidationResult = (u64, Vec<String>);
+
+/// Shared receiver handle for asynchronous background validation results.
+pub type ValidationReceiver = Arc<Mutex<mpsc::Receiver<ValidationResult>>>;
+
 /// Unified interactive project creation modal with two-step searchable template workflow.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct ProjectCreationModal {
     pub config: Config,
     pub cwd: PathBuf,
@@ -70,7 +77,56 @@ pub struct ProjectCreationModal {
     pub prompt_scroll_offset: usize,
     pub focus: CreationFocus,
     pub validation: ProjectValidation,
+    pub validation_generation: u64,
+    validation_tx: mpsc::Sender<ValidationResult>,
+    validation_rx: ValidationReceiver,
 }
+
+impl Clone for ProjectCreationModal {
+    fn clone(&self) -> Self {
+        let (validation_tx, validation_rx) = mpsc::channel();
+        Self {
+            config: self.config.clone(),
+            cwd: self.cwd.clone(),
+            step: self.step,
+            template_search_query: self.template_search_query.clone(),
+            templates: self.templates.clone(),
+            selected_template_idx: self.selected_template_idx,
+            project_name_input: self.project_name_input.clone(),
+            agent_list: self.agent_list.clone(),
+            selected_agent_idx: self.selected_agent_idx,
+            prompt_input: self.prompt_input.clone(),
+            prompt_cursor: self.prompt_cursor,
+            prompt_scroll_offset: self.prompt_scroll_offset,
+            focus: self.focus,
+            validation: self.validation.clone(),
+            validation_generation: self.validation_generation,
+            validation_tx,
+            validation_rx: Arc::new(Mutex::new(validation_rx)),
+        }
+    }
+}
+
+impl PartialEq for ProjectCreationModal {
+    fn eq(&self, other: &Self) -> bool {
+        self.config == other.config
+            && self.cwd == other.cwd
+            && self.step == other.step
+            && self.template_search_query == other.template_search_query
+            && self.templates == other.templates
+            && self.selected_template_idx == other.selected_template_idx
+            && self.project_name_input == other.project_name_input
+            && self.agent_list == other.agent_list
+            && self.selected_agent_idx == other.selected_agent_idx
+            && self.prompt_input == other.prompt_input
+            && self.prompt_cursor == other.prompt_cursor
+            && self.prompt_scroll_offset == other.prompt_scroll_offset
+            && self.focus == other.focus
+            && self.validation == other.validation
+    }
+}
+
+impl Eq for ProjectCreationModal {}
 
 impl ProjectCreationModal {
     /// Creates a new `ProjectCreationModal` initialized with configuration and working directory.
@@ -115,6 +171,8 @@ impl ProjectCreationModal {
 
         let selected_template_idx = global_selected_idx;
 
+        let (validation_tx, validation_rx) = mpsc::channel();
+
         let mut modal = Self {
             config: config.clone(),
             cwd: cwd.to_path_buf(),
@@ -130,6 +188,9 @@ impl ProjectCreationModal {
             prompt_scroll_offset: 0,
             focus: CreationFocus::ProjectName,
             validation: ProjectValidation::valid(),
+            validation_generation: 0,
+            validation_tx,
+            validation_rx: Arc::new(Mutex::new(validation_rx)),
         };
 
         modal.revalidate();
@@ -328,14 +389,46 @@ impl ProjectCreationModal {
         };
     }
 
-    /// Re-evaluates live pre-validation checks against template repos and CWD directory.
+    /// Re-evaluates fast pre-validation immediately (0ms) and dispatches background
+    /// git branch collision checks across template repositories if fast checks pass.
     pub fn revalidate(&mut self) {
         let tpl_name = self.selected_template().unwrap_or("");
         let builder = ProjectBuilder::new(self.config.clone(), tpl_name, &self.project_name_input)
             .with_cwd(&self.cwd)
             .with_agent(self.selected_agent());
 
-        self.validation = builder.validate_detailed();
+        self.validation = builder.validate_fast();
+        self.validation_generation = self.validation_generation.wrapping_add(1);
+
+        if self.validation.is_valid && !self.project_name_input.trim().is_empty() {
+            let gen = self.validation_generation;
+            let tx = self.validation_tx.clone();
+            let builder_clone = builder.clone();
+
+            std::thread::spawn(move || {
+                let collisions = builder_clone.check_branch_collisions();
+                let _ = tx.send((gen, collisions));
+            });
+        }
+    }
+
+    /// Drains pending asynchronous branch validation results and updates `self.validation`
+    /// if the generation matches the current active input.
+    pub fn poll_validation(&mut self) {
+        if let Ok(rx) = self.validation_rx.lock() {
+            while let Ok((gen, branch_errors)) = rx.try_recv() {
+                if gen == self.validation_generation && self.validation.is_valid {
+                    for err in branch_errors {
+                        self.validation.add_error(err);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Advances tick-based state and drains pending validation results.
+    pub fn tick(&mut self) {
+        self.poll_validation();
     }
 
     /// Default inner width for initial prompt wrapping.
@@ -765,6 +858,8 @@ impl ProjectCreationModal {
 
     /// Handles keyboard events and returns any triggered `CreationModalAction`.
     pub fn handle_key(&mut self, key: KeyEvent) -> CreationModalAction {
+        self.poll_validation();
+
         let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let has_alt = key.modifiers.contains(KeyModifiers::ALT);
         let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -916,7 +1011,18 @@ impl ProjectCreationModal {
                         KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
                             if !has_shift && !has_alt =>
                         {
-                            self.revalidate();
+                            self.poll_validation();
+                            if self.validation.is_valid {
+                                let tpl_name = self.selected_template().unwrap_or("");
+                                let builder = ProjectBuilder::new(
+                                    self.config.clone(),
+                                    tpl_name,
+                                    &self.project_name_input,
+                                )
+                                .with_cwd(&self.cwd)
+                                .with_agent(self.selected_agent());
+                                self.validation = builder.validate_detailed();
+                            }
                             if self.validation.is_valid {
                                 let trimmed = self.project_name_input.trim();
                                 if let Some(tpl) = self.selected_template() {
@@ -1047,7 +1153,18 @@ impl ProjectCreationModal {
                         CreationModalAction::None
                     }
                     KeyCode::Enter => {
-                        self.revalidate();
+                        self.poll_validation();
+                        if self.validation.is_valid {
+                            let tpl_name = self.selected_template().unwrap_or("");
+                            let builder = ProjectBuilder::new(
+                                self.config.clone(),
+                                tpl_name,
+                                &self.project_name_input,
+                            )
+                            .with_cwd(&self.cwd)
+                            .with_agent(self.selected_agent());
+                            self.validation = builder.validate_detailed();
+                        }
                         if self.validation.is_valid {
                             let trimmed = self.project_name_input.trim();
                             if let Some(tpl) = self.selected_template() {
@@ -2136,6 +2253,13 @@ mod tests {
             modal.handle_key(key(KeyCode::Char(c)));
         }
 
+        // Wait for background branch validation to complete and poll
+        let start = std::time::Instant::now();
+        while modal.validation.is_valid && start.elapsed() < std::time::Duration::from_secs(3) {
+            modal.poll_validation();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
         assert!(!modal.validation.is_valid);
         assert!(modal
             .validation
@@ -2155,11 +2279,67 @@ mod tests {
             modal.handle_key(key(KeyCode::Char(c)));
         }
 
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(100) {
+            modal.poll_validation();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
         assert!(modal.validation.is_valid);
         let act = modal.handle_key(key(KeyCode::Enter));
         assert!(
             matches!(act, CreationModalAction::Submit { project, .. } if project == "clean-branch")
         );
+    }
+
+    #[test]
+    fn test_creation_modal_background_validation_generation_and_debouncing() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("service_alpha");
+        init_mock_repo(&repo_dir);
+
+        let _ = std::process::Command::new("git")
+            .args(["branch", "collision-target"])
+            .current_dir(&repo_dir)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.alpha_tpl]
+            repos = ["{}"]
+            "#,
+            temp_dir.path().display(),
+            repo_dir.display()
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("alpha_tpl"));
+
+        // Fast validation immediately reflects non-empty input
+        modal.project_name_input = "collision-target".to_string();
+        modal.revalidate();
+        let gen1 = modal.validation_generation;
+
+        // Immediate state before background thread finishes is fast-valid
+        assert!(modal.validation.is_valid);
+
+        // Simulate typing more characters before gen1 finishes
+        modal.project_name_input = "collision-target-extra".to_string();
+        modal.revalidate();
+        let gen2 = modal.validation_generation;
+        assert_ne!(gen1, gen2);
+
+        // Let background threads run
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(200) {
+            modal.poll_validation();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // gen1 result (collision on "collision-target") was discarded because active generation is gen2 ("collision-target-extra" which is clean)
+        assert!(modal.validation.is_valid);
+        assert!(modal.validation.errors.is_empty());
     }
 
     #[test]

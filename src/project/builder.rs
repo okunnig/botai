@@ -251,8 +251,12 @@ impl ProjectBuilder {
         Ok(())
     }
 
-    /// Executes detailed pre-validation returning structured errors and warnings for TUI display.
-    pub fn validate_detailed(&self) -> ProjectValidation {
+    /// Executes fast local pre-validation without disk/git I/O across template repositories.
+    /// Checks:
+    /// - Non-empty project name
+    /// - Template existence in config
+    /// - Project directory collision in CWD
+    pub fn validate_fast(&self) -> ProjectValidation {
         let mut validation = ProjectValidation::valid();
         let trimmed_name = self.project_name.trim();
 
@@ -278,6 +282,18 @@ impl ProjectBuilder {
             return validation;
         }
 
+        validation
+    }
+
+    /// Checks for git branch collisions across template repositories.
+    /// Returns a list of collision error messages.
+    pub fn check_branch_collisions(&self) -> Vec<String> {
+        let trimmed_name = self.project_name.trim();
+        if trimmed_name.is_empty() {
+            return Vec::new();
+        }
+
+        let mut errors = Vec::new();
         match self.config.resolve_template_repos(&self.template_name) {
             Ok(resolved_repos) => {
                 let git = GitWorktreeManager::new();
@@ -285,20 +301,33 @@ impl ProjectBuilder {
                     if repo.exists_locally() {
                         if let Ok(exists) = git.branch_exists(&repo.local_path, trimmed_name) {
                             if exists {
-                                validation.add_error(format!(
+                                errors.push(format!(
                                     "Branch '{}' already exists in repository '{}'",
                                     trimmed_name, repo.name
                                 ));
-                                return validation;
                             }
                         }
                     }
                 }
             }
             Err(e) => {
-                validation.add_error(format!("Repository resolution error: {e}"));
-                return validation;
+                errors.push(format!("Repository resolution error: {e}"));
             }
+        }
+        errors
+    }
+
+    /// Executes detailed pre-validation returning structured errors and warnings for TUI display.
+    /// Combines fast local validation and repository branch collision checking.
+    pub fn validate_detailed(&self) -> ProjectValidation {
+        let mut validation = self.validate_fast();
+        if !validation.is_valid {
+            return validation;
+        }
+
+        let branch_errors = self.check_branch_collisions();
+        for err in branch_errors {
+            validation.add_error(err);
         }
 
         validation
@@ -646,6 +675,51 @@ mod tests {
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
         assert!(val.primary_message().unwrap().contains("already exists"));
+    }
+
+    #[test]
+    fn test_project_builder_validate_fast_vs_detailed() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("my_service");
+        create_mock_git_repo(&repo_dir);
+
+        // Create branch "collision-branch"
+        let _ = std::process::Command::new("git")
+            .args(["branch", "collision-branch"])
+            .current_dir(&repo_dir)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.service_tpl]
+            repos = ["{}"]
+            "#,
+            temp_dir.path().display(),
+            repo_dir.display()
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let builder = ProjectBuilder::new(config, "service_tpl", "collision-branch")
+            .with_cwd(temp_dir.path());
+
+        // Fast validation only checks name, template, and directory existence -> passes!
+        let fast_val = builder.validate_fast();
+        assert!(fast_val.is_valid);
+        assert!(fast_val.errors.is_empty());
+
+        // check_branch_collisions explicitly detects collision
+        let branch_collisions = builder.check_branch_collisions();
+        assert_eq!(branch_collisions.len(), 1);
+        assert!(branch_collisions[0].contains("already exists in repository"));
+
+        // Detailed validation combines fast validation + branch checks -> fails!
+        let detailed_val = builder.validate_detailed();
+        assert!(!detailed_val.is_valid);
+        assert!(detailed_val
+            .primary_message()
+            .unwrap()
+            .contains("already exists in repository"));
     }
 
     #[test]

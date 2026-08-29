@@ -1,9 +1,11 @@
 # TODO
 
 ## Project Creation & Validation
-- [ ] **Async / Non-Blocking Branch Collision Checking**:
+- [x] **Async / Non-Blocking Branch Collision Checking**:
   - Check for git branch collisions across template repositories asynchronously during project creation.
-  - Currently, checking branch collisions synchronously in the UI thread can lock up the TUI. Move pre-validation checks to background worker or debounce them to prevent UI freezing.
+  - Separated `ProjectBuilder::validate_fast` (immediate 0ms local checks) and `check_branch_collisions` (background worker).
+  - Implemented async background validation in `ProjectCreationModal` with request generation sequencing and non-blocking polling.
+  - Integrated `poll_validation` in `DashboardState`, `QuickLauncherState`, and `TuiApp` event loops.
 
 ## TUI Top Bar & Header Refactoring
 

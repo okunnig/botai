@@ -273,8 +273,14 @@ impl TuiApp {
                 self.resize_all_sessions(term_area.width, term_area.height);
             }
 
-            // 1. Poll setup progress events
+            // 1. Poll setup progress events and modal validation
             self.poll_setup_progress();
+            if let Some(dashboard) = &mut self.dashboard {
+                dashboard.poll_validation();
+            }
+            if let Some(launcher) = &mut self.quick_launcher {
+                launcher.poll_validation();
+            }
 
             // 2. Process PTY outputs for all sessions
             self.process_pty_streams();

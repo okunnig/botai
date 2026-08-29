@@ -199,6 +199,18 @@ impl DashboardState {
         self.creation_modal = None;
     }
 
+    /// Polls pending background validation checks in the creation modal, if active.
+    pub fn poll_validation(&mut self) {
+        if let Some(modal) = &mut self.creation_modal {
+            modal.poll_validation();
+        }
+    }
+
+    /// Advances tick-based state and background validation polling for active modals.
+    pub fn tick(&mut self) {
+        self.poll_validation();
+    }
+
     /// Returns the hardware cursor position if a modal or input field is actively focused.
     pub fn cursor_position(&self, area: Rect) -> Option<Position> {
         if self.destroy_modal.is_some() {
