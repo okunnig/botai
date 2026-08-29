@@ -267,11 +267,11 @@ repos = [
 
 ## Supported Color Themes
 
-| Theme Name | Description | Dominant Palette |
-| :--- | :--- | :--- |
-| **`tokyo-night`** *(Default)* | Deep slate/navy chrome with electric blue accents and warm amber leader indicator. | Slate `#1a1b26`, Blue `#7aa2f7`, Purple `#bb9af7`, Gold `#e0af68` |
-| **`catppuccin`** | Soothing pastel aesthetic with mauve borders and peach accents. | Crust `#1e1e2e`, Mauve `#cba6f7`, Sky `#89dceb`, Peach `#fab387` |
-| **`cyberpunk`** | High-contrast synthwave cyber aesthetic with hot magenta and electric cyan. | Black `#0a0a0f`, Magenta `#ff007f`, Cyan `#00f0ff`, Yellow `#ffe600` |
-| **`gruvbox`** | Warm retro earthy palette with rust orange active tabs and forest green badges. | Dark `#282828`, Orange `#fe8019`, Green `#b8bb26`, Yellow `#fabd2f` |
-| **`monochrome`** | Clean, minimalist zinc/slate dark tones with crisp white borders. | Dark Zinc `#18181b`, Slate `#27272a`, Ice Blue, Pure White `#f4f4f5` |
-| **`ansi`** | Universal 16-color ANSI terminal fallback without 24-bit TrueColor requirements. | Standard terminal cyan, green, yellow, red, gray, white |
+| Theme Name | Description |
+| :--- | :--- |
+| **`tokyo-night`** *(Default)* | Deep slate/navy chrome with electric blue accents and warm amber leader indicator. |
+| **`catppuccin`** | Soothing pastel aesthetic with mauve borders and peach accents. |
+| **`cyberpunk`** | High-contrast synthwave cyber aesthetic with hot magenta and electric cyan. |
+| **`gruvbox`** | Warm retro earthy palette with rust orange active tabs and forest green badges. |
+| **`monochrome`** | Clean, minimalist zinc/slate dark tones with crisp white borders. |
+| **`ansi`** | Universal 16-color ANSI terminal fallback without 24-bit TrueColor requirements. |
