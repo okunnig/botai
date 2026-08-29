@@ -59,8 +59,7 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
 
 ### Installation
 
-#### Option 1: Build & Install from Source (Cargo)
-Ensure [Rust 1.74+](https://www.rust-lang.org/tools/install) is installed:
+Ensure [Rust 1.74+](https://www.rust-lang.org/tools/install) is installed, then clone and install the binary:
 
 ```bash
 # Clone the repository
@@ -70,14 +69,6 @@ cd botai
 # Build and install binary to ~/.cargo/bin
 cargo install --path .
 ```
-
-#### Option 2: Release Packaging Script
-Package standalone distribution archives (`.tar.gz` for Linux/macOS, `.zip` for Windows) with cryptographic SHA-256 manifests:
-
-```bash
-./scripts/build.sh
-```
-Compiled archives will be generated in `dist/` (e.g. `dist/botai-v0.1.0-linux-x86_64.tar.gz`).
 
 ---
 
