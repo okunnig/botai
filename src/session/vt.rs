@@ -49,7 +49,7 @@ impl VtScreen {
 
     /// Resizes the virtual terminal grid to the new column and row dimensions.
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.parser.set_size(rows, cols);
+        self.parser.screen_mut().set_size(rows, cols);
     }
 
     /// Returns the plain text contents of the screen grid, with trailing whitespace trimmed per row.
@@ -134,25 +134,29 @@ impl VtScreen {
 
     /// Sets the scrollback line offset.
     pub fn set_scrollback(&mut self, lines: usize) {
-        self.parser.set_scrollback(lines);
+        self.parser.screen_mut().set_scrollback(lines);
     }
 
     /// Scrolls the virtual screen scrollback view up (older lines).
     pub fn scroll_up(&mut self, lines: usize) {
         let current = self.parser.screen().scrollback();
-        self.parser.set_scrollback(current.saturating_add(lines));
+        self.parser
+            .screen_mut()
+            .set_scrollback(current.saturating_add(lines));
     }
 
     /// Scrolls the virtual screen scrollback view down (newer lines towards live view).
     pub fn scroll_down(&mut self, lines: usize) {
         let current = self.parser.screen().scrollback();
-        self.parser.set_scrollback(current.saturating_sub(lines));
+        self.parser
+            .screen_mut()
+            .set_scrollback(current.saturating_sub(lines));
     }
 
     /// Resets the scrollback view back to live output (offset 0).
     pub fn reset_scrollback(&mut self) {
         if self.parser.screen().scrollback() != 0 {
-            self.parser.set_scrollback(0);
+            self.parser.screen_mut().set_scrollback(0);
         }
     }
 
