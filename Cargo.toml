@@ -9,7 +9,7 @@ description = "A cross-platform multi-repo workspace orchestrator and session mu
 clap = { version = "4.5", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"
-directories = "5.0"
+directories = "6.0"
 thiserror = "2.0"
 anyhow = "1.0"
 tracing = "0.1"
