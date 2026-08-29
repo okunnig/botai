@@ -1,6 +1,7 @@
 use super::{ProjectSession, PtySession, SessionError, SessionStatus, VtScreen};
+use crate::notify::ActivityTracker;
 
-/// A single active session entry in the session registry, holding state, PTY handle, and virtual terminal.
+/// A single active session entry in the session registry, holding state, PTY handle, virtual terminal, and activity tracker.
 pub struct SessionEntry {
     /// Metadata and lifecycle state for the project session.
     pub project_session: ProjectSession,
@@ -8,6 +9,8 @@ pub struct SessionEntry {
     pub pty: PtySession,
     /// In-memory virtual terminal screen parser.
     pub vt: VtScreen,
+    /// Isolated activity tracker and stream scanner for this session.
+    pub tracker: ActivityTracker,
 }
 
 impl SessionEntry {
@@ -17,7 +20,14 @@ impl SessionEntry {
             project_session,
             pty,
             vt,
+            tracker: ActivityTracker::default(),
         }
+    }
+
+    /// Sets a custom activity tracker on this session entry.
+    pub fn with_tracker(mut self, tracker: ActivityTracker) -> Self {
+        self.tracker = tracker;
+        self
     }
 
     /// Returns the session ID.
@@ -68,6 +78,16 @@ impl SessionEntry {
     /// Returns a mutable reference to the PTY session.
     pub fn pty_mut(&mut self) -> &mut PtySession {
         &mut self.pty
+    }
+
+    /// Returns a reference to the session's activity tracker.
+    pub fn tracker(&self) -> &ActivityTracker {
+        &self.tracker
+    }
+
+    /// Returns a mutable reference to the session's activity tracker.
+    pub fn tracker_mut(&mut self) -> &mut ActivityTracker {
+        &mut self.tracker
     }
 }
 

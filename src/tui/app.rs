@@ -24,7 +24,7 @@ use ratatui::{
 
 use crate::config::Config;
 use crate::git::remove_worktree_auto;
-use crate::notify::{ActivityTracker, NotificationService};
+use crate::notify::NotificationService;
 use crate::project::ProjectBuilder;
 use crate::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
@@ -43,7 +43,6 @@ use crate::tui::ui::{compute_layout, TerminalView};
 /// Main application runner managing the TUI loop, PTY streaming, activity tracking, and rendering.
 pub struct TuiApp {
     pub registry: SessionRegistry,
-    pub tracker: ActivityTracker,
     pub notifier: NotificationService,
     pub should_quit: bool,
     pub tick_rate: Duration,
@@ -104,7 +103,6 @@ impl TuiApp {
     pub fn new(registry: SessionRegistry) -> Self {
         Self {
             registry,
-            tracker: ActivityTracker::new(Duration::from_millis(1500)),
             notifier: NotificationService::new(true, Duration::from_secs(10)),
             should_quit: false,
             tick_rate: Duration::from_millis(30),
@@ -414,12 +412,30 @@ impl TuiApp {
         let now = Instant::now();
         let mut clean_exits = Vec::new();
 
+        let active_session_id = self.registry.active_session().map(|s| s.id().to_string());
+        let is_focused_mode = self.quick_launcher.is_none()
+            && self.setup_modal.is_none()
+            && !self.is_showing_dashboard();
+
         for session in self.registry.list_mut() {
+            let session_id = session.id().to_string();
+            let is_active_focused =
+                is_focused_mode && active_session_id.as_deref() == Some(&session_id);
+
             if let Ok(bytes) = session.pty_mut().read_nonblocking() {
                 if !bytes.is_empty() {
                     session.vt_mut().process(&bytes);
-                    let new_status = self.tracker.record_activity();
-                    session.project_session.set_status(new_status);
+                    let notifs = session.tracker.process_bytes(&bytes);
+                    session.project_session.set_status(session.tracker.status());
+
+                    for mut event in notifs {
+                        event.set_project_name(session.project_name());
+                        if event.is_waiting() && is_active_focused {
+                            // Suppress notification when user is actively focused on this session
+                        } else {
+                            let _ = self.notifier.notify(&event);
+                        }
+                    }
                 }
             }
 
@@ -435,18 +451,16 @@ impl TuiApp {
                 session.project_session.exit_code = Some(code as u32);
             }
 
-            let (status, notif, _) = self.tracker.evaluate(is_alive, exit_code, now);
+            let (status, notif, _) = session.tracker.evaluate(is_alive, exit_code, now);
             session.project_session.set_status(status);
 
             if let Some(mut event) = notif {
-                match &mut event {
-                    crate::notify::NotificationEvent::Completed { project_name, .. }
-                    | crate::notify::NotificationEvent::WaitingForInput { project_name }
-                    | crate::notify::NotificationEvent::Error { project_name, .. } => {
-                        *project_name = session.project_name().to_string();
-                    }
+                event.set_project_name(session.project_name());
+                if event.is_waiting() && is_active_focused {
+                    // Suppress notification when user is actively focused on this session
+                } else {
+                    let _ = self.notifier.notify(&event);
                 }
-                let _ = self.notifier.notify(&event);
             }
 
             if !is_alive {
@@ -945,7 +959,7 @@ impl TuiApp {
                     if active.pty_mut().write_all(&bytes_to_write).is_ok()
                         && active.status() != SessionStatus::Error
                     {
-                        let new_status = self.tracker.record_activity();
+                        let new_status = active.tracker.record_activity();
                         active.project_session.set_status(new_status);
                     }
                 }
@@ -1061,7 +1075,7 @@ impl TuiApp {
             if active.vt().is_mouse_mode_enabled() {
                 let bytes = crate::tui::events::mouse_event_to_sgr_bytes(&mouse);
                 if !bytes.is_empty() && active.pty_mut().write_all(&bytes).is_ok() {
-                    let new_status = self.tracker.record_activity();
+                    let new_status = active.tracker.record_activity();
                     active.project_session.set_status(new_status);
                 }
             } else {

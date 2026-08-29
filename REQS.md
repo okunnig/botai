@@ -147,14 +147,28 @@ env = { PORT = "8080", NODE_ENV = "development" }
 ---
 
 ## 5. Agent Monitoring & Notifications
-- **Desktop Notifications**:
-  - Emits native OS desktop notifications (via `notify-rust` / terminal notifications) when:
+- **Multi-Tiered Agent Status & Attention Detection**:
+  - **PTY Stream Protocol & Control Sequence Scanner**:
+    - **ASCII Bell (`\x07` / `BEL`) Interception**: Emitting an ASCII bell character triggers an immediate transition to `SessionStatus::WaitingForInput` and emits a notification event without waiting for silence timeouts.
+    - **OSC 9 / OSC 777 Notification Decoding**: Decodes terminal notification escape sequences (`\x1b]9;<message>\x07` and `\x1b]777;notify;<title>;<message>\x07`) to extract custom notification messages and titles dispatched directly by AI agents or CLI tools.
+    - **OSC 133 Semantic Shell Integration Prompts**: Recognizes standard semantic prompt markers:
+      - `\x1b]133;A\x07` (Prompt start / ready for user input): Immediately transitions session to `SessionStatus::WaitingForInput`.
+      - `\x1b]133;B\x07` (Command start / user execution): Transitions session to `SessionStatus::Busy`.
+      - `\x1b]133;C\x07` (Command output stream): Records active output stream processing.
+      - `\x1b]133;D[;<exit_code>]\x07` (Command finished): Evaluates exit status to transition to `SessionStatus::Done` or `SessionStatus::Error`.
+    - **Transparent Passthrough**: Control sequence decoding operates non-destructively; raw bytes are passed intact to the virtual terminal (`vt100`) parser.
+    - **Silence / Inactivity Timeout Fallback**: Employs an idle threshold (default 1,500 ms) as a robust baseline fallback for legacy tools or raw command output not emitting explicit control sequences.
+  - **Per-Session Activity Tracking**:
+    - Each project session maintains an isolated, independent `ActivityTracker` instance with its own activity clock and state machine, preventing cross-session timer crosstalk.
+- **Background-Aware Desktop Notifications**:
+  - Emits native OS desktop notifications (via `notify-rust` / terminal notifications) with per-project debouncing and cooldown:
     - An agent CLI process completes a task or exits.
-    - An agent transitions to an idle state awaiting user input / approval.
+    - An agent transitions to an idle state awaiting user input / approval, or emits a `BEL` / OSC notification.
+  - **Focus-Aware Notification Filtering**: Desktop notifications for waiting/attention events are suppressed if the user is actively viewing and interacting with that specific session, triggering only when the session is running in the background (different project tab, modal dialog, quick launcher, or dashboard open).
 - **Real-Time Session Indicators in TUI**:
   - Live status indicators formatted as a leading solid round dot symbol (`●` U+25CF) inside project tabs in the status bar (e.g., `  ● 1: my-project  ` with active/inactive styling):
     - ● **Busy / Thinking**: Themed Busy color (`theme.status_busy`, e.g., Cyan / Electric Blue / Amber) when agent is actively executing.
-    - ● **Waiting for Input**: Themed Waiting color (`theme.status_waiting`, e.g., Peach / Amber / Sky Blue) when agent is awaiting user response or confirmation.
+    - ● **Waiting for Input**: Themed Waiting color (`theme.status_waiting`, e.g., Peach / Amber / Sky Blue) when agent is awaiting user response, confirmation, or attention.
     - ● **Done / Idle**: Themed Done color (`theme.status_done`, e.g., Green) when agent finished its assigned prompt or task.
     - ● **Error / Interrupted**: Themed Error color (`theme.status_error`, e.g., Red) on non-zero exit code or process failure.
     - ● **Initializing / Terminated**: Themed status bar foreground color (`theme.status_bar_fg`).
