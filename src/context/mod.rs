@@ -167,7 +167,7 @@ impl ContextSynthesizer {
         md
     }
 
-    /// Generates `AGENTS.md` in the specified project root directory.
+    /// Generates `AGENTS.md` in the specified project root directory and creates a `CLAUDE.md` symlink.
     pub fn generate_agents_md(
         project_root: &Path,
         context: &ProjectContext,
@@ -177,9 +177,52 @@ impl ContextSynthesizer {
         }
         let target_path = project_root.join("AGENTS.md");
         let content = Self::synthesize(context);
-        std::fs::write(&target_path, content)?;
+        std::fs::write(&target_path, &content)?;
+
+        // Also create a symlink named `CLAUDE.md` in the project root pointing to `AGENTS.md` (relative target "AGENTS.md").
+        // If symlink creation fails (or on platforms/environments where symlinks might fail), fall back to copying `AGENTS.md` to `CLAUDE.md`.
+        let claude_md_path = project_root.join("CLAUDE.md");
+        create_claude_md_link(&target_path, &claude_md_path, &content)?;
+
         Ok(target_path)
     }
+}
+
+fn create_claude_md_link(
+    target_path: &Path,
+    claude_md_path: &Path,
+    content: &str,
+) -> Result<(), std::io::Error> {
+    if std::fs::symlink_metadata(claude_md_path).is_ok() {
+        let _ = std::fs::remove_file(claude_md_path);
+    }
+
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(Path::new("AGENTS.md"), claude_md_path).is_err()
+            && std::fs::copy(target_path, claude_md_path).is_err()
+        {
+            std::fs::write(claude_md_path, content)?;
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_file(Path::new("AGENTS.md"), claude_md_path).is_err()
+            && std::fs::copy(target_path, claude_md_path).is_err()
+        {
+            std::fs::write(claude_md_path, content)?;
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        if std::fs::copy(target_path, claude_md_path).is_err() {
+            std::fs::write(claude_md_path, content)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Convenience function for generating `AGENTS.md`.
@@ -376,5 +419,39 @@ mod tests {
             ProjectContext::new("p2", "ws2").with_agents_md_append("   \n\t  \n  ");
         let md_whitespace = ContextSynthesizer::synthesize(&context_whitespace);
         assert!(!md_whitespace.contains("## Template Instructions"));
+    }
+
+    #[test]
+    fn test_generate_agents_md_creates_claude_md_symlink() {
+        let temp_dir = TempDir::new().expect("create tempdir");
+        let project_root = temp_dir.path().join("my-project");
+
+        let context = ProjectContext::new("my-project", "my-template")
+            .with_description("Project for testing CLAUDE.md link")
+            .with_repos(vec![RepoMapping::new(
+                "backend",
+                PathBuf::from("/repos/backend"),
+                PathBuf::from("backend"),
+            )]);
+
+        let agents_md_path =
+            generate_agents_md(&project_root, &context).expect("generate_agents_md should succeed");
+
+        assert_eq!(agents_md_path, project_root.join("AGENTS.md"));
+        assert!(agents_md_path.exists());
+
+        let claude_md_path = project_root.join("CLAUDE.md");
+        assert!(claude_md_path.exists());
+
+        #[cfg(unix)]
+        {
+            let link_target = fs::read_link(&claude_md_path).expect("read CLAUDE.md symlink");
+            assert_eq!(link_target, PathBuf::from("AGENTS.md"));
+        }
+
+        let agents_content = fs::read_to_string(&agents_md_path).expect("read AGENTS.md");
+        let claude_content = fs::read_to_string(&claude_md_path).expect("read CLAUDE.md");
+        assert_eq!(agents_content, claude_content);
+        assert!(claude_content.contains("Project for testing CLAUDE.md link"));
     }
 }

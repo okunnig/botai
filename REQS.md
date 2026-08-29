@@ -122,17 +122,27 @@ env = { PORT = "8080", NODE_ENV = "development" }
 ---
 
 ## 4. Multi-Repo Context Synthesis & Seeding
-- **Auto-Generated Context Files (`AGENTS.md` / `WORKSPACE.md`)**:
+- **Auto-Generated Context Files (`AGENTS.md` / `WORKSPACE.md` / `CLAUDE.md`)**:
   - Automatically synthesizes a root orientation file inside `CWD/<project_name>` detailing:
     - The multi-repo structure and mapping of child worktree directories.
     - Each repository's purpose and inter-dependencies.
     - Guidance for the AI agent on navigating, building, and modifying multiple repos simultaneously.
+  - **`CLAUDE.md` Compatibility Symlink**:
+    - When `AGENTS.md` is created at the project root, automatically creates a symlink from `CLAUDE.md` pointing to `AGENTS.md` (`CLAUDE.md -> AGENTS.md`) so agents expecting `CLAUDE.md` (e.g. Claude Code) seamlessly discover project context without duplication. On systems where symlink creation fails due to platform restrictions, falls back to copying `AGENTS.md` to `CLAUDE.md`.
 - **Custom Template Instructions (`agents_md_append`)**:
   - Optional custom markdown instructions configured per template in `config.toml` via `agents_md_append`.
   - When configured and non-empty after trimming, automatically appended to `AGENTS.md` under a dedicated `## Template Instructions` section.
 - **Initial Task / Prompt Seeding**:
   - `botai create <template> <project-name> --attach --prompt "..."` (or `-a -p "..."`):
-  - Injects or passes an initial task description directly to the AI agent on launch (requires `--attach` / `-a`).
+  - Injects or passes an initial task description directly to the AI agent on launch (requires `--attach` / `-a`) and through TUI creation modals.
+  - **Context Synthesis**: In all cases, the initial prompt is written into `AGENTS.md` under a dedicated `## Task Description` section.
+  - **Agent CLI Prompt Adapters**: When an initial prompt is present, `botai` automatically adapts and appends the prompt to the spawned agent CLI arguments so it immediately starts working upon session launch:
+    - **`agy`**: Appends `["-i", "<prompt>"]` (or `--prompt-interactive`).
+    - **`aider`**: Appends `["--message", "<prompt>"]`.
+    - **`claude`**: Appends positional argument `["<prompt>"]`.
+    - **`copilot`**: Appends positional argument `["<prompt>"]`.
+    - **Unknown / Custom Agents**: Does not append prompt arguments to the CLI command; the agent relies exclusively on `AGENTS.md`.
+  - **Safe Argv Passing**: The prompt string is passed directly as an element in `PtyConfig.args` without shell escaping or string concatenation, preserving whitespace and newlines.
 
 ---
 

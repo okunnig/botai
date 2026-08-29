@@ -442,9 +442,15 @@ impl Config {
         self.get_template(name)
     }
 
-    /// Retrieves an agent configuration by name.
+    /// Retrieves an agent configuration by name (exact match with case-insensitive fallback).
     pub fn get_agent(&self, name: &str) -> Option<&AgentConfig> {
-        self.agents.get(name)
+        self.agents.get(name).or_else(|| {
+            let trimmed = name.trim();
+            self.agents
+                .iter()
+                .find(|(k, _)| k.trim().eq_ignore_ascii_case(trimmed))
+                .map(|(_, v)| v)
+        })
     }
 
     /// Resolves the effective agent configuration for a given template.
@@ -657,6 +663,22 @@ repos = ["/tmp/repo"]
 
         assert!(config.get_template("non_existent_template").is_none());
         assert!(config.get_agent("non_existent_agent").is_none());
+    }
+
+    #[test]
+    fn test_get_agent_case_insensitive() {
+        let config = Config::load_from_str(SAMPLE_VALID_TOML).expect("Config should parse");
+
+        assert!(config.get_agent("claude").is_some());
+        assert!(config.get_agent("Claude").is_some());
+        assert!(config.get_agent("CLAUDE").is_some());
+        assert!(config.get_agent("agy").is_some());
+        assert!(config.get_agent("Agy").is_some());
+        assert!(config.get_agent("AGY").is_some());
+        assert_eq!(
+            config.get_agent("Claude").unwrap().command,
+            config.get_agent("claude").unwrap().command
+        );
     }
 
     #[test]

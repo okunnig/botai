@@ -1,3 +1,5 @@
 pub mod builder;
 
-pub use builder::{ProjectBuilder, ProjectError, ProjectSetupEvent, ProjectValidation};
+pub use builder::{
+    adapt_agent_args, ProjectBuilder, ProjectError, ProjectSetupEvent, ProjectValidation,
+};

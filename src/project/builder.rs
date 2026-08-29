@@ -181,10 +181,24 @@ impl ProjectBuilder {
         self.config.default_agent.clone()
     }
 
+    /// Resolves the effective arguments for the selected agent tool, including adapted prompt arguments.
+    pub fn resolve_agent_args(&self) -> Vec<String> {
+        let agent_name = self.resolved_agent_name();
+        let base_args = if let Some(agent) = self.config.get_agent(&agent_name) {
+            agent.args.clone()
+        } else {
+            Vec::new()
+        };
+        adapt_agent_args(&agent_name, &base_args, self.prompt.as_deref())
+    }
+
     /// Resolves the command, arguments, and environment variables for the selected agent tool.
+    ///
+    /// If an initial prompt is configured, agent CLI arguments are adapted automatically
+    /// for known agents (`agy`, `aider`, `claude`, `copilot`).
     pub fn resolve_agent_command(&self) -> (String, Vec<String>, HashMap<String, String>) {
         let agent_name = self.resolved_agent_name();
-        if let Some(agent) = self.config.get_agent(&agent_name) {
+        let (cmd, base_args, env) = if let Some(agent) = self.config.get_agent(&agent_name) {
             (agent.command.clone(), agent.args.clone(), agent.env.clone())
         } else {
             #[cfg(windows)]
@@ -192,7 +206,10 @@ impl ProjectBuilder {
             #[cfg(not(windows))]
             let default_shell = "sh".to_string();
             (default_shell, Vec::new(), HashMap::new())
-        }
+        };
+
+        let adapted_args = adapt_agent_args(&agent_name, &base_args, self.prompt.as_deref());
+        (cmd, adapted_args, env)
     }
 
     /// Validates preconditions for project creation:
@@ -512,6 +529,51 @@ impl ProjectBuilder {
 
         Ok((ps, pty, vt))
     }
+}
+
+/// Adapts AI agent CLI arguments by appending the initial prompt according to each agent tool's
+/// CLI specifications.
+///
+/// Supported agents (case-insensitive / normalized):
+/// - `agy`: Appends `"-i"` followed by the prompt string.
+/// - `aider`: Appends `"--message"` followed by the prompt string.
+/// - `claude`: Appends the prompt string as a positional argument.
+/// - `copilot`: Appends the prompt string as a positional argument.
+/// - Unknown / custom agents / fallback shells: Leaves arguments unchanged.
+///
+/// If `prompt` is `None` or contains only whitespace, arguments remain unchanged.
+pub fn adapt_agent_args<S: AsRef<str>>(
+    agent_name: &str,
+    base_args: &[S],
+    prompt: Option<&str>,
+) -> Vec<String> {
+    let mut args: Vec<String> = base_args.iter().map(|s| s.as_ref().to_string()).collect();
+
+    let prompt = match prompt {
+        Some(p) if !p.trim().is_empty() => p,
+        _ => return args,
+    };
+
+    let normalized = agent_name.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "agy" => {
+            args.push("-i".to_string());
+            args.push(prompt.to_string());
+        }
+        "aider" => {
+            args.push("--message".to_string());
+            args.push(prompt.to_string());
+        }
+        "claude" => {
+            args.push(prompt.to_string());
+        }
+        "copilot" => {
+            args.push(prompt.to_string());
+        }
+        _ => {}
+    }
+
+    args
 }
 
 #[cfg(test)]
@@ -842,5 +904,188 @@ mod tests {
         assert!(ev_list
             .iter()
             .any(|e| matches!(e, ProjectSetupEvent::Error(_))));
+    }
+
+    #[test]
+    fn test_adapt_agent_args_agy_with_prompt() {
+        let base = vec!["--verbose".to_string()];
+        let res = adapt_agent_args("agy", &base, Some("my prompt"));
+        assert_eq!(res, vec!["--verbose", "-i", "my prompt"]);
+
+        let empty_base: Vec<String> = vec![];
+        let res2 = adapt_agent_args("AGY", &empty_base, Some("my prompt"));
+        assert_eq!(res2, vec!["-i", "my prompt"]);
+
+        let res3 = adapt_agent_args("Agy", &["--debug".to_string()], Some("Fix bug"));
+        assert_eq!(res3, vec!["--debug", "-i", "Fix bug"]);
+    }
+
+    #[test]
+    fn test_adapt_agent_args_aider_with_prompt() {
+        let base = vec!["--no-auto-commits".to_string()];
+        let res = adapt_agent_args("aider", &base, Some("my prompt"));
+        assert_eq!(res, vec!["--no-auto-commits", "--message", "my prompt"]);
+
+        let empty_base: Vec<String> = vec![];
+        let res2 = adapt_agent_args("AIDER", &empty_base, Some("my prompt"));
+        assert_eq!(res2, vec!["--message", "my prompt"]);
+    }
+
+    #[test]
+    fn test_adapt_agent_args_claude_with_prompt() {
+        let empty_base: Vec<String> = vec![];
+        let res = adapt_agent_args("claude", &empty_base, Some("my prompt"));
+        assert_eq!(res, vec!["my prompt"]);
+
+        let base = vec!["--print".to_string()];
+        let res2 = adapt_agent_args("Claude", &base, Some("my prompt"));
+        assert_eq!(res2, vec!["--print", "my prompt"]);
+    }
+
+    #[test]
+    fn test_adapt_agent_args_copilot_with_prompt() {
+        let base = vec!["copilot".to_string(), "suggest".to_string()];
+        let res = adapt_agent_args("copilot", &base, Some("my prompt"));
+        assert_eq!(res, vec!["copilot", "suggest", "my prompt"]);
+
+        let empty_base: Vec<String> = vec![];
+        let res2 = adapt_agent_args("Copilot", &empty_base, Some("my prompt"));
+        assert_eq!(res2, vec!["my prompt"]);
+    }
+
+    #[test]
+    fn test_adapt_agent_args_custom_unknown_agent_with_prompt() {
+        let base = vec!["--custom-flag".to_string()];
+        let res = adapt_agent_args("custom", &base, Some("my prompt"));
+        assert_eq!(res, vec!["--custom-flag"]);
+
+        let empty_base: Vec<String> = vec![];
+        let res2 = adapt_agent_args("shell", &empty_base, Some("my prompt"));
+        assert_eq!(res2, empty_base);
+    }
+
+    #[test]
+    fn test_adapt_agent_args_none_or_empty_prompt() {
+        let base = vec!["--verbose".to_string()];
+        assert_eq!(adapt_agent_args("agy", &base, None), base);
+        assert_eq!(adapt_agent_args("agy", &base, Some("")), base);
+        assert_eq!(adapt_agent_args("agy", &base, Some("   \n\t  ")), base);
+
+        let aider_base = vec!["--no-auto-commits".to_string()];
+        assert_eq!(adapt_agent_args("aider", &aider_base, None), aider_base);
+        assert_eq!(
+            adapt_agent_args("aider", &aider_base, Some("  ")),
+            aider_base
+        );
+
+        let claude_base: Vec<String> = vec![];
+        assert_eq!(adapt_agent_args("claude", &claude_base, None), claude_base);
+        assert_eq!(
+            adapt_agent_args("claude", &claude_base, Some("")),
+            claude_base
+        );
+
+        let copilot_base = vec!["copilot".to_string(), "suggest".to_string()];
+        assert_eq!(
+            adapt_agent_args("copilot", &copilot_base, None),
+            copilot_base
+        );
+        assert_eq!(
+            adapt_agent_args("copilot", &copilot_base, Some("  \t  ")),
+            copilot_base
+        );
+    }
+
+    #[test]
+    fn test_project_builder_resolve_agent_args_and_command() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [agents.claude]
+            command = "claude"
+            args = []
+            [agents.agy]
+            command = "agy"
+            args = ["--verbose"]
+            [agents.aider]
+            command = "aider"
+            args = ["--no-auto-commits"]
+            [agents.copilot]
+            command = "gh"
+            args = ["copilot", "suggest"]
+            [agents.custom]
+            command = "custom-agent"
+            args = ["--run"]
+            [templates.tpl]
+            repos = []
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+
+        // 1. agy with prompt -> ["--verbose", "-i", "Fix checkout bug"]
+        let b_agy = ProjectBuilder::new(config.clone(), "tpl", "p1")
+            .with_agent("agy")
+            .with_prompt("Fix checkout bug");
+        let (cmd, args, _) = b_agy.resolve_agent_command();
+        assert_eq!(cmd, "agy");
+        assert_eq!(args, vec!["--verbose", "-i", "Fix checkout bug"]);
+        assert_eq!(
+            b_agy.resolve_agent_args(),
+            vec!["--verbose", "-i", "Fix checkout bug"]
+        );
+
+        // 2. aider with prompt -> ["--no-auto-commits", "--message", "Fix backend tests"]
+        let b_aider = ProjectBuilder::new(config.clone(), "tpl", "p2")
+            .with_agent("aider")
+            .with_prompt("Fix backend tests");
+        let (cmd, args, _) = b_aider.resolve_agent_command();
+        assert_eq!(cmd, "aider");
+        assert_eq!(
+            args,
+            vec!["--no-auto-commits", "--message", "Fix backend tests"]
+        );
+        assert_eq!(
+            b_aider.resolve_agent_args(),
+            vec!["--no-auto-commits", "--message", "Fix backend tests"]
+        );
+
+        // 3. claude with prompt -> ["Implement new login"]
+        let b_claude = ProjectBuilder::new(config.clone(), "tpl", "p3")
+            .with_agent("claude")
+            .with_prompt("Implement new login");
+        let (cmd, args, _) = b_claude.resolve_agent_command();
+        assert_eq!(cmd, "claude");
+        assert_eq!(args, vec!["Implement new login"]);
+        assert_eq!(b_claude.resolve_agent_args(), vec!["Implement new login"]);
+
+        // 4. copilot with prompt -> ["copilot", "suggest", "Suggest git command"]
+        let b_copilot = ProjectBuilder::new(config.clone(), "tpl", "p4")
+            .with_agent("copilot")
+            .with_prompt("Suggest git command");
+        let (cmd, args, _) = b_copilot.resolve_agent_command();
+        assert_eq!(cmd, "gh");
+        assert_eq!(args, vec!["copilot", "suggest", "Suggest git command"]);
+        assert_eq!(
+            b_copilot.resolve_agent_args(),
+            vec!["copilot", "suggest", "Suggest git command"]
+        );
+
+        // 5. custom agent with prompt -> unchanged args ["--run"]
+        let b_custom = ProjectBuilder::new(config.clone(), "tpl", "p5")
+            .with_agent("custom")
+            .with_prompt("Do task");
+        let (cmd, args, _) = b_custom.resolve_agent_command();
+        assert_eq!(cmd, "custom-agent");
+        assert_eq!(args, vec!["--run"]);
+        assert_eq!(b_custom.resolve_agent_args(), vec!["--run"]);
+
+        // 6. agy without prompt -> unchanged args ["--verbose"]
+        let b_agy_no_prompt = ProjectBuilder::new(config.clone(), "tpl", "p6").with_agent("agy");
+        assert_eq!(b_agy_no_prompt.resolve_agent_args(), vec!["--verbose"]);
+
+        // 7. claude with empty whitespace prompt -> unchanged empty args []
+        let b_claude_empty = ProjectBuilder::new(config, "tpl", "p7")
+            .with_agent("claude")
+            .with_prompt("   ");
+        assert_eq!(b_claude_empty.resolve_agent_args(), Vec::<String>::new());
     }
 }
