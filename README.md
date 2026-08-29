@@ -275,19 +275,3 @@ repos = [
 | **`gruvbox`** | Warm retro earthy palette with rust orange active tabs and forest green badges. | Dark `#282828`, Orange `#fe8019`, Green `#b8bb26`, Yellow `#fabd2f` |
 | **`monochrome`** | Clean, minimalist zinc/slate dark tones with crisp white borders. | Dark Zinc `#18181b`, Slate `#27272a`, Ice Blue, Pure White `#f4f4f5` |
 | **`ansi`** | Universal 16-color ANSI terminal fallback without 24-bit TrueColor requirements. | Standard terminal cyan, green, yellow, red, gray, white |
-
----
-
-## Full Technical Specifications
-
-For in-depth technical requirements, Git worktree lifecycle management, terminal protocols, and full CLI flag specifications, refer to [REQS.md](REQS.md).
-
----
-
-## License
-
-Dual-licensed under either:
-- **MIT License** ([LICENSE-MIT](LICENSE) or [http://opensource.org/licenses/MIT](http://opensource.org/licenses/MIT))
-- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE) or [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0))
-
-at your option.
