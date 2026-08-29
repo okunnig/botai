@@ -218,7 +218,10 @@ impl TuiApp {
     pub fn run_loop<B: ratatui::backend::Backend>(
         &mut self,
         terminal: &mut Terminal<B>,
-    ) -> io::Result<()> {
+    ) -> io::Result<()>
+    where
+        io::Error: From<B::Error>,
+    {
         let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
             use std::io::Read;
@@ -245,7 +248,10 @@ impl TuiApp {
         &mut self,
         terminal: &mut Terminal<B>,
         stdin_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
-    ) -> io::Result<()> {
+    ) -> io::Result<()>
+    where
+        io::Error: From<B::Error>,
+    {
         let mut last_tick = Instant::now();
 
         // Query initial terminal viewport size and synchronize sessions
