@@ -23,7 +23,6 @@ use ratatui::{
 };
 
 use crate::config::Config;
-use crate::git::remove_worktree_auto;
 use crate::notify::NotificationService;
 use crate::project::ProjectBuilder;
 use crate::session::{
@@ -806,6 +805,7 @@ impl TuiApp {
                     default_agent: "claude".to_string(),
                     theme: "tokyo-night".to_string(),
                     repos_dir: PathBuf::from(".botai_repos"),
+                    repos: HashMap::new(),
                     agents: HashMap::new(),
                     templates: HashMap::new(),
                 })
@@ -835,19 +835,8 @@ impl TuiApp {
             .clone()
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let project_dir = cwd.join(project_name);
 
-        if project_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&project_dir) {
-                for entry in entries.flatten() {
-                    let child_path = entry.path();
-                    if child_path.is_dir() && child_path.join(".git").exists() {
-                        let _ = remove_worktree_auto(&child_path, true);
-                    }
-                }
-            }
-            let _ = fs::remove_dir_all(&project_dir);
-        }
+        crate::project::destroy_project_workspace(self.config.as_ref(), &cwd, project_name, true)?;
 
         self.refresh_dashboard();
         Ok(())
@@ -872,6 +861,7 @@ impl TuiApp {
                     default_agent: "claude".to_string(),
                     theme: "tokyo-night".to_string(),
                     repos_dir: PathBuf::from(".botai_repos"),
+                    repos: HashMap::new(),
                     agents: HashMap::new(),
                     templates: HashMap::new(),
                 });

@@ -19,14 +19,29 @@
   - Required global configuration field `repos_dir` specifying where remote repositories are cloned and cached.
   - Does not assume any implicit default directory; must be explicitly configured in `config.toml` (e.g. `repos_dir = "~/.local/share/botai/repos"` or `repos_dir = "~/code/repos"`).
   - Can be overridden at runtime via the `BOTAI_REPOS_DIR` environment variable.
+- **Central Repositories Registry (`[repos]`) & Reusable Definitions**:
+  - Optional top-level `[repos.<name>]` configuration table allowing repositories and their canonical build/setup pipelines to be defined once and reused across multiple templates.
+  - Fields for `[repos.<name>]`:
+    - `url`: (Optional) Remote Git clone URL or local directory path.
+    - `setup`: (Optional) List of setup commands to execute in the repository's worktree upon creation (e.g. `setup = [ ["npm", "install"], ["npm", "run", "codegen"] ]` or `setup = ["npm install", "cargo check"]`).
+    - `env`: (Optional) Per-repository environment variables applied during setup hook execution.
 - **Hybrid Repository Declarations**:
   - Repositories in `templates.<name>.repos` support:
+    - **Registered repo keys** (e.g., `"web-frontend"`): Resolves to the matching `[repos.web-frontend]` entry, inheriting its clone URL, setup hooks, and environment.
     - **Remote Git URLs** (`https://...`, `git@...`, `ssh://...`): Automatically cloned into `<repos_dir>/<repo_name>`.
     - **Relative repo names** (e.g., `"ecommerce-api"`): Resolved relative to `repos_dir` (`<repos_dir>/ecommerce-api`).
     - **Absolute local paths** (e.g., `/home/user/code/my-repo`): Direct reference to existing local repository.
   - Sanitized flat naming inside `repos_dir` based on the repository basename.
   - Conflict detection: Errors if two different remote URLs resolve to the same folder name.
-- **Templates / Project Templates**: Define named sets of local or remote repositories. Each template can specify `description`, `default_agent`, `agents_md_append` (custom template instructions appended to `AGENTS.md`), `repos`, and `env`.
+- **Templates / Project Templates**:
+  - Define named sets of local or remote repositories. Each template can specify:
+    - `description`: Optional summary of the template.
+    - `default_agent`: Optional agent override specific to this template.
+    - `agents_md_append`: Optional custom markdown instructions appended to `AGENTS.md`.
+    - `repos`: List of registered repo keys, Git URLs, relative names in `repos_dir`, or local paths.
+    - `env`: Environment variables injected into the agent session and workspace hooks.
+    - `post_create`: (Optional) List of commands executed at the project root after worktrees and setup hooks finish.
+    - `pre_destroy`: (Optional) List of commands executed at the project root before destroying worktrees.
 - **Agent Definitions**: Configurable agent launch commands, arguments, and environment variables.
 - **Configuration Template Generation (`botai init`)**:
   - Built-in generator for a fully documented, self-describing configuration file with extensive explanatory comments.
@@ -76,14 +91,34 @@ command = "aider"
 args = ["--no-auto-commits"]
 
 # ------------------------------------------------------------------------------
+# Reusable Repository Definitions (Optional)
+# ------------------------------------------------------------------------------
+# Define canonical repository URLs and multi-command setup pipelines once.
+
+[repos.web-frontend]
+url = "https://github.com/example/ecommerce-web.git"
+setup = [
+  ["npm", "install"],
+  ["npm", "run", "codegen"]
+]
+
+[repos.ecommerce-api]
+url = "https://github.com/example/ecommerce-api.git"
+setup = [
+  ["cargo", "check"]
+]
+
+# ------------------------------------------------------------------------------
 # Project Templates
 # ------------------------------------------------------------------------------
 # Define named multi-repo project templates. Each template specifies:
 # - description: Optional summary of the template.
 # - default_agent: Optional agent override specific to this template.
 # - agents_md_append: (Optional) Custom markdown instructions appended to AGENTS.md.
-# - repos: List of Git URLs, relative repo names in repos_dir, or absolute local paths.
+# - repos: List of registered repo keys, Git URLs, or local paths.
 # - env: Environment variables injected into the agent session.
+# - post_create: (Optional) Commands executed at project root after setup.
+# - pre_destroy: (Optional) Commands executed at project root before cleanup.
 
 [templates.ecommerce]
 description = "E-commerce platform services"
@@ -93,9 +128,15 @@ agents_md_append = """
 - Follow coding standards documented in the template.
 """
 repos = [
-  "https://github.com/example/ecommerce-api.git",
-  "https://github.com/example/ecommerce-web.git",
+  "ecommerce-api",
+  "web-frontend",
   "/home/user/code/ecommerce-shared"
+]
+post_create = [
+  ["docker", "compose", "up", "-d"]
+]
+pre_destroy = [
+  ["docker", "compose", "down"]
 ]
 env = { PORT = "8080", NODE_ENV = "development" }
 ```
@@ -113,6 +154,18 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Worktrees & Metadata Lifecycle**: For every repository defined in the template:
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
   - Checks out a new branch named `<project_name>`.
+- **Lifecycle Command Hooks Execution Model**:
+  - **Per-Repository Setup Hooks (`setup`)**:
+    - Runs in the checked-out worktree directory (`CWD/<project_name>/<repo_name>`) immediately after worktree creation.
+    - Repositories execute their setup command pipelines concurrently in parallel; commands within a single repository run sequentially in order.
+    - Direct execution without shell wrappers (arguments preserved safely).
+    - **Warn and Continue Policy**: Non-zero exit codes or execution failures are logged with warning events but do NOT trigger destructive rollback of the workspace, ensuring developers and AI agents can inspect and fix setup issues.
+  - **Workspace Post-Creation Hooks (`post_create`)**:
+    - Runs sequentially at the project root directory (`CWD/<project_name>`) after all worktrees and repo setup hooks complete and `AGENTS.md` is generated.
+    - Inherits template environment variables.
+    - Failure policy: Warn and Continue.
+  - **Workspace Pre-Destruction Hooks (`pre_destroy`)**:
+    - Runs at the project root directory during project destruction before removing worktree directories and branches.
   - **Strict Branching Strategy**: Branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
   - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the template repositories or if `<project_name>` directory exists.
   - **Backing Repository Auto-Discovery (`resolve_main_repo`)**: Resolves the main cached repository from any worktree directory using `git rev-parse --git-common-dir` and `.git` file (`gitdir: <path>`) fallback traversal.
@@ -336,13 +389,15 @@ env = { PORT = "8080", NODE_ENV = "development" }
     1. **Pre-Validation**: Multi-tier validation with `validate_fast` (immediate 0ms local validation of project name, template existence, and CWD directory collision) and `check_branch_collisions` / `validate_detailed` (git branch collision verification across constituent template repositories).
     2. **Repository Resolution & Cloning**: Clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch for existing repos.
     3. **Worktree Checkout**: Creates a git worktree for each repository checked out to branch `<project_name>` at `<project_dir>/<repo_name>`.
-    4. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md`.
-    5. **PTY Process Spawning**: Spawns the agent CLI process inside a master/slave pseudo-terminal attached to a virtual terminal screen buffer.
+    4. **Per-Repository Setup Hooks Execution**: Concurrently executes configured repository `setup` commands in parallel across active worktrees (sequential command execution per worktree), capturing logs and proceeding under the Warn and Continue policy upon failures.
+    5. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md`.
+    6. **Workspace Post-Creation Hooks Execution**: Runs configured template `post_create` commands sequentially at the project root directory.
+    7. **PTY Process Spawning**: Spawns the agent CLI process inside a master/slave pseudo-terminal attached to a virtual terminal screen buffer.
   - **Modular Execution**:
-    - `ProjectBuilder::create_workspace`: Executes steps 1-4 without spawning PTY, returning the canonical project path and repository mappings.
-    - `ProjectBuilder::build`: Executes steps 1-4 via `create_workspace` and proceeds with step 5 PTY spawning for attached session workflows.
+    - `ProjectBuilder::create_workspace`: Executes steps 1-6 without spawning PTY, returning the canonical project path and repository mappings.
+    - `ProjectBuilder::build`: Executes steps 1-6 via `create_workspace` and proceeds with step 7 PTY spawning for attached session workflows.
   - **Event & Progress Streaming**: Emits structured `ProjectSetupEvent` (Steps, Logs, Success, Error) consumed by CLI stdout or the TUI setup modal.
-  - **Atomic Rollback**: On any initialization error (e.g. branch collision, clone failure, process crash), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory.
+  - **Atomic Rollback**: On any core initialization error (e.g. branch collision, clone failure, worktree creation failure, agent spawn failure), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory. (Note: Non-zero exit codes from user setup/post-create hooks log warnings and do not trigger destructive rollback).
 - **Unified Interactive Project Creation Modal (Two-Step Flow)**:
   - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session Quick Launcher.
   - **Asynchronous Non-Blocking Pre-Validation**:

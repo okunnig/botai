@@ -196,6 +196,7 @@ pub fn run_setup_worker(
                 default_agent: "claude".to_string(),
                 theme: "tokyo-night".to_string(),
                 repos_dir: PathBuf::from(".botai_repos"),
+                repos: HashMap::new(),
                 agents: HashMap::new(),
                 templates: HashMap::new(),
             })

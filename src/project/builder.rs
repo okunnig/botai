@@ -445,7 +445,88 @@ impl ProjectBuilder {
                 ));
             }
 
-            // Step 4: Generating AGENTS.md context
+            // Step 4: Execute per-repository setup hooks in parallel across worktrees
+            let repos_with_hooks: Vec<(&ResolvedRepo, PathBuf)> = resolved_repos
+                .iter()
+                .filter(|r| !r.setup_hooks.is_empty())
+                .map(|r| (r, project_dir_canon.join(&r.name)))
+                .collect();
+
+            if !repos_with_hooks.is_empty() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::scope(|s| {
+                    for (repo, worktree_path) in &repos_with_hooks {
+                        let thread_tx = tx.clone();
+                        let tpl_env = &tpl.env;
+                        let repo_env = &repo.env;
+                        let setup_hooks = &repo.setup_hooks;
+                        let repo_name = &repo.name;
+                        let wt_path = worktree_path.clone();
+
+                        s.spawn(move || {
+                            for cmd in setup_hooks {
+                                if cmd.is_empty() {
+                                    continue;
+                                }
+                                let prog = &cmd[0];
+                                let args = &cmd[1..];
+                                let cmd_display = cmd.join(" ");
+                                let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
+                                    "Running setup hook for '{repo_name}': {cmd_display}"
+                                )));
+
+                                let mut command = std::process::Command::new(prog);
+                                command.args(args);
+                                command.current_dir(&wt_path);
+                                for (k, v) in tpl_env {
+                                    command.env(k, v);
+                                }
+                                for (k, v) in repo_env {
+                                    command.env(k, v);
+                                }
+
+                                match command.output() {
+                                    Ok(output) => {
+                                        if !output.status.success() {
+                                            let exit_code = output
+                                                .status
+                                                .code()
+                                                .map(|c| c.to_string())
+                                                .unwrap_or_else(|| "signal".to_string());
+                                            let stderr_snippet =
+                                                String::from_utf8_lossy(&output.stderr);
+                                            let trimmed_err = stderr_snippet.trim();
+                                            let msg = if trimmed_err.is_empty() {
+                                                format!("exit code {exit_code}")
+                                            } else {
+                                                format!("exit code {exit_code}: {trimmed_err}")
+                                            };
+                                            let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
+                                                "⚠ Warning: Setup hook for '{repo_name}' failed: {msg}"
+                                            )));
+                                        } else {
+                                            let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
+                                                "✓ Setup hook for '{repo_name}' completed: {cmd_display}"
+                                            )));
+                                        }
+                                    }
+                                    Err(err) => {
+                                        let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
+                                            "⚠ Warning: Setup hook for '{repo_name}' failed: {err}"
+                                        )));
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    drop(tx);
+                    while let Ok(event) = rx.recv() {
+                        progress_sink(event);
+                    }
+                });
+            }
+
+            // Step 5: Generating AGENTS.md context
             progress_sink(ProjectSetupEvent::Step {
                 current: 4,
                 total: 4,
@@ -471,6 +552,57 @@ impl ProjectBuilder {
                 }
                 let _ = fs::remove_dir_all(&project_dir);
                 anyhow::bail!("Failed to generate AGENTS.md: {err}");
+            }
+
+            // Step 6: Execute template post_create hooks sequentially at project root
+            for cmd in &tpl.post_create {
+                if cmd.is_empty() {
+                    continue;
+                }
+                let prog = &cmd[0];
+                let args = &cmd[1..];
+                let cmd_display = cmd.join(" ");
+                progress_sink(ProjectSetupEvent::Log(format!(
+                    "Running post_create hook: {cmd_display}"
+                )));
+
+                let mut command = std::process::Command::new(prog);
+                command.args(args);
+                command.current_dir(&project_dir_canon);
+                for (k, v) in &tpl.env {
+                    command.env(k, v);
+                }
+
+                match command.output() {
+                    Ok(output) => {
+                        if !output.status.success() {
+                            let exit_code = output
+                                .status
+                                .code()
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "signal".to_string());
+                            let stderr_snippet = String::from_utf8_lossy(&output.stderr);
+                            let trimmed_err = stderr_snippet.trim();
+                            let msg = if trimmed_err.is_empty() {
+                                format!("exit code {exit_code}")
+                            } else {
+                                format!("exit code {exit_code}: {trimmed_err}")
+                            };
+                            progress_sink(ProjectSetupEvent::Log(format!(
+                                "⚠ Warning: Post-create hook failed: {msg}"
+                            )));
+                        } else {
+                            progress_sink(ProjectSetupEvent::Log(format!(
+                                "✓ Post-create hook completed: {cmd_display}"
+                            )));
+                        }
+                    }
+                    Err(err) => {
+                        progress_sink(ProjectSetupEvent::Log(format!(
+                            "⚠ Warning: Post-create hook failed: {err}"
+                        )));
+                    }
+                }
             }
 
             Ok((project_dir_canon, created_mappings))
@@ -603,6 +735,98 @@ pub fn adapt_agent_args<S: AsRef<str>>(
     }
 
     args
+}
+
+/// Extracts the template name recorded in a project's `AGENTS.md` orientation file, if present.
+pub fn extract_template_name_from_agents_md<P: AsRef<std::path::Path>>(
+    project_dir: P,
+) -> Option<String> {
+    let agents_path = project_dir.as_ref().join("AGENTS.md");
+    let content = fs::read_to_string(agents_path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Template: **") {
+            if let Some(tpl) = rest.strip_suffix("**") {
+                let tpl = tpl.trim();
+                if !tpl.is_empty() {
+                    return Some(tpl.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Safely tears down a project workspace:
+/// 1. Executes template `pre_destroy` lifecycle hooks if template is configured.
+/// 2. Validates uncommitted changes across worktrees (unless `force` is true).
+/// 3. Removes git worktrees and prunes central repository metadata.
+/// 4. Removes the project directory.
+pub fn destroy_project_workspace(
+    config: Option<&Config>,
+    cwd: &std::path::Path,
+    project_name: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let project_dir = cwd.join(project_name);
+    if !project_dir.exists() {
+        anyhow::bail!("Project directory {project_dir:?} does not exist.");
+    }
+
+    // 1. Run pre_destroy hooks if template is resolved
+    if let Some(cfg) = config {
+        if let Some(tpl_name) = extract_template_name_from_agents_md(&project_dir) {
+            if let Some(tpl) = cfg.get_template(&tpl_name) {
+                for cmd in &tpl.pre_destroy {
+                    if cmd.is_empty() {
+                        continue;
+                    }
+                    let prog = &cmd[0];
+                    let args = &cmd[1..];
+                    let mut command = std::process::Command::new(prog);
+                    command.args(args);
+                    command.current_dir(&project_dir);
+                    for (k, v) in &tpl.env {
+                        command.env(k, v);
+                    }
+                    let _ = command.output();
+                }
+            }
+        }
+    }
+
+    // 2. Validate uncommitted changes across child worktrees
+    if let Ok(entries) = fs::read_dir(&project_dir) {
+        let child_paths: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && p.join(".git").exists())
+            .collect();
+
+        if !force {
+            for child_path in &child_paths {
+                if crate::git::has_uncommitted_changes(child_path)? {
+                    anyhow::bail!(
+                        "Worktree {child_path:?} has uncommitted changes. Use --force to destroy anyway."
+                    );
+                }
+            }
+        }
+
+        // 3. Remove git worktrees
+        for child_path in &child_paths {
+            let _ = crate::git::remove_worktree_auto(child_path, force);
+        }
+    }
+
+    // 4. Remove project directory
+    if project_dir.exists() {
+        fs::remove_dir_all(&project_dir)
+            .with_context(|| format!("Failed to remove project directory {project_dir:?}"))?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1161,5 +1385,246 @@ mod tests {
             .with_agent("claude")
             .with_prompt("   ");
         assert_eq!(b_claude_empty.resolve_agent_args(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_extract_template_name_from_agents_md() {
+        let temp_dir = TempDir::new().unwrap();
+        let proj_dir = temp_dir.path().join("proj");
+        fs::create_dir_all(&proj_dir).unwrap();
+
+        // 1. Missing AGENTS.md
+        assert_eq!(extract_template_name_from_agents_md(&proj_dir), None);
+
+        // 2. AGENTS.md without template line
+        fs::write(
+            proj_dir.join("AGENTS.md"),
+            "# Project: proj\n\nNo template line\n",
+        )
+        .unwrap();
+        assert_eq!(extract_template_name_from_agents_md(&proj_dir), None);
+
+        // 3. Valid AGENTS.md
+        fs::write(
+            proj_dir.join("AGENTS.md"),
+            "# Project: proj\n\nTemplate: **ecommerce**\n\n## Repository Layout\n",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_template_name_from_agents_md(&proj_dir),
+            Some("ecommerce".to_string())
+        );
+    }
+
+    #[test]
+    fn test_setup_and_post_create_hooks_execution_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_backend = repos_dir.join("backend");
+        let repo_frontend = repos_dir.join("frontend");
+        create_mock_git_repo(&repo_backend);
+        create_mock_git_repo(&repo_frontend);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [repos.backend]
+            setup = [
+                ["git", "status"],
+                ["sh", "-c", "echo 'backend-setup-ok' > setup.marker"]
+            ]
+            env = {{ BACKEND_ENV = "backend_val" }}
+
+            [repos.frontend]
+            setup = ["sh -c 'echo frontend-setup-ok > setup.marker'"]
+
+            [templates.fullstack]
+            repos = ["backend", "frontend"]
+            post_create = [
+                ["sh", "-c", "echo 'post-create-ok' > post_create.marker"]
+            ]
+            env = {{ TEMPLATE_ENV = "tpl_val" }}
+            "#,
+            repos_dir.display()
+        );
+
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder = ProjectBuilder::new(config, "fullstack", "my-project").with_cwd(&project_cwd);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = builder.create_workspace(move |ev| {
+            events_clone.lock().unwrap().push(ev);
+        });
+
+        assert!(
+            res.is_ok(),
+            "create_workspace should succeed: {:?}",
+            res.err()
+        );
+        let (project_dir, mappings) = res.unwrap();
+        assert_eq!(mappings.len(), 2);
+
+        // Verify setup hooks created markers in worktrees
+        assert!(project_dir.join("backend").join("setup.marker").exists());
+        assert_eq!(
+            fs::read_to_string(project_dir.join("backend").join("setup.marker"))
+                .unwrap()
+                .trim(),
+            "backend-setup-ok"
+        );
+
+        assert!(project_dir.join("frontend").join("setup.marker").exists());
+        assert_eq!(
+            fs::read_to_string(project_dir.join("frontend").join("setup.marker"))
+                .unwrap()
+                .trim(),
+            "frontend-setup-ok"
+        );
+
+        // Verify post_create hook created marker at project root
+        assert!(project_dir.join("post_create.marker").exists());
+        assert_eq!(
+            fs::read_to_string(project_dir.join("post_create.marker"))
+                .unwrap()
+                .trim(),
+            "post-create-ok"
+        );
+
+        let ev_list = events.lock().unwrap();
+        assert!(ev_list.iter().any(|e| match e {
+            ProjectSetupEvent::Log(msg) => msg.contains("Setup hook for 'backend' completed"),
+            _ => false,
+        }));
+        assert!(ev_list.iter().any(|e| match e {
+            ProjectSetupEvent::Log(msg) => msg.contains("Post-create hook completed"),
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn test_setup_hooks_warn_and_continue_on_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_backend = repos_dir.join("backend");
+        create_mock_git_repo(&repo_backend);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [repos.backend]
+            setup = [
+                ["non_existent_binary_xyz_12345", "--arg"],
+                ["sh", "-c", "exit 42"],
+                ["sh", "-c", "echo 'survived' > after_fail.marker"]
+            ]
+
+            [templates.failing_setup_tpl]
+            repos = ["backend"]
+            post_create = [
+                ["non_existent_post_create_cmd"]
+            ]
+            "#,
+            repos_dir.display()
+        );
+
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder = ProjectBuilder::new(config, "failing_setup_tpl", "resilient-project")
+            .with_cwd(&project_cwd);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = builder.create_workspace(move |ev| {
+            events_clone.lock().unwrap().push(ev);
+        });
+
+        // Warn-and-continue: must succeed without rollback!
+        assert!(
+            res.is_ok(),
+            "create_workspace should succeed despite hook failure"
+        );
+        let (project_dir, _) = res.unwrap();
+        assert!(project_dir.exists(), "project_dir must exist");
+        assert!(project_dir.join("backend").exists());
+        assert!(project_dir.join("AGENTS.md").exists());
+        assert!(project_dir
+            .join("backend")
+            .join("after_fail.marker")
+            .exists());
+
+        let ev_list = events.lock().unwrap();
+        assert!(ev_list.iter().any(|e| match e {
+            ProjectSetupEvent::Log(msg) =>
+                msg.contains("⚠ Warning: Setup hook for 'backend' failed"),
+            _ => false,
+        }));
+        assert!(ev_list.iter().any(|e| match e {
+            ProjectSetupEvent::Log(msg) => msg.contains("⚠ Warning: Post-create hook failed"),
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn test_destroy_project_workspace_runs_pre_destroy_hooks() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_backend = repos_dir.join("backend");
+        create_mock_git_repo(&repo_backend);
+
+        let cleanup_marker = temp_dir.path().join("pre_destroy_ran.marker");
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.with_pre_destroy]
+            repos = ["backend"]
+            pre_destroy = [
+                ["sh", "-c", "echo 'cleanup-ok' > {}"]
+            ]
+            "#,
+            repos_dir.display(),
+            cleanup_marker.display()
+        );
+
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder = ProjectBuilder::new(config.clone(), "with_pre_destroy", "proj-to-destroy")
+            .with_cwd(&project_cwd);
+
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+        assert!(project_dir.exists());
+        assert!(project_dir.join("AGENTS.md").exists());
+
+        // Destroy project workspace
+        let destroy_res =
+            destroy_project_workspace(Some(&config), &project_cwd, "proj-to-destroy", false);
+        assert!(destroy_res.is_ok(), "destroy must succeed");
+        assert!(!project_dir.exists(), "project_dir must be deleted");
+
+        // Verify pre_destroy hook ran
+        assert!(
+            cleanup_marker.exists(),
+            "pre_destroy hook must have created cleanup marker"
+        );
+        assert_eq!(
+            fs::read_to_string(&cleanup_marker).unwrap().trim(),
+            "cleanup-ok"
+        );
     }
 }

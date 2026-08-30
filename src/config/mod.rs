@@ -104,14 +104,34 @@ command = "aider"
 args = ["--no-auto-commits"]
 
 # ------------------------------------------------------------------------------
+# Reusable Repository Definitions (Optional)
+# ------------------------------------------------------------------------------
+# Define canonical repository URLs and multi-command setup pipelines once.
+
+[repos.web-frontend]
+url = "https://github.com/example/ecommerce-web.git"
+setup = [
+  ["npm", "install"],
+  ["npm", "run", "codegen"]
+]
+
+[repos.ecommerce-api]
+url = "https://github.com/example/ecommerce-api.git"
+setup = [
+  ["cargo", "check"]
+]
+
+# ------------------------------------------------------------------------------
 # Project Templates
 # ------------------------------------------------------------------------------
 # Define named multi-repo templates. Each template specifies:
 # - description: (Optional) Human-readable summary of the template purpose.
 # - default_agent: (Optional) Specific agent override for this template.
 # - agents_md_append: (Optional) Custom instructions appended to AGENTS.md.
-# - repos: (Required) List of Git URLs, relative names in repos_dir, or absolute local paths.
+# - repos: (Required) List of registered repo keys, Git URLs, or local paths.
 # - env: (Optional) Per-template environment variables injected into the agent.
+# - post_create: (Optional) Commands executed at project root after setup.
+# - pre_destroy: (Optional) Commands executed at project root before cleanup.
 
 [templates.ecommerce]
 description = "E-commerce platform services"
@@ -121,9 +141,15 @@ agents_md_append = """
 - Follow coding standards documented in the template.
 """
 repos = [
-    "https://github.com/example/ecommerce-api.git",
-    "https://github.com/example/ecommerce-web.git",
+    "ecommerce-api",
+    "web-frontend",
     "/home/user/code/ecommerce-shared"
+]
+post_create = [
+    ["docker", "compose", "up", "-d"]
+]
+pre_destroy = [
+    ["docker", "compose", "down"]
 ]
 env = { PORT = "8080", NODE_ENV = "development" }
 "#;
@@ -203,6 +229,106 @@ pub fn derive_repo_name(entry: &str) -> String {
     }
 }
 
+/// Parses a command hooks specification into a list of command argv arrays (`Vec<Vec<String>>`).
+///
+/// Accepts:
+/// - A list of command argv arrays: `[ ["npm", "install"], ["npm", "run", "codegen"] ]`
+/// - A single command argv array: `["cargo", "check"]`
+/// - A list of command strings: `["npm install", "npm run codegen"]`
+/// - A single command string: `"cargo check"`
+pub fn parse_command_hooks_from_value(value: &toml::Value) -> Vec<Vec<String>> {
+    match value {
+        toml::Value::String(s) => {
+            let words = split_command_words(s);
+            if words.is_empty() {
+                Vec::new()
+            } else {
+                vec![words]
+            }
+        }
+        toml::Value::Array(arr) => {
+            if arr.is_empty() {
+                return Vec::new();
+            }
+
+            // Check if any element in the array is an array
+            let has_sub_array = arr.iter().any(|v| matches!(v, toml::Value::Array(_)));
+
+            if has_sub_array {
+                let mut result = Vec::new();
+                for item in arr {
+                    match item {
+                        toml::Value::Array(sub_arr) => {
+                            let words: Vec<String> = sub_arr
+                                .iter()
+                                .filter_map(|v| match v {
+                                    toml::Value::String(s) => Some(s.clone()),
+                                    _ => None,
+                                })
+                                .collect();
+                            if !words.is_empty() {
+                                result.push(words);
+                            }
+                        }
+                        toml::Value::String(s) => {
+                            let words = split_command_words(s);
+                            if !words.is_empty() {
+                                result.push(words);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                result
+            } else {
+                // All items are non-arrays (expected strings)
+                let string_items: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| match v {
+                        toml::Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
+
+                if string_items.is_empty() {
+                    return Vec::new();
+                }
+
+                // Check if any string contains multiple words (i.e. spaces/quotes)
+                let any_multi_word = string_items
+                    .iter()
+                    .any(|s| split_command_words(s).len() > 1);
+
+                if any_multi_word {
+                    // Each item is a command string: ["npm install", "npm run codegen"]
+                    let mut result = Vec::new();
+                    for s in string_items {
+                        let words = split_command_words(&s);
+                        if !words.is_empty() {
+                            result.push(words);
+                        }
+                    }
+                    result
+                } else {
+                    // Single command argv array: ["cargo", "check"]
+                    vec![string_items]
+                }
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Custom serde deserializer for flexible command hook lists.
+pub fn deserialize_command_hooks<'de, D>(deserializer: D) -> Result<Vec<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let value = toml::Value::deserialize(deserializer)?;
+    Ok(parse_command_hooks_from_value(&value))
+}
+
 /// Information about a resolved repository within a template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedRepo {
@@ -214,6 +340,12 @@ pub struct ResolvedRepo {
     pub clone_url: Option<String>,
     /// Original entry string from configuration.
     pub original_entry: String,
+    /// Setup commands to execute in this worktree after checkout.
+    #[serde(default)]
+    pub setup_hooks: Vec<Vec<String>>,
+    /// Per-repository environment variables applied during setup hook execution.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 impl ResolvedRepo {
@@ -221,6 +353,20 @@ impl ResolvedRepo {
     pub fn exists_locally(&self) -> bool {
         self.local_path.exists()
     }
+}
+
+/// Configuration for a repository in the central `[repos]` registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RepoConfig {
+    /// Remote Git clone URL or local directory path.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Setup commands to execute in the repository's worktree upon creation.
+    #[serde(default, deserialize_with = "deserialize_command_hooks")]
+    pub setup: Vec<Vec<String>>,
+    /// Per-repository environment variables applied during setup hook execution.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// Configuration for an AI agent tool (e.g., Claude Code, agy, Copilot CLI).
@@ -253,6 +399,12 @@ pub struct TemplateConfig {
     /// Per-template environment variables injected into the agent environment.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Post-creation lifecycle commands executed at the project root after worktrees and setup hooks finish.
+    #[serde(default, deserialize_with = "deserialize_command_hooks")]
+    pub post_create: Vec<Vec<String>>,
+    /// Pre-destruction lifecycle commands executed at the project root before removing worktrees.
+    #[serde(default, deserialize_with = "deserialize_command_hooks")]
+    pub pre_destroy: Vec<Vec<String>>,
 }
 
 /// Backward compatibility alias for `TemplateConfig`.
@@ -272,6 +424,9 @@ pub struct Config {
     pub theme: String,
     /// Central directory where remote repositories are cloned and cached (required).
     pub repos_dir: PathBuf,
+    /// Central repository registry definitions.
+    #[serde(default)]
+    pub repos: HashMap<String, RepoConfig>,
     /// Defined agent tools.
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
@@ -351,42 +506,80 @@ impl Config {
     pub fn resolve_repo(&self, entry: &str) -> ResolvedRepo {
         let repos_dir = self.resolved_repos_dir();
         let trimmed = entry.trim();
-        let name = derive_repo_name(trimmed);
 
-        if is_git_url(trimmed) {
-            let local_path = repos_dir.join(&name);
-            ResolvedRepo {
-                name,
-                local_path,
-                clone_url: Some(trimmed.to_string()),
-                original_entry: trimmed.to_string(),
-            }
-        } else {
-            let path_obj = Path::new(trimmed);
-            if path_obj.is_absolute() || trimmed.starts_with('~') {
-                let expanded = expand_tilde(trimmed);
-                ResolvedRepo {
-                    name,
-                    local_path: expanded,
-                    clone_url: None,
-                    original_entry: trimmed.to_string(),
-                }
-            } else if path_obj.exists() {
-                let canonical =
-                    std::fs::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf());
-                ResolvedRepo {
-                    name,
-                    local_path: canonical,
-                    clone_url: None,
-                    original_entry: trimmed.to_string(),
+        if let Some(repo_config) = self.repos.get(trimmed) {
+            let name = trimmed.to_string();
+            let setup_hooks = repo_config.setup.clone();
+            let env = repo_config.env.clone();
+            let original_entry = trimmed.to_string();
+
+            if let Some(url_str) = &repo_config.url {
+                let url_trimmed = url_str.trim();
+                if is_git_url(url_trimmed) {
+                    ResolvedRepo {
+                        name,
+                        local_path: repos_dir.join(trimmed),
+                        clone_url: Some(url_trimmed.to_string()),
+                        original_entry,
+                        setup_hooks,
+                        env,
+                    }
+                } else {
+                    let path_obj = Path::new(url_trimmed);
+                    let local_path = if path_obj.is_absolute() || url_trimmed.starts_with('~') {
+                        expand_tilde(url_trimmed)
+                    } else if path_obj.exists() {
+                        std::fs::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf())
+                    } else {
+                        repos_dir.join(url_trimmed)
+                    };
+                    ResolvedRepo {
+                        name,
+                        local_path,
+                        clone_url: None,
+                        original_entry,
+                        setup_hooks,
+                        env,
+                    }
                 }
             } else {
-                let local_path = repos_dir.join(trimmed);
+                ResolvedRepo {
+                    name,
+                    local_path: repos_dir.join(trimmed),
+                    clone_url: None,
+                    original_entry,
+                    setup_hooks,
+                    env,
+                }
+            }
+        } else {
+            let name = derive_repo_name(trimmed);
+            if is_git_url(trimmed) {
+                let local_path = repos_dir.join(&name);
+                ResolvedRepo {
+                    name,
+                    local_path,
+                    clone_url: Some(trimmed.to_string()),
+                    original_entry: trimmed.to_string(),
+                    setup_hooks: Vec::new(),
+                    env: HashMap::new(),
+                }
+            } else {
+                let path_obj = Path::new(trimmed);
+                let local_path = if path_obj.is_absolute() || trimmed.starts_with('~') {
+                    expand_tilde(trimmed)
+                } else if path_obj.exists() {
+                    std::fs::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf())
+                } else {
+                    repos_dir.join(trimmed)
+                };
                 ResolvedRepo {
                     name,
                     local_path,
                     clone_url: None,
                     original_entry: trimmed.to_string(),
+                    setup_hooks: Vec::new(),
+                    env: HashMap::new(),
                 }
             }
         }
@@ -1393,5 +1586,283 @@ repos = ["/path/to/repo"]
             .expect("Template should exist");
 
         assert_eq!(ws.agents_md_append, None);
+    }
+
+    #[test]
+    fn test_flexible_command_hooks_parsing_formats() {
+        // 1. Array of command argv arrays
+        let toml1 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[repos.web]
+setup = [
+    ["npm", "install"],
+    ["npm", "run", "codegen"]
+]
+
+[templates.demo]
+repos = ["web"]
+post_create = [
+    ["docker", "compose", "up", "-d"]
+]
+pre_destroy = [
+    ["docker", "compose", "down"]
+]
+"#;
+        let cfg1 = Config::load_from_str(toml1).expect("Parse array of argv arrays");
+        let repo1 = cfg1.repos.get("web").unwrap();
+        assert_eq!(
+            repo1.setup,
+            vec![
+                vec!["npm".to_string(), "install".to_string()],
+                vec!["npm".to_string(), "run".to_string(), "codegen".to_string()]
+            ]
+        );
+        let tpl1 = cfg1.get_template("demo").unwrap();
+        assert_eq!(
+            tpl1.post_create,
+            vec![vec![
+                "docker".to_string(),
+                "compose".to_string(),
+                "up".to_string(),
+                "-d".to_string()
+            ]]
+        );
+        assert_eq!(
+            tpl1.pre_destroy,
+            vec![vec![
+                "docker".to_string(),
+                "compose".to_string(),
+                "down".to_string()
+            ]]
+        );
+
+        // 2. Single command argv array: setup = ["cargo", "check"]
+        let toml2 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[repos.backend]
+setup = ["cargo", "check", "--workspace"]
+
+[templates.demo]
+repos = ["backend"]
+post_create = ["echo", "ready"]
+"#;
+        let cfg2 = Config::load_from_str(toml2).expect("Parse single argv array");
+        let repo2 = cfg2.repos.get("backend").unwrap();
+        assert_eq!(
+            repo2.setup,
+            vec![vec![
+                "cargo".to_string(),
+                "check".to_string(),
+                "--workspace".to_string()
+            ]]
+        );
+        let tpl2 = cfg2.get_template("demo").unwrap();
+        assert_eq!(
+            tpl2.post_create,
+            vec![vec!["echo".to_string(), "ready".to_string()]]
+        );
+
+        // 3. List of command strings: setup = ["npm install", "npm run codegen"]
+        let toml3 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[repos.web]
+setup = ["npm install", "npm run codegen"]
+
+[templates.demo]
+repos = ["web"]
+post_create = ["docker compose up -d", "cargo check"]
+"#;
+        let cfg3 = Config::load_from_str(toml3).expect("Parse list of command strings");
+        let repo3 = cfg3.repos.get("web").unwrap();
+        assert_eq!(
+            repo3.setup,
+            vec![
+                vec!["npm".to_string(), "install".to_string()],
+                vec!["npm".to_string(), "run".to_string(), "codegen".to_string()]
+            ]
+        );
+        let tpl3 = cfg3.get_template("demo").unwrap();
+        assert_eq!(
+            tpl3.post_create,
+            vec![
+                vec![
+                    "docker".to_string(),
+                    "compose".to_string(),
+                    "up".to_string(),
+                    "-d".to_string()
+                ],
+                vec!["cargo".to_string(), "check".to_string()]
+            ]
+        );
+
+        // 4. Single command string: setup = "cargo check"
+        let toml4 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[repos.backend]
+setup = "cargo check --release"
+"#;
+        let cfg4 = Config::load_from_str(toml4).expect("Parse single string");
+        let repo4 = cfg4.repos.get("backend").unwrap();
+        assert_eq!(
+            repo4.setup,
+            vec![vec![
+                "cargo".to_string(),
+                "check".to_string(),
+                "--release".to_string()
+            ]]
+        );
+
+        // 5. Empty array and omitted fields
+        let toml5 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[repos.empty_setup]
+setup = []
+
+[repos.no_setup]
+
+[templates.demo]
+repos = ["empty_setup", "no_setup"]
+"#;
+        let cfg5 = Config::load_from_str(toml5).expect("Parse empty and omitted");
+        assert_eq!(
+            cfg5.repos.get("empty_setup").unwrap().setup,
+            Vec::<Vec<String>>::new()
+        );
+        assert_eq!(
+            cfg5.repos.get("no_setup").unwrap().setup,
+            Vec::<Vec<String>>::new()
+        );
+        let tpl5 = cfg5.get_template("demo").unwrap();
+        assert_eq!(tpl5.post_create, Vec::<Vec<String>>::new());
+        assert_eq!(tpl5.pre_destroy, Vec::<Vec<String>>::new());
+    }
+
+    #[test]
+    fn test_central_repos_registry_resolution() {
+        let toml = r#"
+default_agent = "claude"
+repos_dir = "/tmp/botai_repos"
+
+[repos.web-frontend]
+url = "https://github.com/example/ecommerce-web.git"
+setup = [
+    ["npm", "install"],
+    ["npm", "run", "codegen"]
+]
+env = { NODE_ENV = "test" }
+
+[repos.local-service]
+url = "/home/user/code/local-service"
+setup = ["cargo check"]
+env = { RUST_BACKTRACE = "1" }
+
+[repos.implicit-cached]
+setup = ["make build"]
+
+[templates.hybrid]
+repos = [
+    "web-frontend",
+    "local-service",
+    "implicit-cached",
+    "https://github.com/example/unregistered-api.git",
+    "relative-unregistered",
+    "/absolute/unregistered"
+]
+"#;
+        let config = Config::load_from_str(toml).expect("Parse hybrid config");
+        assert_eq!(config.repos.len(), 3);
+
+        let resolved = config
+            .resolve_template_repos("hybrid")
+            .expect("Resolve template repos");
+        assert_eq!(resolved.len(), 6);
+
+        // 1. Registered repo with Git URL
+        let r0 = &resolved[0];
+        assert_eq!(r0.name, "web-frontend");
+        assert_eq!(
+            r0.clone_url,
+            Some("https://github.com/example/ecommerce-web.git".to_string())
+        );
+        assert_eq!(
+            r0.local_path,
+            PathBuf::from("/tmp/botai_repos/web-frontend")
+        );
+        assert_eq!(
+            r0.setup_hooks,
+            vec![
+                vec!["npm".to_string(), "install".to_string()],
+                vec!["npm".to_string(), "run".to_string(), "codegen".to_string()]
+            ]
+        );
+        assert_eq!(r0.env.get("NODE_ENV"), Some(&"test".to_string()));
+
+        // 2. Registered repo with local path URL
+        let r1 = &resolved[1];
+        assert_eq!(r1.name, "local-service");
+        assert_eq!(r1.clone_url, None);
+        assert_eq!(
+            r1.local_path,
+            PathBuf::from("/home/user/code/local-service")
+        );
+        assert_eq!(
+            r1.setup_hooks,
+            vec![vec!["cargo".to_string(), "check".to_string()]]
+        );
+        assert_eq!(r1.env.get("RUST_BACKTRACE"), Some(&"1".to_string()));
+
+        // 3. Registered repo with None URL (defaults to repos_dir/key)
+        let r2 = &resolved[2];
+        assert_eq!(r2.name, "implicit-cached");
+        assert_eq!(r2.clone_url, None);
+        assert_eq!(
+            r2.local_path,
+            PathBuf::from("/tmp/botai_repos/implicit-cached")
+        );
+        assert_eq!(
+            r2.setup_hooks,
+            vec![vec!["make".to_string(), "build".to_string()]]
+        );
+
+        // 4. Unregistered Git URL
+        let r3 = &resolved[3];
+        assert_eq!(r3.name, "unregistered-api");
+        assert_eq!(
+            r3.clone_url,
+            Some("https://github.com/example/unregistered-api.git".to_string())
+        );
+        assert_eq!(
+            r3.local_path,
+            PathBuf::from("/tmp/botai_repos/unregistered-api")
+        );
+        assert!(r3.setup_hooks.is_empty());
+        assert!(r3.env.is_empty());
+
+        // 5. Unregistered relative name
+        let r4 = &resolved[4];
+        assert_eq!(r4.name, "relative-unregistered");
+        assert_eq!(r4.clone_url, None);
+        assert_eq!(
+            r4.local_path,
+            PathBuf::from("/tmp/botai_repos/relative-unregistered")
+        );
+        assert!(r4.setup_hooks.is_empty());
+
+        // 6. Unregistered absolute path
+        let r5 = &resolved[5];
+        assert_eq!(r5.name, "unregistered");
+        assert_eq!(r5.clone_url, None);
+        assert_eq!(r5.local_path, PathBuf::from("/absolute/unregistered"));
+        assert!(r5.setup_hooks.is_empty());
     }
 }

@@ -81,6 +81,7 @@ impl DashboardState {
                     default_agent: "claude".to_string(),
                     theme: "tokyo-night".to_string(),
                     repos_dir: PathBuf::from(".botai_repos"),
+                    repos: HashMap::new(),
                     agents: HashMap::new(),
                     templates: HashMap::new(),
                 });
@@ -95,6 +96,8 @@ impl DashboardState {
                     agents_md_append: None,
                     repos: Vec::new(),
                     env: HashMap::new(),
+                    post_create: Vec::new(),
+                    pre_destroy: Vec::new(),
                 });
         }
 

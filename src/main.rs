@@ -8,7 +8,6 @@ use std::path::Path;
 
 use botai::cli::{Cli, Commands};
 use botai::config::Config;
-use botai::git::{has_uncommitted_changes, remove_worktree_auto};
 use botai::project::{ProjectBuilder, ProjectSetupEvent};
 use botai::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen};
 use botai::tui::{DashboardState, TuiApp};
@@ -59,7 +58,7 @@ fn main() -> Result<()> {
         Some(Commands::Sync { template }) => cmd_sync(&config, template.as_deref()),
         Some(Commands::Attach { project }) => cmd_attach(&config, &project),
         Some(Commands::List) => cmd_list(&config),
-        Some(Commands::Destroy { project, force }) => cmd_destroy(&project, force),
+        Some(Commands::Destroy { project, force }) => cmd_destroy(Some(&config), &project, force),
     }
 }
 
@@ -374,42 +373,9 @@ fn cmd_list(config: &Config) -> Result<()> {
 }
 
 /// `botai destroy <project> [--force]`
-fn cmd_destroy(project_name: &str, force: bool) -> Result<()> {
-    let cwd = env::current_dir()?;
-    let project_dir = cwd.join(project_name);
-
-    if !project_dir.exists() {
-        bail!("Project directory {project_dir:?} does not exist.");
-    }
-
-    // Inspect child directories for git worktrees
-    if let Ok(entries) = fs::read_dir(&project_dir) {
-        let child_paths: Vec<_> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir() && p.join(".git").exists())
-            .collect();
-
-        if !force {
-            for child_path in &child_paths {
-                if has_uncommitted_changes(child_path)? {
-                    bail!(
-                        "Worktree {child_path:?} has uncommitted changes. Use --force to destroy anyway."
-                    );
-                }
-            }
-        }
-
-        for child_path in &child_paths {
-            let _ = remove_worktree_auto(child_path, force);
-        }
-    }
-
-    if project_dir.exists() {
-        fs::remove_dir_all(&project_dir)
-            .with_context(|| format!("Failed to remove project directory {project_dir:?}"))?;
-    }
-
+fn cmd_destroy(config: Option<&Config>, project_name: &str, force: bool) -> Result<()> {
+    let cwd = env::current_dir().context("Failed to get current working directory")?;
+    botai::project::destroy_project_workspace(config, &cwd, project_name, force)?;
     println!("Successfully destroyed project '{project_name}' and cleaned up worktrees.");
     Ok(())
 }
