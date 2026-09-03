@@ -14,9 +14,6 @@ A cross-platform multi-repo workspace orchestrator and session multiplexer for A
 - **Agent Instance & Monitoring**: Single AI agent CLI process per project root with desktop notifications and real-time status badges in the TUI (Thinking, Waiting for Input, Done).
 - **TUI Multiplexer**: Native Rust-powered terminal multiplexing (`portable-pty`, `ratatui`, `crossterm`) with `Ctrl+Space` leader key architecture (`Ctrl+Space` -> `1..9`, `c`/`n`, `n`/`p`, `w`, `d`, `q`).
 
-## Build Configuration
-- All build artifacts and temporary files must be directed to `/tmp/botai-build` (configured in `.cargo/config.toml` via `build.target-dir = "/tmp/botai-build"`).
-
 ## Architecture & Requirements
 See [REQS.md](REQS.md) for full technical requirements, configuration schemas, CLI specifications, and git worktree lifecycle details.
 
