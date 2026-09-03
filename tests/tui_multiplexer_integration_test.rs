@@ -1031,3 +1031,144 @@ fn test_integration_mouse_coordinate_translation_to_child_viewport() {
         SessionStatus::Busy
     );
 }
+
+#[test]
+fn test_integration_escape_key_forwarding_and_leader_cancellation() {
+    use botai::tui::app::TuiApp;
+    use std::time::Duration;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "more"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "cat"]);
+
+    let mut registry = SessionRegistry::new();
+    let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty = PtySession::spawn(config).unwrap();
+    let vt = VtScreen::new(80, 24);
+    let mut ps = ProjectSession::new("esc-test", "ws", "claude");
+    ps.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps, pty, vt).unwrap();
+
+    let mut app = TuiApp::new(registry);
+
+    // 1. Standalone 0x1b fed into handle_raw_bytes does NOT get trapped in pending_raw_input
+    app.handle_raw_bytes(b"\x1b");
+    assert!(
+        app.pending_raw_input.is_empty(),
+        "0x1b must not be stored in pending_raw_input"
+    );
+    assert!(
+        app.raw_decoder.has_pending(),
+        "0x1b must be held in raw_decoder pending escape disambiguation"
+    );
+
+    // Before flush, status remains WaitingForInput
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::WaitingForInput
+    );
+
+    // 2. flush_pending_input flushes \x1b to active PTY
+    app.flush_pending_input();
+    assert!(!app.raw_decoder.has_pending());
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    #[cfg(not(windows))]
+    {
+        std::thread::sleep(Duration::from_millis(100));
+        let echoed = app
+            .registry
+            .active_session_mut()
+            .unwrap()
+            .pty_mut()
+            .read_nonblocking()
+            .unwrap_or_default();
+        let echoed_str = String::from_utf8_lossy(&echoed);
+        assert!(
+            echoed_str.contains('\x1b') || echoed_str.contains("^["),
+            "Expected echoed PTY bytes to contain '\\x1b' or '^[', got: {:?}",
+            echoed_str
+        );
+    }
+
+    // 3. Standalone 0x1b fed when leader_active is true followed by flush_pending_input() cancels leader mode
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+
+    // Activate leader mode
+    app.handle_raw_bytes(&[0x00]);
+    assert!(app.leader_active);
+    assert!(app.raw_decoder.is_leader_active());
+
+    // Send 0x1b (Esc)
+    app.handle_raw_bytes(b"\x1b");
+    assert!(app.pending_raw_input.is_empty());
+    assert!(app.raw_decoder.has_pending());
+    assert!(app.leader_active);
+
+    // Flush cancels leader mode and resets leader_active to false
+    app.flush_pending_input();
+    assert!(!app.leader_active);
+    assert!(!app.raw_decoder.is_leader_active());
+    assert!(!app.raw_decoder.has_pending());
+    // Active session status should still be WaitingForInput (escape was consumed to cancel leader, not forwarded to PTY)
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::WaitingForInput
+    );
+}
+
+#[test]
+fn test_integration_escape_timeout_in_run_loop_with_receiver() {
+    use botai::tui::app::TuiApp;
+    use ratatui::backend::TestBackend;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+    let mut registry = SessionRegistry::new();
+    let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty = PtySession::spawn(config).unwrap();
+    let vt = VtScreen::new(80, 24);
+    let mut ps = ProjectSession::new("loop-esc", "ws", "claude");
+    ps.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps, pty, vt).unwrap();
+
+    let mut app = TuiApp::new(registry);
+    app.tick_rate = Duration::from_millis(20);
+
+    let (stdin_tx, stdin_rx) = mpsc::channel();
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Send standalone 0x1b into channel
+    stdin_tx.send(vec![0x1b]).unwrap();
+
+    // Spawn a thread to send Ctrl+Space + q after timeout has elapsed, quitting the loop
+    let tx_clone = stdin_tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(60));
+        let _ = tx_clone.send(vec![0x00, b'q']);
+    });
+
+    app.run_loop_with_receiver(&mut terminal, &stdin_rx).unwrap();
+
+    // After the loop has processed the timeout, the escape was flushed to the active session PTY
+    // making status Busy before the subsequent quit
+    assert!(app.should_quit);
+    assert!(!app.raw_decoder.has_pending());
+    assert!(app.pending_raw_input.is_empty());
+}

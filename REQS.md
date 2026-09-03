@@ -250,6 +250,15 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Handles progressive Kitty sub-parameters (`\x1b[<codepoint>:<shifted>;<modifiers>:<event_type>u`) and masks out lock keys (Caps Lock `64`, Num Lock `128`) to accurately detect modifiers under all keyboard states.
     - Buffers split escape sequences across chunk boundaries (including single `\x1b` byte splits) in `RawLeaderDecoder` symmetrically across inactive and active leader modes to prevent raw escape leakages.
     - Stream-demuxes mixed input buffers containing interleaved SGR mouse sequences (`\x1b[<...M/m`) and keystrokes, buffering incomplete cross-chunk SGR mouse prefixes without dropping trailing keys or leaking coordinates.
+    - **SGR Mouse Prefix Disambiguation**:
+      - Incomplete SGR mouse sequence detection (`is_incomplete_sgr_mouse`) strictly requires a `\x1b[<` prefix. Standalone `\x1b` or `\x1b[` bytes are never classified as incomplete SGR mouse sequences and are never trapped in `pending_raw_input`.
+    - **Standalone Escape Key Handling & Timeout Flushing (`flush_pending_input`)**:
+      - When a standalone `\x1b` byte arrives in raw stdin mode (e.g. from pressing `Esc` in terminals like Terminal.app on macOS), `RawLeaderDecoder` temporarily buffers it in `pending_escape` to disambiguate whether it begins a Kitty protocol `Ctrl+Space` sequence (`\x1b[32;5u`).
+      - On stdin timeout in `TuiApp::run_loop_with_receiver` (`stdin_rx.recv_timeout` returns `Err(_)`), `TuiApp::flush_pending_input()` is invoked:
+        - Flushes and drains any lingering `pending_raw_input` via `process_non_mouse_bytes`.
+        - Invokes `RawLeaderDecoder::flush()`:
+          - If leader mode is inactive: Dispatches `RawAction::Passthrough(vec![0x1b])`, writing the Escape byte directly to the active session PTY to provide immediate and reliable `Esc` key response in Vim, nano, shells, and CLI tools.
+          - If leader mode is active: Dispatches `RawAction::CancelLeader`, cleanly exiting leader mode and resetting `leader_active` to `false`.
   - **Modified Enter, Shift+Enter, and Newlines**:
     - Unmodified Enter (`KeyCode::Enter` with no modifiers): `\r` (`0x0D`, CR).
     - Unmodified Newline (`KeyCode::Char('\n')` with no modifiers): `\n` (`0x0A`, LF / Ctrl+J).

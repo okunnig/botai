@@ -64,10 +64,17 @@ impl RawLeaderDecoder {
         self.leader_active
     }
 
+    /// Returns whether there are pending incomplete escape bytes stored.
+    pub fn has_pending(&self) -> bool {
+        !self.pending_escape.is_empty()
+    }
+
     /// Explicitly sets the leader mode active state.
     pub fn set_leader_active(&mut self, active: bool) {
-        self.leader_active = active;
-        self.pending_escape.clear();
+        if self.leader_active != active {
+            self.leader_active = active;
+            self.pending_escape.clear();
+        }
     }
 
     /// Decodes a chunk of raw input bytes into a sequence of `RawAction`s.
@@ -358,29 +365,24 @@ pub fn parse_sgr_mouse(bytes: &[u8]) -> Option<(usize, MouseEvent)> {
 }
 
 /// Returns whether `bytes` is a valid incomplete prefix of an SGR mouse sequence.
+/// A valid incomplete prefix must strictly start with `\x1b[<`; a single `\x1b` or `\x1b[`
+/// is not treated as an SGR mouse sequence.
 pub fn is_incomplete_sgr_mouse(bytes: &[u8]) -> bool {
-    if bytes.is_empty() || bytes.len() > 32 {
+    if bytes.len() < 3 || bytes.len() > 32 || !bytes.starts_with(b"\x1b[<") {
         return false;
     }
-    match bytes.len() {
-        1 => bytes == b"\x1b",
-        2 => bytes == b"\x1b[",
-        3 => bytes == b"\x1b[<",
-        _ => {
-            if !bytes.starts_with(b"\x1b[<") {
-                return false;
-            }
-            let rest = &bytes[3..];
-            if rest.contains(&b'M') || rest.contains(&b'm') {
-                return false;
-            }
-            let semicolon_count = rest.iter().filter(|&&b| b == b';').count();
-            if semicolon_count > 2 {
-                return false;
-            }
-            rest.iter().all(|&b| b.is_ascii_digit() || b == b';')
-        }
+    if bytes.len() == 3 {
+        return true;
     }
+    let rest = &bytes[3..];
+    if rest.contains(&b'M') || rest.contains(&b'm') {
+        return false;
+    }
+    let semicolon_count = rest.iter().filter(|&&b| b == b';').count();
+    if semicolon_count > 2 {
+        return false;
+    }
+    rest.iter().all(|&b| b.is_ascii_digit() || b == b';')
 }
 
 /// Decodes raw input bytes into a sequence of crossterm `Event`s (Key, Paste, Mouse)
@@ -1497,16 +1499,39 @@ mod tests {
     }
 
     #[test]
+    fn test_raw_leader_decoder_has_pending() {
+        let mut decoder = RawLeaderDecoder::new();
+        assert!(!decoder.has_pending());
+
+        // Prefix of Kitty Ctrl+Space (\x1b[32;5u) leaves pending escape
+        let actions = decoder.decode(b"\x1b");
+        assert_eq!(actions, vec![]);
+        assert!(decoder.has_pending());
+
+        // Flush clears pending escape
+        let flushed = decoder.flush();
+        assert_eq!(flushed, vec![RawAction::Passthrough(vec![0x1b])]);
+        assert!(!decoder.has_pending());
+
+        // Feeding complete non-escape key does not leave pending
+        let actions = decoder.decode(b"hello");
+        assert_eq!(actions, vec![RawAction::Passthrough(b"hello".to_vec())]);
+        assert!(!decoder.has_pending());
+    }
+
+    #[test]
     fn test_is_incomplete_sgr_mouse() {
-        // Valid incomplete prefixes
-        assert!(is_incomplete_sgr_mouse(b"\x1b"));
-        assert!(is_incomplete_sgr_mouse(b"\x1b["));
+        // Valid incomplete prefixes (must start with \x1b[<)
         assert!(is_incomplete_sgr_mouse(b"\x1b[<"));
         assert!(is_incomplete_sgr_mouse(b"\x1b[<64"));
         assert!(is_incomplete_sgr_mouse(b"\x1b[<64;"));
         assert!(is_incomplete_sgr_mouse(b"\x1b[<64;10"));
         assert!(is_incomplete_sgr_mouse(b"\x1b[<64;10;"));
         assert!(is_incomplete_sgr_mouse(b"\x1b[<64;10;20"));
+
+        // Standalone escape and CSI prefixes are NOT incomplete SGR mouse sequences
+        assert!(!is_incomplete_sgr_mouse(b"\x1b"));
+        assert!(!is_incomplete_sgr_mouse(b"\x1b["));
 
         // Complete SGR mouse sequences (not incomplete)
         assert!(!is_incomplete_sgr_mouse(b"\x1b[<64;10;20M"));

@@ -217,7 +217,7 @@ impl TuiApp {
         terminal: &mut Terminal<B>,
     ) -> io::Result<()>
     where
-        io::Error: From<B::Error>,
+        B::Error: std::fmt::Display,
     {
         let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
@@ -247,12 +247,14 @@ impl TuiApp {
         stdin_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     ) -> io::Result<()>
     where
-        io::Error: From<B::Error>,
+        B::Error: std::fmt::Display,
     {
         let mut last_tick = Instant::now();
 
         // Query initial terminal viewport size and synchronize sessions
-        let initial_size = terminal.size()?;
+        let initial_size = terminal
+            .size()
+            .map_err(|e| io::Error::other(e.to_string()))?;
         let (_, initial_term_area) = compute_layout(ratatui::layout::Rect::new(
             0,
             0,
@@ -264,7 +266,9 @@ impl TuiApp {
 
         while !self.should_quit {
             // Synchronize viewport dimensions before processing PTY streams or drawing
-            let current_size = terminal.size()?;
+            let current_size = terminal
+                .size()
+                .map_err(|e| io::Error::other(e.to_string()))?;
             let (_, term_area) = compute_layout(ratatui::layout::Rect::new(
                 0,
                 0,
@@ -349,16 +353,22 @@ impl TuiApp {
                 if let Some(setup_modal) = &self.setup_modal {
                     render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
                 }
-            })?;
+            })
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
             // 4. Handle raw input bytes with timeout up to tick_rate
             let timeout = self.tick_rate.saturating_sub(last_tick.elapsed());
-            if let Ok(bytes) = stdin_rx.recv_timeout(timeout) {
-                let mut all_bytes = bytes;
-                while let Ok(more) = stdin_rx.try_recv() {
-                    all_bytes.extend(more);
+            match stdin_rx.recv_timeout(timeout) {
+                Ok(bytes) => {
+                    let mut all_bytes = bytes;
+                    while let Ok(more) = stdin_rx.try_recv() {
+                        all_bytes.extend(more);
+                    }
+                    self.handle_input_bytes(&all_bytes);
                 }
-                self.handle_input_bytes(&all_bytes);
+                Err(_) => {
+                    self.flush_pending_input();
+                }
             }
 
             if last_tick.elapsed() >= self.tick_rate {
@@ -1032,6 +1042,18 @@ impl TuiApp {
         // Process trailing non-mouse key bytes
         if seg_start < combined.len() {
             self.process_non_mouse_bytes(&combined[seg_start..]);
+        }
+    }
+
+    /// Flushes pending incomplete raw input bytes and raw escape sequences when timeout expires.
+    pub fn flush_pending_input(&mut self) {
+        if !self.pending_raw_input.is_empty() {
+            let pending = std::mem::take(&mut self.pending_raw_input);
+            self.process_non_mouse_bytes(&pending);
+        }
+        let actions = self.raw_decoder.flush();
+        for action in actions {
+            self.handle_raw_action(action);
         }
     }
 
@@ -2648,6 +2670,111 @@ repos = []
 
         // Forward raw SGR bytes to PTY master and update activity
         app.handle_raw_bytes(b"\x1b[<64;10;5M");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+    }
+
+    #[test]
+    fn test_tui_app_standalone_escape_flushed_to_pty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let mut ps = ProjectSession::new("test-escape", "ws", "claude");
+        ps.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::WaitingForInput
+        );
+
+        // 1. Feeding 0x1b does NOT get trapped in pending_raw_input
+        app.handle_raw_bytes(b"\x1b");
+        assert!(
+            app.pending_raw_input.is_empty(),
+            "0x1b must not be trapped in pending_raw_input"
+        );
+        assert!(
+            app.raw_decoder.has_pending(),
+            "0x1b should be temporarily held in raw_decoder pending Kitty Ctrl+Space disambiguation"
+        );
+
+        // Status remains WaitingForInput before flush
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::WaitingForInput
+        );
+
+        // 2. Calling flush_pending_input flushes the escape byte to active PTY and sets status to Busy
+        app.flush_pending_input();
+        assert!(!app.raw_decoder.has_pending());
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+    }
+
+    #[test]
+    fn test_tui_app_standalone_escape_cancels_leader_on_flush() {
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry);
+
+        // Enter leader mode
+        app.handle_raw_bytes(&[0x00]);
+        assert!(app.leader_active);
+        assert!(app.raw_decoder.is_leader_active());
+
+        // Send 0x1b (Esc) while leader is active
+        app.handle_raw_bytes(b"\x1b");
+        assert!(
+            app.pending_raw_input.is_empty(),
+            "0x1b must not be trapped in pending_raw_input"
+        );
+        assert!(app.raw_decoder.has_pending());
+        assert!(app.leader_active);
+
+        // Calling flush_pending_input cancels leader mode and resets leader_active to false
+        app.flush_pending_input();
+        assert!(!app.leader_active);
+        assert!(!app.raw_decoder.is_leader_active());
+        assert!(!app.raw_decoder.has_pending());
+    }
+
+    #[test]
+    fn test_tui_app_pending_raw_input_flushed_on_timeout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let mut ps = ProjectSession::new("test-flush-raw", "ws", "claude");
+        ps.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        // Feed incomplete SGR mouse sequence
+        app.handle_raw_bytes(b"\x1b[<64;10;");
+        assert_eq!(app.pending_raw_input, b"\x1b[<64;10;");
+
+        // Timeout flush drains pending_raw_input and passes it through
+        app.flush_pending_input();
+        assert!(app.pending_raw_input.is_empty());
         assert_eq!(
             app.registry.active_session().unwrap().status(),
             SessionStatus::Busy
