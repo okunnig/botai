@@ -833,3 +833,201 @@ fn test_integration_split_sgr_mouse_and_keystrokes_across_chunks() {
             || app.registry.active_session().unwrap().status() == SessionStatus::Busy
     );
 }
+
+#[test]
+fn test_integration_mouse_coordinate_translation_to_child_viewport() {
+    use botai::tui::app::TuiApp;
+    use botai::tui::events::{mouse_event_to_sgr_bytes, translate_mouse_event};
+    use botai::tui::ui::STATUS_BAR_HEIGHT;
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use std::time::Duration;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "more"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "cat"]);
+
+    let mut registry = SessionRegistry::new();
+    let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty = PtySession::spawn(config).unwrap();
+    let mut vt = VtScreen::new(80, 24);
+    vt.process(b"\x1b[?1000h"); // Enable mouse tracking
+    let mut ps = ProjectSession::new("mouse-app", "ws", "claude");
+    ps.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps, pty, vt).unwrap();
+
+    let mut app = TuiApp::new(registry);
+    assert_eq!(STATUS_BAR_HEIGHT, 1);
+
+    // 1. Mouse event on row 0 (status bar) is ignored and not forwarded to child PTY
+    let click_row_0 = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 9,
+        row: 0,
+        modifiers: KeyModifiers::empty(),
+    };
+    assert_eq!(translate_mouse_event(click_row_0, STATUS_BAR_HEIGHT, 24), None);
+    app.handle_mouse_event(click_row_0);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::WaitingForInput
+    );
+
+    // 2. Mouse event on row 1 is translated to child row 0 and generates SGR row 1 (\x1b[<0;10;1M)
+    let click_row_1 = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 9,
+        row: 1,
+        modifiers: KeyModifiers::empty(),
+    };
+    let translated_1 = translate_mouse_event(click_row_1, STATUS_BAR_HEIGHT, 24).unwrap();
+    assert_eq!(translated_1.row, 0);
+    assert_eq!(translated_1.column, 9);
+    assert_eq!(mouse_event_to_sgr_bytes(&translated_1), b"\x1b[<0;10;1M");
+
+    app.handle_mouse_event(click_row_1);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    #[cfg(not(windows))]
+    {
+        // On Unix, cat echoes back the bytes forwarded to PTY
+        std::thread::sleep(Duration::from_millis(100));
+        let echoed = app.registry.active_session_mut().unwrap().pty_mut().read_nonblocking().unwrap_or_default();
+        let echoed_str = String::from_utf8_lossy(&echoed);
+        assert!(
+            echoed_str.contains("\x1b[<0;10;1M") || echoed_str.contains("^[[<0;10;1M"),
+            "Expected echoed PTY bytes to contain '\\x1b[<0;10;1M' or '^[[<0;10;1M', got: {:?}",
+            echoed_str
+        );
+    }
+
+    // 3. Mouse event on row N (e.g. row 15) is translated to child row N-1 (row 14) and generates SGR row N (\x1b[<0;10;15M)
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    let click_row_15 = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 9,
+        row: 15,
+        modifiers: KeyModifiers::empty(),
+    };
+    let translated_15 = translate_mouse_event(click_row_15, STATUS_BAR_HEIGHT, 24).unwrap();
+    assert_eq!(translated_15.row, 14);
+    assert_eq!(translated_15.column, 9);
+    assert_eq!(mouse_event_to_sgr_bytes(&translated_15), b"\x1b[<0;10;15M");
+
+    app.handle_mouse_event(click_row_15);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    #[cfg(not(windows))]
+    {
+        std::thread::sleep(Duration::from_millis(100));
+        let echoed = app.registry.active_session_mut().unwrap().pty_mut().read_nonblocking().unwrap_or_default();
+        let echoed_str = String::from_utf8_lossy(&echoed);
+        assert!(
+            echoed_str.contains("\x1b[<0;10;15M") || echoed_str.contains("^[[<0;10;15M"),
+            "Expected echoed PTY bytes to contain '\\x1b[<0;10;15M' or '^[[<0;10;15M', got: {:?}",
+            echoed_str
+        );
+    }
+
+    // 4. Drag and Up events on row N are translated accordingly
+    // Drag on host row 15 (child row 14) -> \x1b[<32;10;15M
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    let drag_row_15 = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 9,
+        row: 15,
+        modifiers: KeyModifiers::empty(),
+    };
+    let translated_drag = translate_mouse_event(drag_row_15, STATUS_BAR_HEIGHT, 24).unwrap();
+    assert_eq!(translated_drag.row, 14);
+    assert_eq!(translated_drag.kind, MouseEventKind::Drag(MouseButton::Left));
+    assert_eq!(mouse_event_to_sgr_bytes(&translated_drag), b"\x1b[<32;10;15M");
+
+    app.handle_mouse_event(drag_row_15);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    #[cfg(not(windows))]
+    {
+        std::thread::sleep(Duration::from_millis(100));
+        let echoed = app.registry.active_session_mut().unwrap().pty_mut().read_nonblocking().unwrap_or_default();
+        let echoed_str = String::from_utf8_lossy(&echoed);
+        assert!(
+            echoed_str.contains("\x1b[<32;10;15M") || echoed_str.contains("^[[<32;10;15M"),
+            "Expected echoed PTY bytes to contain '\\x1b[<32;10;15M' or '^[[<32;10;15M', got: {:?}",
+            echoed_str
+        );
+    }
+
+    // Up on host row 15 (child row 14) -> \x1b[<0;10;15m
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    let up_row_15 = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 9,
+        row: 15,
+        modifiers: KeyModifiers::empty(),
+    };
+    let translated_up = translate_mouse_event(up_row_15, STATUS_BAR_HEIGHT, 24).unwrap();
+    assert_eq!(translated_up.row, 14);
+    assert_eq!(translated_up.kind, MouseEventKind::Up(MouseButton::Left));
+    assert_eq!(mouse_event_to_sgr_bytes(&translated_up), b"\x1b[<0;10;15m");
+
+    app.handle_mouse_event(up_row_15);
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    #[cfg(not(windows))]
+    {
+        std::thread::sleep(Duration::from_millis(100));
+        let echoed = app.registry.active_session_mut().unwrap().pty_mut().read_nonblocking().unwrap_or_default();
+        let echoed_str = String::from_utf8_lossy(&echoed);
+        assert!(
+            echoed_str.contains("\x1b[<0;10;15m") || echoed_str.contains("^[[<0;10;15m"),
+            "Expected echoed PTY bytes to contain '\\x1b[<0;10;15m' or '^[[<0;10;15m', got: {:?}",
+            echoed_str
+        );
+    }
+
+    // 5. Raw SGR bytes via handle_raw_bytes:
+    // Host row 1 (1-based SGR \x1b[<0;10;1M -> 0-based host row 0 -> status bar) is rejected
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\x1b[<0;10;1M");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::WaitingForInput
+    );
+
+    // Host row 2 (1-based SGR \x1b[<0;10;2M -> 0-based host row 1 -> child row 0) is accepted
+    app.handle_raw_bytes(b"\x1b[<0;10;2M");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+}

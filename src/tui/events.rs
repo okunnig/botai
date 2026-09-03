@@ -790,6 +790,32 @@ pub fn mouse_event_to_sgr_bytes(event: &MouseEvent) -> Vec<u8> {
     .into_bytes()
 }
 
+/// Translates host terminal mouse coordinates into child terminal viewport coordinates.
+///
+/// If `mouse.row < status_bar_height`, the mouse event occurred within the status bar area
+/// and is rejected (`None`).
+/// If the translated row exceeds or equals `vt_height`, the event is out of bounds and rejected (`None`).
+/// Otherwise, returns `Some(MouseEvent)` with `row` translated to child viewport space (`row - status_bar_height`).
+pub fn translate_mouse_event(
+    mouse: crossterm::event::MouseEvent,
+    status_bar_height: u16,
+    vt_height: u16,
+) -> Option<crossterm::event::MouseEvent> {
+    if mouse.row < status_bar_height {
+        return None;
+    }
+    let child_row = mouse.row - status_bar_height;
+    if child_row >= vt_height {
+        return None;
+    }
+    Some(crossterm::event::MouseEvent {
+        kind: mouse.kind,
+        column: mouse.column,
+        row: child_row,
+        modifiers: mouse.modifiers,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1564,5 +1590,125 @@ mod tests {
         assert!(!is_shift_enter(b"\r"));
         assert!(!is_shift_enter(b"\n"));
         assert!(!is_shift_enter(b"\x1b[32;5u")); // Ctrl+Space
+    }
+
+    #[test]
+    fn test_translate_mouse_event_status_bar_row_0_ignored() {
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        };
+        // Status bar height = 1, active VT height = 24
+        assert_eq!(translate_mouse_event(mouse, 1, 24), None);
+    }
+
+    #[test]
+    fn test_translate_mouse_event_row_1_to_row_0_generates_sgr_row_1() {
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        };
+        // Row 1 on host maps to child row 0
+        let translated = translate_mouse_event(mouse, 1, 24).expect("translated");
+        assert_eq!(translated.column, 5);
+        assert_eq!(translated.row, 0);
+        assert_eq!(translated.kind, MouseEventKind::Down(MouseButton::Left));
+
+        // When formatted as SGR bytes, 0-based child row 0 turns into 1-based row 1: \x1b[<0;6;1M
+        let sgr = mouse_event_to_sgr_bytes(&translated);
+        assert_eq!(sgr, b"\x1b[<0;6;1M");
+    }
+
+    #[test]
+    fn test_translate_mouse_event_row_n_to_n_minus_1_generates_sgr_row_n() {
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        // Row 10 on host maps to child row 9
+        let translated = translate_mouse_event(mouse, 1, 24).expect("translated");
+        assert_eq!(translated.column, 15);
+        assert_eq!(translated.row, 9);
+
+        // When formatted as SGR bytes, 0-based child row 9 turns into 1-based row 10: \x1b[<0;16;10M
+        let sgr = mouse_event_to_sgr_bytes(&translated);
+        assert_eq!(sgr, b"\x1b[<0;16;10M");
+
+        // Test with row 23 (host row 24):
+        let mouse_bottom = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 24,
+            modifiers: KeyModifiers::empty(),
+        };
+        let translated_bottom = translate_mouse_event(mouse_bottom, 1, 24).expect("translated bottom");
+        assert_eq!(translated_bottom.row, 23);
+        let sgr_bottom = mouse_event_to_sgr_bytes(&translated_bottom);
+        assert_eq!(sgr_bottom, b"\x1b[<0;1;24M");
+    }
+
+    #[test]
+    fn test_translate_mouse_event_drag_and_up_events() {
+        // Drag event: Left drag on host row 8 with Shift modifier
+        let drag_mouse = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 12,
+            row: 8,
+            modifiers: KeyModifiers::SHIFT,
+        };
+        let translated_drag = translate_mouse_event(drag_mouse, 1, 24).expect("translated drag");
+        assert_eq!(translated_drag.kind, MouseEventKind::Drag(MouseButton::Left));
+        assert_eq!(translated_drag.modifiers, KeyModifiers::SHIFT);
+        assert_eq!(translated_drag.column, 12);
+        assert_eq!(translated_drag.row, 7);
+
+        // SGR code: 32 (drag) + 4 (shift) = 36, col: 13, row: 8, suffix 'M'
+        let sgr_drag = mouse_event_to_sgr_bytes(&translated_drag);
+        assert_eq!(sgr_drag, b"\x1b[<36;13;8M");
+
+        // Up event: Left up on host row 8 with Control modifier
+        let up_mouse = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 12,
+            row: 8,
+            modifiers: KeyModifiers::CONTROL,
+        };
+        let translated_up = translate_mouse_event(up_mouse, 1, 24).expect("translated up");
+        assert_eq!(translated_up.kind, MouseEventKind::Up(MouseButton::Left));
+        assert_eq!(translated_up.modifiers, KeyModifiers::CONTROL);
+        assert_eq!(translated_up.column, 12);
+        assert_eq!(translated_up.row, 7);
+
+        // SGR code: 0 (left) + 16 (control) = 16, col: 13, row: 8, suffix 'm' (release)
+        let sgr_up = mouse_event_to_sgr_bytes(&translated_up);
+        assert_eq!(sgr_up, b"\x1b[<16;13;8m");
+    }
+
+    #[test]
+    fn test_translate_mouse_event_out_of_bounds_ignored() {
+        // Active VT height = 24, status bar height = 1. Valid host rows are 1..=24 (child rows 0..=23).
+        // Row 25 -> child row 24 >= 24 (out of bounds)
+        let mouse_out = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 25,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(translate_mouse_event(mouse_out, 1, 24), None);
+
+        // Row 100 -> out of bounds
+        let mouse_far = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 10,
+            row: 100,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert_eq!(translate_mouse_event(mouse_far, 1, 24), None);
     }
 }

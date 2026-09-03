@@ -30,14 +30,14 @@ use crate::session::{
 };
 use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
 use crate::tui::events::{
-    is_incomplete_sgr_mouse, is_shift_enter, parse_raw_events, parse_sgr_mouse, RawAction,
-    RawLeaderDecoder,
+    is_incomplete_sgr_mouse, is_shift_enter, parse_raw_events, parse_sgr_mouse,
+    translate_mouse_event, RawAction, RawLeaderDecoder,
 };
 use crate::tui::quick_launcher::{render_quick_launcher, QuickLauncherAction, QuickLauncherState};
 use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
 use crate::tui::status_bar::StatusBar;
 use crate::tui::theme::Theme;
-use crate::tui::ui::{compute_layout, TerminalView};
+use crate::tui::ui::{compute_layout, TerminalView, STATUS_BAR_HEIGHT};
 
 /// Main application runner managing the TUI loop, PTY streaming, activity tracking, and rendering.
 pub struct TuiApp {
@@ -1055,7 +1055,11 @@ impl TuiApp {
     }
 
     /// Forwards mouse events to the active session:
-    /// - If child process enabled mouse tracking (e.g. SGR mode in htop/vim), sends SGR escape sequences.
+    /// - If child process enabled mouse tracking (e.g. SGR mode in htop/vim/claude):
+    ///   - Ignores clicks on the status bar (`row < STATUS_BAR_HEIGHT`).
+    ///   - Translates host terminal coordinates to child viewport coordinates (`row - STATUS_BAR_HEIGHT`).
+    ///   - Checks bounds against the active VT height (`child_row < vt.rows()`).
+    ///   - Formats translated event as standard SGR escape sequences and writes to PTY.
     /// - If child process did not enable mouse tracking (e.g. agy, claude, shell), scrolls the VtScreen scrollback buffer so the user can review past output.
     pub fn handle_mouse_event(&mut self, mouse: crossterm::event::MouseEvent) {
         if self.leader_active {
@@ -1063,10 +1067,14 @@ impl TuiApp {
         }
         if let Some(active) = self.registry.active_session_mut() {
             if active.vt().is_mouse_mode_enabled() {
-                let bytes = crate::tui::events::mouse_event_to_sgr_bytes(&mouse);
-                if !bytes.is_empty() && active.pty_mut().write_all(&bytes).is_ok() {
-                    let new_status = active.tracker.record_activity();
-                    active.project_session.set_status(new_status);
+                if let Some(child_mouse) =
+                    translate_mouse_event(mouse, STATUS_BAR_HEIGHT, active.vt().rows())
+                {
+                    let bytes = crate::tui::events::mouse_event_to_sgr_bytes(&child_mouse);
+                    if !bytes.is_empty() && active.pty_mut().write_all(&bytes).is_ok() {
+                        let new_status = active.tracker.record_activity();
+                        active.project_session.set_status(new_status);
+                    }
                 }
             } else {
                 match mouse.kind {
@@ -2046,6 +2054,132 @@ repos = []
         };
         app.handle_mouse_event(click);
 
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn test_tui_app_handle_mouse_event_child_coordinate_translation_and_status_bar_rejection() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let mut vt = VtScreen::new(80, 24);
+        vt.process(b"\x1b[?1000h"); // Enable child mouse mode
+        let mut ps = ProjectSession::new("test-mouse-coords", "ws", "claude");
+        ps.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert!(app
+            .registry
+            .active_session()
+            .unwrap()
+            .vt()
+            .is_mouse_mode_enabled());
+
+        // 1. Mouse event on row 0 (status bar) is ignored and not forwarded
+        let click_row_0 = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 0,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(click_row_0);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::WaitingForInput
+        );
+
+        // 2. Mouse event on row 1 (child row 0) is translated and forwarded
+        let click_row_1 = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 1,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(click_row_1);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 3. Mouse event on row N (e.g. row 15, child row 14) is forwarded
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        let click_row_15 = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 15,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(click_row_15);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 4. Drag event on row N is forwarded
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        let drag_row_10 = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::SHIFT,
+        };
+        app.handle_mouse_event(drag_row_10);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 5. Up event on row N is forwarded
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        let up_row_10 = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(up_row_10);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 6. Out of bounds row (row 25 when VT height is 24) is ignored
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        let out_of_bounds = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 25,
+            modifiers: KeyModifiers::empty(),
+        };
+        app.handle_mouse_event(out_of_bounds);
         assert_eq!(
             app.registry.active_session().unwrap().status(),
             SessionStatus::WaitingForInput

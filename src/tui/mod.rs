@@ -15,7 +15,7 @@ pub use dashboard::{
 };
 pub use events::{
     mouse_event_to_bytes, mouse_event_to_sgr_bytes, mouse_scroll_to_bytes, parse_raw_events,
-    paste_to_bytes, RawAction, RawLeaderDecoder, TuiAction,
+    paste_to_bytes, translate_mouse_event, RawAction, RawLeaderDecoder, TuiAction,
 };
 pub use quick_launcher::{
     render_quick_launcher, LauncherFocus, LauncherTab, QuickLauncherAction, QuickLauncherState,
@@ -23,4 +23,4 @@ pub use quick_launcher::{
 pub use setup_modal::{render_setup_modal, run_setup_worker, SetupModalState, SetupProgressEvent};
 pub use status_bar::{compute_visible_tab_range, StatusBar, TopBar};
 pub use theme::Theme;
-pub use ui::{compute_layout, vt_color_to_ratatui, TerminalView};
+pub use ui::{compute_layout, vt_color_to_ratatui, TerminalView, STATUS_BAR_HEIGHT};

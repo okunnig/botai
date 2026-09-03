@@ -33,25 +33,27 @@ pub fn vt_color_to_ratatui(color: vt100::Color) -> RatatuiColor {
     }
 }
 
+/// The vertical height (in terminal rows) allocated to the status bar at the top of the host terminal.
+pub const STATUS_BAR_HEIGHT: u16 = 1;
+
 /// Splits the given terminal area into status bar and terminal viewport areas.
 pub fn compute_layout(area: Rect) -> (Rect, Rect) {
     if area.height == 0 || area.width == 0 {
         return (Rect::default(), Rect::default());
     }
 
-    let status_bar_height = 1;
     let status_area = Rect {
         x: area.x,
         y: area.y,
         width: area.width,
-        height: status_bar_height.min(area.height),
+        height: STATUS_BAR_HEIGHT.min(area.height),
     };
 
     let terminal_area = Rect {
         x: area.x,
-        y: area.y.saturating_add(status_bar_height),
+        y: area.y.saturating_add(STATUS_BAR_HEIGHT),
         width: area.width,
-        height: area.height.saturating_sub(status_bar_height),
+        height: area.height.saturating_sub(STATUS_BAR_HEIGHT),
     };
 
     (status_area, terminal_area)
