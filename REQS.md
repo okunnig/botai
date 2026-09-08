@@ -503,24 +503,15 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ---
 
-## 12. Native Compilation & Distributable Artifacts
+## 12. Native Compilation & Local Installation
 - **Host Platform Support**:
   - **Linux**: `linux-x86_64`, `linux-aarch64`
   - **Windows**: `windows-x86_64`, `windows-aarch64`
   - **macOS**: `macos-x86_64` (Intel), `macos-aarch64` (Apple Silicon)
-- **Native Host Compilation**:
-  - Native release compilation using standard Cargo (`cargo build --release`) without requiring containers or cross-compilation tooling.
-  - Automatically identifies host operating system (`uname -s`) and architecture (`uname -m`).
-- **Build & Packaging Script (`scripts/build.sh`)**:
-  - Clean, concise, fully self-contained executable bash script (`chmod +x scripts/build.sh`).
-  - Automatically detects host OS (`linux`, `macos`, `windows`) and CPU architecture (`x86_64`, `aarch64`).
-  - Executes `cargo build --release` and discovers the compiled release binary (`botai` or `botai.exe`).
-  - Stages and packages the release binary, `README.md`, and `LICENSE` into the distribution directory (`dist/`).
-- **Packaging Format & Distributable Artifacts**:
-  - Linux / macOS: `.tar.gz` archive containing binary (`botai`), `README.md`, and `LICENSE`.
-  - Windows: `.zip` archive containing `botai.exe`, `README.md`, and `LICENSE`.
-  - Naming schema: `dist/botai-v<version>-<platform>.<tar.gz|zip>` (e.g., `dist/botai-v0.1.0-linux-x86_64.tar.gz`).
-  - `dist/SHA256SUMS`: Cryptographic SHA-256 verification manifest automatically generated/updated in `dist/`.
+- **Native Host Compilation & Local Installation**:
+  - Native compilation using standard Cargo (`cargo build --release`, `cargo install --path .`) without requiring containers or external C toolchains.
+  - Zero external runtime dependencies; single binary installed to `$CARGO_HOME/bin/botai` (`~/.cargo/bin/botai` or `%USERPROFILE%\.cargo\bin\botai.exe`) for direct shell execution.
+  - Support for locked builds (`cargo install --path . --locked`) and development installations (`cargo install --path . --force`).
 
 ---
 
