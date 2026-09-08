@@ -67,7 +67,7 @@ trap cleanup EXIT
 
 cp "$BIN_PATH" "$STAGE_DIR/$BIN"
 [[ -f README.md ]] && cp README.md "$STAGE_DIR/"
-[[ -f REQS.md ]] && cp REQS.md "$STAGE_DIR/"
+[[ -f LICENSE ]] && cp LICENSE "$STAGE_DIR/"
 
 if [[ "$OS" == "windows" ]]; then
     ARCHIVE="$DIST_DIR/${STEM}.zip"

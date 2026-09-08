@@ -515,10 +515,10 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Clean, concise, fully self-contained executable bash script (`chmod +x scripts/build.sh`).
   - Automatically detects host OS (`linux`, `macos`, `windows`) and CPU architecture (`x86_64`, `aarch64`).
   - Executes `cargo build --release` and discovers the compiled release binary (`botai` or `botai.exe`).
-  - Stages and packages the release binary, `README.md`, and `REQS.md` into the distribution directory (`dist/`).
+  - Stages and packages the release binary, `README.md`, and `LICENSE` into the distribution directory (`dist/`).
 - **Packaging Format & Distributable Artifacts**:
-  - Linux / macOS: `.tar.gz` archive containing binary (`botai`), `README.md`, and `REQS.md`.
-  - Windows: `.zip` archive containing `botai.exe`, `README.md`, and `REQS.md`.
+  - Linux / macOS: `.tar.gz` archive containing binary (`botai`), `README.md`, and `LICENSE`.
+  - Windows: `.zip` archive containing `botai.exe`, `README.md`, and `LICENSE`.
   - Naming schema: `dist/botai-v<version>-<platform>.<tar.gz|zip>` (e.g., `dist/botai-v0.1.0-linux-x86_64.tar.gz`).
   - `dist/SHA256SUMS`: Cryptographic SHA-256 verification manifest automatically generated/updated in `dist/`.
 
@@ -545,6 +545,43 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - **Strict `#![forbid(unsafe_code)]` Enforcement**: Verifies that crate root headers (`src/lib.rs` and `src/main.rs`) explicitly mandate `#![forbid(unsafe_code)]`.
     - **Zero Unsafe Usage Policy**: Scans all source files under `src/` to guarantee zero `unsafe` keyword blocks or invocations exist in the production codebase.
     - **Compilation Verification**: Confirms clean `cargo check --all-targets --all-features` pass under the strict forbid lint constraint.
+
+---
+
+## 14. GitHub Release Workflow Automation (`.github/workflows/release.yml`)
+- **Workflow Trigger (`workflow_dispatch`)**:
+  - Exclusively triggered on demand via GitHub Actions manual workflow dispatch (`workflow_dispatch`).
+  - **Inputs**:
+    - `tag`: (Required string) Git tag to release (e.g., `v0.1.0`).
+    - `prerelease`: (Optional boolean, default `false`) Manual override flag to mark the release as a pre-release.
+  - **Tag Verification**:
+    - Verifies that the specified git tag already exists in the repository prior to building.
+    - Aborts workflow execution with an explicit error if the tag is not found.
+  - **Pre-Release Evaluation**:
+    - Automatically classified as a pre-release if `prerelease` input is `true` OR if the tag name contains a hyphen `-` (e.g., `v0.1.0-rc.1`, `v1.0.0-beta.2`).
+- **Security & Permissions**:
+  - Top-level or release job permissions: `contents: write` to publish GitHub releases and upload release assets.
+- **Cross-Platform Runner Matrix**:
+  - Compiles release binaries across the 3 native GitHub Actions runner operating systems:
+    - **Linux (`x86_64`)**: Runner `ubuntu-latest`, archive format `.tar.gz`, platform stem `linux-x86_64`.
+    - **macOS Apple Silicon (`aarch64`)**: Runner `macos-latest`, archive format `.tar.gz`, platform stem `macos-aarch64`.
+    - **Windows (`x86_64`)**: Runner `windows-latest`, archive format `.zip`, platform stem `windows-x86_64`.
+- **Packaging & Distributable Assets**:
+  - Release archives contain:
+    - Release binary (`botai` or `botai.exe`)
+    - `README.md`
+    - `LICENSE`
+  - Archive naming format: `botai-<tag>-<platform>.<tar.gz|zip>` (e.g. `botai-v0.1.0-linux-x86_64.tar.gz`).
+  - Generates SHA-256 checksums per platform archive during build jobs.
+- **Release Publication & Checksum Aggregation**:
+  - Dedicated publication job running after all matrix builds finish successfully.
+  - Aggregates individual platform archive hashes into a single root `SHA256SUMS` manifest file.
+  - Publishes GitHub Release targeting the provided `tag`:
+    - Release title: `Release <tag>`
+    - Release notes: GitHub auto-generated release notes (`generate_release_notes: true`).
+    - Status: Published immediately (`draft: false`).
+    - Pre-release status: Evaluated from hybrid detection (checkbox or tag hyphen).
+    - Attached assets: Linux `.tar.gz`, macOS `.tar.gz`, Windows `.zip`, and combined `SHA256SUMS`.
 
 
 

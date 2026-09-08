@@ -867,7 +867,10 @@ fn test_integration_mouse_coordinate_translation_to_child_viewport() {
         row: 0,
         modifiers: KeyModifiers::empty(),
     };
-    assert_eq!(translate_mouse_event(click_row_0, STATUS_BAR_HEIGHT, 24), None);
+    assert_eq!(
+        translate_mouse_event(click_row_0, STATUS_BAR_HEIGHT, 24),
+        None
+    );
     app.handle_mouse_event(click_row_0);
     assert_eq!(
         app.registry.active_session().unwrap().status(),
@@ -896,7 +899,13 @@ fn test_integration_mouse_coordinate_translation_to_child_viewport() {
     {
         // On Unix, cat echoes back the bytes forwarded to PTY
         std::thread::sleep(Duration::from_millis(100));
-        let echoed = app.registry.active_session_mut().unwrap().pty_mut().read_nonblocking().unwrap_or_default();
+        let echoed = app
+            .registry
+            .active_session_mut()
+            .unwrap()
+            .pty_mut()
+            .read_nonblocking()
+            .unwrap_or_default();
         let echoed_str = String::from_utf8_lossy(&echoed);
         assert!(
             echoed_str.contains("\x1b[<0;10;1M") || echoed_str.contains("^[[<0;10;1M"),
@@ -931,7 +940,13 @@ fn test_integration_mouse_coordinate_translation_to_child_viewport() {
     #[cfg(not(windows))]
     {
         std::thread::sleep(Duration::from_millis(100));
-        let echoed = app.registry.active_session_mut().unwrap().pty_mut().read_nonblocking().unwrap_or_default();
+        let echoed = app
+            .registry
+            .active_session_mut()
+            .unwrap()
+            .pty_mut()
+            .read_nonblocking()
+            .unwrap_or_default();
         let echoed_str = String::from_utf8_lossy(&echoed);
         assert!(
             echoed_str.contains("\x1b[<0;10;15M") || echoed_str.contains("^[[<0;10;15M"),
@@ -955,8 +970,14 @@ fn test_integration_mouse_coordinate_translation_to_child_viewport() {
     };
     let translated_drag = translate_mouse_event(drag_row_15, STATUS_BAR_HEIGHT, 24).unwrap();
     assert_eq!(translated_drag.row, 14);
-    assert_eq!(translated_drag.kind, MouseEventKind::Drag(MouseButton::Left));
-    assert_eq!(mouse_event_to_sgr_bytes(&translated_drag), b"\x1b[<32;10;15M");
+    assert_eq!(
+        translated_drag.kind,
+        MouseEventKind::Drag(MouseButton::Left)
+    );
+    assert_eq!(
+        mouse_event_to_sgr_bytes(&translated_drag),
+        b"\x1b[<32;10;15M"
+    );
 
     app.handle_mouse_event(drag_row_15);
     assert_eq!(
@@ -967,7 +988,13 @@ fn test_integration_mouse_coordinate_translation_to_child_viewport() {
     #[cfg(not(windows))]
     {
         std::thread::sleep(Duration::from_millis(100));
-        let echoed = app.registry.active_session_mut().unwrap().pty_mut().read_nonblocking().unwrap_or_default();
+        let echoed = app
+            .registry
+            .active_session_mut()
+            .unwrap()
+            .pty_mut()
+            .read_nonblocking()
+            .unwrap_or_default();
         let echoed_str = String::from_utf8_lossy(&echoed);
         assert!(
             echoed_str.contains("\x1b[<32;10;15M") || echoed_str.contains("^[[<32;10;15M"),
@@ -1002,7 +1029,13 @@ fn test_integration_mouse_coordinate_translation_to_child_viewport() {
     #[cfg(not(windows))]
     {
         std::thread::sleep(Duration::from_millis(100));
-        let echoed = app.registry.active_session_mut().unwrap().pty_mut().read_nonblocking().unwrap_or_default();
+        let echoed = app
+            .registry
+            .active_session_mut()
+            .unwrap()
+            .pty_mut()
+            .read_nonblocking()
+            .unwrap_or_default();
         let echoed_str = String::from_utf8_lossy(&echoed);
         assert!(
             echoed_str.contains("\x1b[<0;10;15m") || echoed_str.contains("^[[<0;10;15m"),
@@ -1164,7 +1197,8 @@ fn test_integration_escape_timeout_in_run_loop_with_receiver() {
         let _ = tx_clone.send(vec![0x00, b'q']);
     });
 
-    app.run_loop_with_receiver(&mut terminal, &stdin_rx).unwrap();
+    app.run_loop_with_receiver(&mut terminal, &stdin_rx)
+        .unwrap();
 
     // After the loop has processed the timeout, the escape was flushed to the active session PTY
     // making status Busy before the subsequent quit

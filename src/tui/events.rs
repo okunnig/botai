@@ -1672,7 +1672,8 @@ mod tests {
             row: 24,
             modifiers: KeyModifiers::empty(),
         };
-        let translated_bottom = translate_mouse_event(mouse_bottom, 1, 24).expect("translated bottom");
+        let translated_bottom =
+            translate_mouse_event(mouse_bottom, 1, 24).expect("translated bottom");
         assert_eq!(translated_bottom.row, 23);
         let sgr_bottom = mouse_event_to_sgr_bytes(&translated_bottom);
         assert_eq!(sgr_bottom, b"\x1b[<0;1;24M");
@@ -1688,7 +1689,10 @@ mod tests {
             modifiers: KeyModifiers::SHIFT,
         };
         let translated_drag = translate_mouse_event(drag_mouse, 1, 24).expect("translated drag");
-        assert_eq!(translated_drag.kind, MouseEventKind::Drag(MouseButton::Left));
+        assert_eq!(
+            translated_drag.kind,
+            MouseEventKind::Drag(MouseButton::Left)
+        );
         assert_eq!(translated_drag.modifiers, KeyModifiers::SHIFT);
         assert_eq!(translated_drag.column, 12);
         assert_eq!(translated_drag.row, 7);

@@ -303,58 +303,59 @@ impl TuiApp {
 
             // 3. Draw active frame
             let theme = self.config.as_ref().map(|c| c.theme()).unwrap_or_default();
-            terminal.draw(|f| {
-                let (status_area, term_area) = compute_layout(f.area());
+            terminal
+                .draw(|f| {
+                    let (status_area, term_area) = compute_layout(f.area());
 
-                if self.is_showing_dashboard() {
-                    if let Some(dashboard) = &self.dashboard {
-                        render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
-                        if let Some(pos) = dashboard.cursor_position(f.area()) {
-                            f.set_cursor_position(pos);
+                    if self.is_showing_dashboard() {
+                        if let Some(dashboard) = &self.dashboard {
+                            render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
+                            if let Some(pos) = dashboard.cursor_position(f.area()) {
+                                f.set_cursor_position(pos);
+                            }
                         }
-                    }
-                } else {
-                    f.render_widget(
-                        StatusBar::new(&self.registry)
-                            .with_leader(self.leader_active)
-                            .with_theme(&theme),
-                        status_area,
-                    );
+                    } else {
+                        f.render_widget(
+                            StatusBar::new(&self.registry)
+                                .with_leader(self.leader_active)
+                                .with_theme(&theme),
+                            status_area,
+                        );
 
-                    if let Some(active) = self.registry.active_session() {
-                        f.render_widget(TerminalView::new(active.vt()), term_area);
+                        if let Some(active) = self.registry.active_session() {
+                            f.render_widget(TerminalView::new(active.vt()), term_area);
 
-                        if active.status() == SessionStatus::Error {
-                            render_error_banner(
-                                active.project_session.exit_code,
-                                term_area,
-                                f.buffer_mut(),
-                                &theme,
-                            );
-                        } else if !active.vt().hide_cursor() && active.vt().scrollback() == 0 {
-                            let (col, row) = active.vt().cursor_position();
-                            if col < term_area.width && row < term_area.height {
-                                f.set_cursor_position(ratatui::layout::Position::new(
-                                    term_area.x + col,
-                                    term_area.y + row,
-                                ));
+                            if active.status() == SessionStatus::Error {
+                                render_error_banner(
+                                    active.project_session.exit_code,
+                                    term_area,
+                                    f.buffer_mut(),
+                                    &theme,
+                                );
+                            } else if !active.vt().hide_cursor() && active.vt().scrollback() == 0 {
+                                let (col, row) = active.vt().cursor_position();
+                                if col < term_area.width && row < term_area.height {
+                                    f.set_cursor_position(ratatui::layout::Position::new(
+                                        term_area.x + col,
+                                        term_area.y + row,
+                                    ));
+                                }
                             }
                         }
                     }
-                }
 
-                if let Some(launcher) = &self.quick_launcher {
-                    render_quick_launcher(launcher, f.area(), f.buffer_mut(), &theme);
-                    if let Some(pos) = launcher.cursor_position(f.area()) {
-                        f.set_cursor_position(pos);
+                    if let Some(launcher) = &self.quick_launcher {
+                        render_quick_launcher(launcher, f.area(), f.buffer_mut(), &theme);
+                        if let Some(pos) = launcher.cursor_position(f.area()) {
+                            f.set_cursor_position(pos);
+                        }
                     }
-                }
 
-                if let Some(setup_modal) = &self.setup_modal {
-                    render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
-                }
-            })
-            .map_err(|e| io::Error::other(e.to_string()))?;
+                    if let Some(setup_modal) = &self.setup_modal {
+                        render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
+                    }
+                })
+                .map_err(|e| io::Error::other(e.to_string()))?;
 
             // 4. Handle raw input bytes with timeout up to tick_rate
             let timeout = self.tick_rate.saturating_sub(last_tick.elapsed());
