@@ -458,7 +458,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
            - **Bracketed / Multi-line Paste**: Pasting multi-line content preserves newlines cleanly without premature form submission.
            - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
          - Live pre-validation status banner at the bottom.
-       - **Back-Navigation**: Pressing `Esc` (or `Backspace` when project name input is empty) returns to Step 1 without losing configuration.
+       - **Back-Navigation**: Pressing `Esc` in Step 2 returns to Step 1 without losing configuration. Pressing `Backspace` inside editable text fields strictly performs character deletion (no-op when empty or at cursor offset 0) and never navigates away from the step.
        - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder`.
 
 ---

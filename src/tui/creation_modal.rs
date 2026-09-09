@@ -818,23 +818,8 @@ impl ProjectCreationModal {
     }
 
     /// Deletes the character before the project name cursor (Backspace).
-    /// If the project name is empty, returns to template selection step.
     pub fn delete_project_name_char_backward(&mut self) {
         self.sync_project_name_cursor();
-        if self.project_name_input.is_empty() {
-            let cur_tpl = self.selected_template().map(str::to_string);
-            self.step = CreationStep::SelectTemplate;
-            let matching = self.matching_template_indices();
-            if let Some(tpl) = cur_tpl {
-                self.selected_template_idx = matching
-                    .iter()
-                    .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
-                    .unwrap_or(0);
-            } else {
-                self.selected_template_idx = 0;
-            }
-            return;
-        }
         if self.project_name_input.delete_char_backward() {
             self.project_name_cursor = self.project_name_input.cursor;
             self.revalidate();
@@ -2288,9 +2273,14 @@ mod tests {
         modal.handle_key(key(KeyCode::Enter));
         assert_eq!(modal.step, CreationStep::ConfigureDetails);
 
-        // Backspace on empty project name also backtracks to Step 1
+        // Backspace on empty project name does not backtrack to Step 1 (remains in ConfigureDetails)
         assert!(modal.project_name_input.is_empty());
         let act = modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
+
+        // Esc in Step 2 backtracks to Step 1
+        let act = modal.handle_key(key(KeyCode::Esc));
         assert_eq!(act, CreationModalAction::None);
         assert_eq!(modal.step, CreationStep::SelectTemplate);
 
@@ -2964,12 +2954,22 @@ mod tests {
         assert_eq!(modal.project_name(), "paysvc");
         assert_eq!(modal.project_name_cursor, 3);
 
-        // Move to start (pos 0) and Backspace does not delete or crash
+        // Move to start (pos 0) and Backspace does not delete or crash, staying in ConfigureDetails
         modal.handle_key(key(KeyCode::Home));
         assert_eq!(modal.project_name_cursor, 0);
-        modal.handle_key(key(KeyCode::Backspace));
+        let act = modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(act, CreationModalAction::None);
         assert_eq!(modal.project_name(), "paysvc");
         assert_eq!(modal.project_name_cursor, 0);
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
+
+        // Clear all text to empty: Backspace on empty input remains a safe no-op in ConfigureDetails
+        modal.set_project_name("");
+        assert_eq!(modal.project_name(), "");
+        assert!(modal.project_name_input.is_empty());
+        let act = modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
     }
 
     #[test]
@@ -3060,13 +3060,18 @@ mod tests {
         assert_eq!(act, CreationModalAction::None);
         assert_eq!(modal.step, CreationStep::ConfigureDetails);
 
-        // 6. Backspace when project name is empty returns to CreationStep::SelectTemplate
+        // 6. Backspace when project name is empty does not backtrack (remains in CreationStep::ConfigureDetails)
         assert!(modal.project_name_input.is_empty());
         let act = modal.handle_key(key(KeyCode::Backspace));
         assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
+
+        // 7. Esc in Step 2 returns to CreationStep::SelectTemplate
+        let act = modal.handle_key(key(KeyCode::Esc));
+        assert_eq!(act, CreationModalAction::None);
         assert_eq!(modal.step, CreationStep::SelectTemplate);
 
-        // 7. Esc in CreationStep::SelectTemplate cancels with CreationModalAction::Cancel
+        // 8. Esc in CreationStep::SelectTemplate cancels with CreationModalAction::Cancel
         let act = modal.handle_key(key(KeyCode::Esc));
         assert_eq!(act, CreationModalAction::Cancel);
     }
