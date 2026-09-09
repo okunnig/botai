@@ -166,6 +166,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Failure policy: Warn and Continue.
   - **Workspace Pre-Destruction Hooks (`pre_destroy`)**:
     - Runs at the project root directory during project destruction before removing worktree directories and branches.
+  - **Windows Executable & PATHEXT Probing**:
+    - On Windows, hook execution probes `%PATH%` and `%PATHEXT%` (`.COM`, `.EXE`, `.BAT`, `.CMD`) to automatically resolve scripts like `npm`, `yarn`, and `pnpm`.
+    - Automatically resolves bare commands and path-prefixed scripts into their `.cmd` or `.bat` executables so Rust's `std::process::Command` invokes them with Windows `cmd.exe /c` batch wrapping without requiring explicit file extensions or shell wrappers.
   - **Strict Branching Strategy**: Branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
   - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the template repositories or if `<project_name>` directory exists.
   - **Backing Repository Auto-Discovery (`resolve_main_repo`)**: Resolves the main cached repository from any worktree directory using `git rev-parse --git-common-dir` and `.git` file (`gitdir: <path>`) fallback traversal.

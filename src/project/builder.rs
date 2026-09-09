@@ -488,8 +488,7 @@ impl ProjectBuilder {
                                     "Running setup hook for '{repo_name}': {cmd_display}"
                                 )));
 
-                                let mut command = std::process::Command::new(prog);
-                                command.args(args);
+                                let mut command = prepare_hook_command(prog, args);
                                 command.current_dir(&wt_path);
                                 for (k, v) in tpl_env {
                                     command.env(k, v);
@@ -579,8 +578,7 @@ impl ProjectBuilder {
                     "Running post_create hook: {cmd_display}"
                 )));
 
-                let mut command = std::process::Command::new(prog);
-                command.args(args);
+                let mut command = prepare_hook_command(prog, args);
                 command.current_dir(&project_dir_canon);
                 for (k, v) in &tpl.env {
                     command.env(k, v);
@@ -816,8 +814,7 @@ where
                             "Running pre_destroy hook: {cmd_display}"
                         )));
 
-                        let mut command = std::process::Command::new(prog);
-                        command.args(args);
+                        let mut command = prepare_hook_command(prog, args);
                         command.current_dir(&project_dir);
                         for (k, v) in &tpl.env {
                             command.env(k, v);
@@ -985,6 +982,138 @@ pub fn destroy_project_workspace(
     force: bool,
 ) -> anyhow::Result<()> {
     destroy_project_workspace_with_progress(config, cwd, project_name, force, |_| {})
+}
+
+/// Resolves an executable candidate against PATH and PATHEXT extensions.
+///
+/// On Windows, `CreateProcess` does not resolve extensions from `%PATHEXT%` (e.g. `.cmd`, `.bat`).
+/// When launching hooks (such as `npm`, `yarn`, `pnpm`), this function finds the exact
+/// executable file so Rust's `std::process::Command` can invoke it correctly.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn resolve_executable_in_paths(
+    prog: &str,
+    paths: impl IntoIterator<Item = std::path::PathBuf>,
+    pathexts: &[&str],
+) -> std::path::PathBuf {
+    let prog_path = std::path::Path::new(prog);
+    if prog_path.is_absolute() || prog.contains('/') || prog.contains('\\') {
+        if prog_path.is_file() {
+            return prog_path.to_path_buf();
+        }
+        for ext in pathexts {
+            let ext_clean = ext.trim_start_matches('.');
+            let ext_lower = ext_clean.to_lowercase();
+            let ext_upper = ext_clean.to_uppercase();
+
+            let cand = std::path::PathBuf::from(format!("{prog}.{ext_clean}"));
+            if cand.is_file() {
+                return cand;
+            }
+            let cand = prog_path.with_extension(ext_clean);
+            if cand.is_file() {
+                return cand;
+            }
+
+            if ext_clean != ext_lower {
+                let cand = std::path::PathBuf::from(format!("{prog}.{ext_lower}"));
+                if cand.is_file() {
+                    return cand;
+                }
+                let cand = prog_path.with_extension(&ext_lower);
+                if cand.is_file() {
+                    return cand;
+                }
+            }
+
+            if ext_clean != ext_upper {
+                let cand = std::path::PathBuf::from(format!("{prog}.{ext_upper}"));
+                if cand.is_file() {
+                    return cand;
+                }
+                let cand = prog_path.with_extension(&ext_upper);
+                if cand.is_file() {
+                    return cand;
+                }
+            }
+        }
+        return prog_path.to_path_buf();
+    }
+
+    for dir in paths {
+        if prog_path.extension().is_some() {
+            let candidate = dir.join(prog);
+            if candidate.is_file() {
+                return candidate;
+            }
+            if let Some(file_name) = prog_path.file_name().and_then(|n| n.to_str()) {
+                let lower = dir.join(file_name.to_lowercase());
+                if lower.is_file() {
+                    return lower;
+                }
+                let upper = dir.join(file_name.to_uppercase());
+                if upper.is_file() {
+                    return upper;
+                }
+            }
+        }
+        for ext in pathexts {
+            let ext_clean = ext.trim_start_matches('.');
+            let ext_lower = ext_clean.to_lowercase();
+            let ext_upper = ext_clean.to_uppercase();
+
+            let candidate = dir.join(format!("{prog}.{ext_clean}"));
+            if candidate.is_file() {
+                return candidate;
+            }
+            if ext_clean != ext_lower {
+                let candidate = dir.join(format!("{prog}.{ext_lower}"));
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+            if ext_clean != ext_upper {
+                let candidate = dir.join(format!("{prog}.{ext_upper}"));
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    prog_path.to_path_buf()
+}
+
+/// Prepares a `std::process::Command` for a lifecycle hook.
+///
+/// On Windows, probes `%PATH%` and `%PATHEXT%` (`.COM`, `.EXE`, `.BAT`, `.CMD`)
+/// to resolve scripts (e.g. `npm`, `yarn`, `pnpm`) before spawning.
+#[cfg(windows)]
+pub(crate) fn prepare_hook_command(prog: &str, args: &[String]) -> std::process::Command {
+    let pathext_var = std::env::var("PATHEXT").unwrap_or_default();
+    let parsed_pathexts: Vec<&str> = pathext_var
+        .split(';')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let pathexts = if parsed_pathexts.is_empty() {
+        vec![".COM", ".EXE", ".BAT", ".CMD"]
+    } else {
+        parsed_pathexts
+    };
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let split_paths = std::env::split_paths(&path_var);
+    let resolved = resolve_executable_in_paths(prog, split_paths, &pathexts);
+    let mut command = std::process::Command::new(resolved);
+    command.args(args);
+    command
+}
+
+/// Prepares a `std::process::Command` for a lifecycle hook on non-Windows platforms.
+#[cfg(not(windows))]
+pub(crate) fn prepare_hook_command(prog: &str, args: &[String]) -> std::process::Command {
+    let mut command = std::process::Command::new(prog);
+    command.args(args);
+    command
 }
 
 #[cfg(test)]
@@ -1961,5 +2090,173 @@ mod tests {
         );
         assert!(res_force.is_ok());
         assert!(!project_dir.exists());
+    }
+
+    #[test]
+    fn test_resolve_executable_bare_command_to_cmd_or_bat_in_mock_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let path1 = temp_dir.path().join("dir1");
+        let path2 = temp_dir.path().join("dir2");
+        fs::create_dir_all(&path1).unwrap();
+        fs::create_dir_all(&path2).unwrap();
+
+        // Create npm.cmd in dir2 and yarn.bat in dir1
+        fs::write(path2.join("npm.cmd"), "@echo off\necho npm").unwrap();
+        fs::write(path1.join("yarn.bat"), "@echo off\necho yarn").unwrap();
+
+        let pathexts = [".COM", ".EXE", ".BAT", ".CMD"];
+
+        // Resolving bare "npm" should find npm.cmd in dir2
+        let resolved_npm =
+            resolve_executable_in_paths("npm", vec![path1.clone(), path2.clone()], &pathexts);
+        assert_eq!(resolved_npm, path2.join("npm.cmd"));
+
+        // Resolving bare "yarn" should find yarn.bat in dir1
+        let resolved_yarn =
+            resolve_executable_in_paths("yarn", vec![path1.clone(), path2.clone()], &pathexts);
+        assert_eq!(resolved_yarn, path1.join("yarn.bat"));
+
+        // Test with extension without leading dot
+        let pathexts_no_dot = ["COM", "EXE", "BAT", "CMD"];
+        let resolved_npm_no_dot =
+            resolve_executable_in_paths("npm", vec![path1.clone(), path2.clone()], &pathexts_no_dot);
+        assert_eq!(resolved_npm_no_dot, path2.join("npm.cmd"));
+
+        // Test PATH directory precedence: path1 comes before path2
+        fs::write(path1.join("pnpm.cmd"), "@echo off\necho pnpm1").unwrap();
+        fs::write(path2.join("pnpm.bat"), "@echo off\necho pnpm2").unwrap();
+        let resolved_pnpm =
+            resolve_executable_in_paths("pnpm", vec![path1.clone(), path2.clone()], &pathexts);
+        assert_eq!(resolved_pnpm, path1.join("pnpm.cmd"));
+
+        // Test PATHEXT extension priority within the same directory: .BAT before .CMD
+        fs::write(path1.join("tool.bat"), "@echo off\necho tool bat").unwrap();
+        fs::write(path1.join("tool.cmd"), "@echo off\necho tool cmd").unwrap();
+        let resolved_tool =
+            resolve_executable_in_paths("tool", vec![path1.clone()], &[".BAT", ".CMD"]);
+        assert_eq!(resolved_tool, path1.join("tool.bat"));
+    }
+
+    #[test]
+    fn test_resolve_executable_existing_file_with_extension() {
+        let temp_dir = TempDir::new().unwrap();
+        let path1 = temp_dir.path().join("bin");
+        fs::create_dir_all(&path1).unwrap();
+
+        fs::write(path1.join("mvn.cmd"), "@echo off\necho mvn").unwrap();
+        fs::write(path1.join("git.exe"), "binary").unwrap();
+
+        let pathexts = [".COM", ".EXE", ".BAT", ".CMD"];
+
+        let resolved_mvn =
+            resolve_executable_in_paths("mvn.cmd", vec![path1.clone()], &pathexts);
+        assert_eq!(resolved_mvn, path1.join("mvn.cmd"));
+
+        let resolved_git =
+            resolve_executable_in_paths("git.exe", vec![path1.clone()], &pathexts);
+        assert_eq!(resolved_git, path1.join("git.exe"));
+    }
+
+    #[test]
+    fn test_resolve_executable_fallback_when_not_found() {
+        let temp_dir = TempDir::new().unwrap();
+        let path1 = temp_dir.path().join("bin");
+        fs::create_dir_all(&path1).unwrap();
+
+        let pathexts = [".COM", ".EXE", ".BAT", ".CMD"];
+
+        // Bare command not in PATH falls back to original PathBuf
+        let resolved_missing =
+            resolve_executable_in_paths("missing_tool", vec![path1.clone()], &pathexts);
+        assert_eq!(resolved_missing, std::path::PathBuf::from("missing_tool"));
+
+        // Command with extension not in PATH falls back to original PathBuf
+        let resolved_missing_ext =
+            resolve_executable_in_paths("missing.exe", vec![path1.clone()], &pathexts);
+        assert_eq!(resolved_missing_ext, std::path::PathBuf::from("missing.exe"));
+
+        // Empty paths list falls back immediately
+        let resolved_empty_paths =
+            resolve_executable_in_paths("echo", Vec::new(), &pathexts);
+        assert_eq!(resolved_empty_paths, std::path::PathBuf::from("echo"));
+    }
+
+    #[test]
+    fn test_resolve_executable_path_prefixed_commands() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // 1. Absolute path with existing file
+        let abs_file = temp_dir.path().join("script.bat");
+        fs::write(&abs_file, "@echo off").unwrap();
+        let resolved_abs = resolve_executable_in_paths(
+            abs_file.to_str().unwrap(),
+            vec![],
+            &[".BAT", ".CMD"],
+        );
+        assert_eq!(resolved_abs, abs_file);
+
+        // 2. Absolute path without extension resolving to .cmd
+        let abs_tool = temp_dir.path().join("my_tool");
+        let abs_tool_cmd = temp_dir.path().join("my_tool.cmd");
+        fs::write(&abs_tool_cmd, "@echo off").unwrap();
+        let resolved_abs_tool = resolve_executable_in_paths(
+            abs_tool.to_str().unwrap(),
+            vec![],
+            &[".BAT", ".CMD"],
+        );
+        assert_eq!(resolved_abs_tool, abs_tool_cmd);
+
+        // 3. Absolute path nonexistent fallback
+        let abs_missing = temp_dir.path().join("nonexistent_script");
+        let resolved_abs_missing = resolve_executable_in_paths(
+            abs_missing.to_str().unwrap(),
+            vec![],
+            &[".BAT", ".CMD"],
+        );
+        assert_eq!(resolved_abs_missing, abs_missing);
+
+        // 4. Relative path with '/' resolving extension
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let rel_dir = std::path::PathBuf::from(format!("target/test_probe_{unique_id}"));
+        fs::create_dir_all(&rel_dir).unwrap();
+        let rel_script_cmd = rel_dir.join("build.cmd");
+        fs::write(&rel_script_cmd, "@echo off").unwrap();
+
+        let rel_query = format!("target/test_probe_{unique_id}/build");
+        let resolved_rel = resolve_executable_in_paths(&rel_query, vec![], &[".BAT", ".CMD"]);
+        assert_eq!(resolved_rel, rel_script_cmd);
+
+        // Clean up temporary relative directory
+        let _ = fs::remove_dir_all(&rel_dir);
+
+        // 5. Relative path nonexistent fallback with '/' and '\'
+        let rel_missing_slash = "./does/not/exist/cmd";
+        assert_eq!(
+            resolve_executable_in_paths(rel_missing_slash, vec![], &[".CMD"]),
+            std::path::PathBuf::from(rel_missing_slash)
+        );
+
+        let rel_missing_bs = r"does\not\exist\cmd";
+        assert_eq!(
+            resolve_executable_in_paths(rel_missing_bs, vec![], &[".CMD"]),
+            std::path::PathBuf::from(rel_missing_bs)
+        );
+    }
+
+    #[test]
+    fn test_prepare_hook_command_spawns_correct_args() {
+        let args = vec!["arg1".to_string(), "arg2".to_string()];
+        let cmd = prepare_hook_command("echo", &args);
+
+        #[cfg(not(windows))]
+        {
+            assert_eq!(cmd.get_program(), "echo");
+        }
+
+        let cmd_args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+        assert_eq!(cmd_args, vec!["arg1", "arg2"]);
     }
 }
