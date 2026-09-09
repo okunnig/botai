@@ -27,6 +27,7 @@ pub enum DashboardAction {
     CreateProject {
         template: String,
         project: String,
+        agent_override: Option<String>,
         prompt: Option<String>,
     },
     Destroy(String),
@@ -244,13 +245,14 @@ impl DashboardState {
                 CreationModalAction::Submit {
                     template,
                     project,
+                    agent_override,
                     prompt,
-                    ..
                 } => {
                     self.creation_modal = None;
                     return DashboardAction::CreateProject {
                         template,
                         project,
+                        agent_override,
                         prompt,
                     };
                 }
@@ -328,13 +330,14 @@ impl DashboardState {
                 CreationModalAction::Submit {
                     template,
                     project,
+                    agent_override,
                     prompt,
-                    ..
                 } => {
                     self.creation_modal = None;
                     return DashboardAction::CreateProject {
                         template,
                         project,
+                        agent_override,
                         prompt,
                     };
                 }
@@ -717,6 +720,7 @@ mod tests {
             DashboardAction::CreateProject {
                 template: "воркспейс-1 🚀".to_string(),
                 project: "проект-юникод".to_string(),
+                agent_override: Some("claude".to_string()),
                 prompt: None,
             }
         );
@@ -948,6 +952,7 @@ command = "claude"
             DashboardAction::CreateProject {
                 template: "cloud-infra".to_string(),
                 project: "k8s-cluster".to_string(),
+                agent_override: Some("claude".to_string()),
                 prompt: Some("Deploy helm chart".to_string()),
             }
         );
@@ -973,6 +978,40 @@ command = "claude"
             DashboardAction::CreateProject {
                 template: "ws".to_string(),
                 project: "my-project".to_string(),
+                agent_override: Some("claude".to_string()),
+                prompt: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_modal_submission_with_agent_override() {
+        let mut state = DashboardState::new(vec!["ws".into()], vec![]);
+        state.open_creation_modal();
+        state.handle_key(key(KeyCode::Enter)); // Advance from SelectTemplate to ConfigureDetails
+
+        for c in "my-agent-project".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+
+        // Tab to agent selector
+        state.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            state.creation_modal.as_ref().unwrap().focus,
+            crate::tui::creation_modal::CreationFocus::Agent
+        );
+
+        // Cycle agent
+        state.handle_key(key(KeyCode::Right));
+        let selected_agent = state.creation_modal.as_ref().unwrap().selected_agent().to_string();
+
+        let action = state.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            action,
+            DashboardAction::CreateProject {
+                template: "ws".to_string(),
+                project: "my-agent-project".to_string(),
+                agent_override: Some(selected_agent),
                 prompt: None,
             }
         );

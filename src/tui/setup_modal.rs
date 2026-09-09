@@ -181,9 +181,11 @@ impl SetupModalState {
 
 /// Background worker function that executes git repository resolution, cloning/fetching,
 /// worktree creation, context generation, and PTY process spawning.
+#[allow(clippy::too_many_arguments)]
 pub fn run_setup_worker(
     template_name: String,
     project_name: String,
+    agent_override: Option<String>,
     prompt: Option<String>,
     config: Option<Config>,
     cwd: PathBuf,
@@ -206,6 +208,10 @@ pub fn run_setup_worker(
     let mut builder = ProjectBuilder::new(cfg, &template_name, &project_name)
         .with_cwd(cwd)
         .with_viewport(cols, rows);
+
+    if let Some(ref a) = agent_override {
+        builder = builder.with_agent(a);
+    }
 
     if let Some(ref p) = prompt {
         builder = builder.with_prompt(p);

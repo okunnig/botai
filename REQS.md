@@ -459,7 +459,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
            - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
          - Live pre-validation status banner at the bottom.
        - **Back-Navigation**: Pressing `Esc` in Step 2 returns to Step 1 without losing configuration. Pressing `Backspace` inside editable text fields strictly performs character deletion (no-op when empty or at cursor offset 0) and never navigates away from the step.
-       - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder`.
+       - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, and optional initial prompt. The selected agent override is plumbed through `DashboardAction::CreateProject` and `QuickLauncherAction::Create` directly into `start_project_creation` and `run_setup_worker` to instantiate the chosen agent CLI.
 
 ---
 

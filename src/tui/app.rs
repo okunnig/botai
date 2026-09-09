@@ -568,10 +568,16 @@ impl TuiApp {
                 QuickLauncherAction::Create {
                     template,
                     project,
+                    agent_override,
                     prompt,
                 } => {
                     self.quick_launcher = None;
-                    self.start_project_creation(&template, &project, prompt.as_deref());
+                    self.start_project_creation(
+                        &template,
+                        &project,
+                        agent_override.as_deref(),
+                        prompt.as_deref(),
+                    );
                 }
                 QuickLauncherAction::Attach(project) => {
                     if let Some(pos) = self
@@ -606,10 +612,16 @@ impl TuiApp {
                 QuickLauncherAction::Create {
                     template,
                     project,
+                    agent_override,
                     prompt,
                 } => {
                     self.quick_launcher = None;
-                    self.start_project_creation(&template, &project, prompt.as_deref());
+                    self.start_project_creation(
+                        &template,
+                        &project,
+                        agent_override.as_deref(),
+                        prompt.as_deref(),
+                    );
                 }
                 QuickLauncherAction::Attach(project) => {
                     if let Some(pos) = self
@@ -675,9 +687,15 @@ impl TuiApp {
             DashboardAction::CreateProject {
                 template,
                 project,
+                agent_override,
                 prompt,
             } => {
-                self.start_project_creation(&template, &project, prompt.as_deref());
+                self.start_project_creation(
+                    &template,
+                    &project,
+                    agent_override.as_deref(),
+                    prompt.as_deref(),
+                );
             }
             DashboardAction::Destroy(project) => {
                 self.start_project_destruction(&project);
@@ -776,6 +794,7 @@ impl TuiApp {
         &mut self,
         template_name: &str,
         project_name: &str,
+        agent_override: Option<&str>,
         prompt: Option<&str>,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -801,12 +820,14 @@ impl TuiApp {
         let viewport_size = self.viewport_size.unwrap_or((100, 30));
         let tpl_name = template_name.to_string();
         let proj_name = project_name.to_string();
+        let agent_owned = agent_override.map(String::from);
         let prompt_owned = prompt.map(String::from);
 
         std::thread::spawn(move || {
             crate::tui::setup_modal::run_setup_worker(
                 tpl_name,
                 proj_name,
+                agent_owned,
                 prompt_owned,
                 config,
                 cwd,
@@ -1986,7 +2007,7 @@ repos = []
             .with_config(config)
             .with_cwd(cwd.clone());
 
-        app.start_project_creation("test_ws", "async-proj", Some("Initial prompt"));
+        app.start_project_creation("test_ws", "async-proj", None, Some("Initial prompt"));
         assert!(app.setup_modal.is_some());
 
         // Wait up to 5 seconds for worker thread to finish
@@ -2005,6 +2026,65 @@ repos = []
         assert_eq!(active.project_name(), "async-proj");
         assert_eq!(active.template_name(), "test_ws");
         assert!(cwd.join("async-proj").join("AGENTS.md").exists());
+    }
+
+    #[test]
+    fn test_tui_app_start_project_creation_with_agent_override() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        #[cfg(windows)]
+        let shell_cmd = "cmd.exe";
+        #[cfg(not(windows))]
+        let shell_cmd = "sh";
+
+        let config_toml = format!(
+            r#"
+default_agent = "mock_default"
+repos_dir = "{}/repos"
+
+[agents.mock_default]
+command = "{}"
+args = []
+
+[agents.mock_override]
+command = "{}"
+args = []
+
+[templates.test_ws]
+repos = []
+"#,
+            cwd.display().to_string().replace('\\', "/"),
+            shell_cmd,
+            shell_cmd
+        );
+        let config = Config::load_from_str(&config_toml).unwrap();
+
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_config(config)
+            .with_cwd(cwd.clone());
+
+        app.start_project_creation(
+            "test_ws",
+            "override-proj",
+            Some("mock_override"),
+            Some("Task instructions"),
+        );
+        assert!(app.setup_modal.is_some());
+
+        let start = std::time::Instant::now();
+        while app.setup_modal.is_some() && start.elapsed() < Duration::from_secs(5) {
+            app.poll_setup_progress();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(app.setup_modal.is_none());
+        assert_eq!(app.registry.len(), 1);
+        let active = app.registry.active_session().unwrap();
+        assert_eq!(active.project_name(), "override-proj");
+        assert_eq!(active.agent_name(), "mock_override");
+        assert_eq!(active.project_session.agent_name, "mock_override");
     }
 
     #[test]
@@ -2027,7 +2107,7 @@ repos = []
         let mut app = TuiApp::new(registry).with_cwd(cwd.clone());
 
         // Try creating project with name that already exists in registry
-        app.start_project_creation("ws", "active-proj", None);
+        app.start_project_creation("ws", "active-proj", None, None);
         assert!(app.setup_modal.is_some());
         let modal = app.setup_modal.as_ref().unwrap();
         assert!(modal.error.is_some());

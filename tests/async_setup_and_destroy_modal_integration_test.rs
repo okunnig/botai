@@ -236,6 +236,7 @@ repos = []
     app.handle_dashboard_action(DashboardAction::CreateProject {
         template: "cloud_ws".to_string(),
         project: "microservice-alpha".to_string(),
+        agent_override: Some("mock_agent".to_string()),
         prompt: Some("Initialize API endpoints".to_string()),
     });
 
@@ -260,6 +261,8 @@ repos = []
     let active = app.registry.active_session().unwrap();
     assert_eq!(active.project_name(), "microservice-alpha");
     assert_eq!(active.template_name(), "cloud_ws");
+    assert_eq!(active.agent_name(), "mock_agent");
+    assert_eq!(active.project_session.agent_name, "mock_agent");
     assert_eq!(
         active.project_session.prompt.as_deref(),
         Some("Initialize API endpoints")
@@ -268,6 +271,67 @@ repos = []
     let created_dir = cwd.join("microservice-alpha");
     assert!(created_dir.exists());
     assert!(created_dir.join("AGENTS.md").is_file());
+}
+
+#[test]
+fn test_integration_async_project_setup_agent_override_applied() {
+    let tmp = tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+
+    #[cfg(windows)]
+    let shell_cmd = "cmd.exe";
+    #[cfg(not(windows))]
+    let shell_cmd = "sh";
+
+    let config_toml = format!(
+        r#"
+default_agent = "mock_default"
+repos_dir = "{}/repos"
+
+[agents.mock_default]
+command = "{}"
+args = []
+
+[agents.mock_custom]
+command = "{}"
+args = []
+
+[templates.cloud_ws]
+repos = []
+"#,
+        cwd.display().to_string().replace('\\', "/"),
+        shell_cmd,
+        shell_cmd
+    );
+    let config = Config::load_from_str(&config_toml).unwrap();
+
+    let registry = SessionRegistry::new();
+    let dashboard = DashboardState::from_env(&config, &cwd);
+    let mut app = TuiApp::new(registry)
+        .with_dashboard(dashboard)
+        .with_config(config)
+        .with_cwd(cwd.clone());
+
+    // Trigger project creation with explicit agent override
+    app.handle_dashboard_action(DashboardAction::CreateProject {
+        template: "cloud_ws".to_string(),
+        project: "custom-agent-proj".to_string(),
+        agent_override: Some("mock_custom".to_string()),
+        prompt: None,
+    });
+
+    let start = std::time::Instant::now();
+    while app.setup_modal.is_some() && start.elapsed() < Duration::from_secs(5) {
+        app.poll_setup_progress();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    assert!(app.setup_modal.is_none());
+    assert_eq!(app.registry.len(), 1);
+    let active = app.registry.active_session().unwrap();
+    assert_eq!(active.project_name(), "custom-agent-proj");
+    assert_eq!(active.agent_name(), "mock_custom");
+    assert_eq!(active.project_session.agent_name, "mock_custom");
 }
 
 #[test]
@@ -296,7 +360,7 @@ repos = ["nonexistent-repo-that-does-not-exist"]
         .with_config(config)
         .with_cwd(cwd.clone());
 
-    app.start_project_creation("bad_ws", "failing-proj", None);
+    app.start_project_creation("bad_ws", "failing-proj", None, None);
     assert!(app.setup_modal.is_some());
 
     // Wait for worker to encounter error and stream failure event

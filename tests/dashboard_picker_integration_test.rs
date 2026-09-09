@@ -201,6 +201,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         DashboardAction::CreateProject {
             template: "ecommerce".to_string(),
             project: "stripe-subscriptions".to_string(),
+            agent_override: Some("claude".to_string()),
             prompt: Some("Build recurring billing engine with webhooks".to_string()),
         }
     );

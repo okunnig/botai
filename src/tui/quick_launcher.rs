@@ -39,6 +39,7 @@ pub enum QuickLauncherAction {
     Create {
         template: String,
         project: String,
+        agent_override: Option<String>,
         prompt: Option<String>,
     },
     Attach(String),
@@ -455,6 +456,7 @@ impl QuickLauncherState {
                         return QuickLauncherAction::Create {
                             template: tpl.to_string(),
                             project: trimmed_name.to_string(),
+                            agent_override: Some(self.creation_modal.selected_agent().to_string()),
                             prompt,
                         };
                     } else {
@@ -671,6 +673,7 @@ impl QuickLauncherState {
                         QuickLauncherAction::Create {
                             template: tpl.to_string(),
                             project: trimmed_name.to_string(),
+                            agent_override: Some(self.creation_modal.selected_agent().to_string()),
                             prompt,
                         }
                     } else {
@@ -1356,6 +1359,7 @@ mod tests {
             QuickLauncherAction::Create {
                 template: "analytics".to_string(),
                 project: "my-feature".to_string(),
+                agent_override: Some("claude".to_string()),
                 prompt: Some("Initial task prompt".to_string()),
             }
         );
@@ -1375,6 +1379,46 @@ mod tests {
             QuickLauncherAction::Create {
                 template: "ws1".to_string(),
                 project: "proj-without-prompt".to_string(),
+                agent_override: Some("claude".to_string()),
+                prompt: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_submission_create_project_with_custom_template_agent() {
+        let config_toml = r#"
+default_agent = "claude"
+repos_dir = ".botai_repos"
+
+[agents.claude]
+command = "claude"
+args = []
+
+[agents.agy]
+command = "agy"
+args = []
+
+[templates.agy_template]
+description = "Template using agy"
+default_agent = "agy"
+repos = []
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut launcher = QuickLauncherState::from_config(&config, &cwd, vec![], Some("agy_template"));
+        launcher.focus = LauncherFocus::ProjectName;
+        for c in "new-agy-proj".chars() {
+            launcher.handle_key(key(KeyCode::Char(c)));
+        }
+
+        let action = launcher.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            action,
+            QuickLauncherAction::Create {
+                template: "agy_template".to_string(),
+                project: "new-agy-proj".to_string(),
+                agent_override: Some("agy".to_string()),
                 prompt: None,
             }
         );
