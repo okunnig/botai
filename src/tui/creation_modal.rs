@@ -67,7 +67,7 @@ pub struct ProjectCreationModal {
     pub config: Config,
     pub cwd: PathBuf,
     pub step: CreationStep,
-    pub template_search_query: String,
+    pub template_search_query: TextInput,
     pub templates: Vec<String>,
     pub selected_template_idx: usize,
     pub project_name_input: TextInput,
@@ -177,7 +177,7 @@ impl ProjectCreationModal {
             config: config.clone(),
             cwd: cwd.to_path_buf(),
             step,
-            template_search_query: String::new(),
+            template_search_query: TextInput::new().with_placeholder("<type to filter templates>"),
             templates,
             selected_template_idx,
             project_name_input: TextInput::new().with_placeholder("<enter project name>"),
@@ -211,9 +211,14 @@ impl ProjectCreationModal {
     }
 
     /// Sets the template search filter query.
-    pub fn with_query(mut self, query: impl Into<String>) -> Self {
-        self.template_search_query = query.into();
+    pub fn with_template_search_query(mut self, query: impl Into<String>) -> Self {
+        self.template_search_query.set_value(query.into());
         self
+    }
+
+    /// Sets the template search filter query (alias for `with_template_search_query`).
+    pub fn with_query(self, query: impl Into<String>) -> Self {
+        self.with_template_search_query(query)
     }
 
     /// Returns the indices into `self.templates` matching `self.template_search_query`.
@@ -921,8 +926,7 @@ impl ProjectCreationModal {
         match self.step {
             CreationStep::SelectTemplate => {
                 let prefix_len = 8u16; // "Filter: "
-                let cursor_x =
-                    inner.x + prefix_len + self.template_search_query.chars().count() as u16;
+                let cursor_x = inner.x + prefix_len + self.template_search_query.cursor as u16;
                 let cursor_y = inner.y;
                 if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                     Some(Position::new(cursor_x, cursor_y))
@@ -998,44 +1002,20 @@ impl ProjectCreationModal {
                     self.cycle_template_next();
                     CreationModalAction::None
                 }
-                KeyCode::Left => {
+                KeyCode::PageUp => {
                     self.cycle_template_prev();
                     CreationModalAction::None
                 }
-                KeyCode::Right => {
+                KeyCode::PageDown => {
                     self.cycle_template_next();
                     CreationModalAction::None
                 }
-                KeyCode::Char('k') if has_ctrl => {
+                KeyCode::Char('p') | KeyCode::Char('P') if has_ctrl => {
                     self.cycle_template_prev();
                     CreationModalAction::None
                 }
-                KeyCode::Char('j') if has_ctrl => {
+                KeyCode::Char('n') | KeyCode::Char('N') if has_ctrl => {
                     self.cycle_template_next();
-                    CreationModalAction::None
-                }
-                KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                    self.template_search_query.push(c);
-                    let matching = self.matching_template_indices();
-                    if matching.is_empty() {
-                        self.selected_template_idx = 0;
-                    } else if self.selected_template_idx >= matching.len() {
-                        self.selected_template_idx = matching.len() - 1;
-                    }
-                    self.sync_agent_with_template();
-                    self.revalidate();
-                    CreationModalAction::None
-                }
-                KeyCode::Backspace => {
-                    self.template_search_query.pop();
-                    let matching = self.matching_template_indices();
-                    if matching.is_empty() {
-                        self.selected_template_idx = 0;
-                    } else if self.selected_template_idx >= matching.len() {
-                        self.selected_template_idx = matching.len() - 1;
-                    }
-                    self.sync_agent_with_template();
-                    self.revalidate();
                     CreationModalAction::None
                 }
                 KeyCode::Enter => {
@@ -1051,7 +1031,20 @@ impl ProjectCreationModal {
                     }
                     CreationModalAction::None
                 }
-                _ => CreationModalAction::None,
+                _ => {
+                    let modified = self.template_search_query.handle_key(key);
+                    let matching = self.matching_template_indices();
+                    if matching.is_empty() {
+                        self.selected_template_idx = 0;
+                    } else if self.selected_template_idx >= matching.len() {
+                        self.selected_template_idx = matching.len() - 1;
+                    }
+                    if modified {
+                        self.sync_agent_with_template();
+                        self.revalidate();
+                    }
+                    CreationModalAction::None
+                }
             },
             CreationStep::ConfigureDetails => {
                 if self.focus == CreationFocus::Prompt {
@@ -1311,19 +1304,16 @@ impl ProjectCreationModal {
     pub fn handle_paste(&mut self, text: &str) {
         match self.step {
             CreationStep::SelectTemplate => {
-                for c in text.chars() {
-                    if !c.is_control() {
-                        self.template_search_query.push(c);
+                if self.template_search_query.insert_str(text) {
+                    let matching = self.matching_template_indices();
+                    if matching.is_empty() {
+                        self.selected_template_idx = 0;
+                    } else if self.selected_template_idx >= matching.len() {
+                        self.selected_template_idx = matching.len() - 1;
                     }
+                    self.sync_agent_with_template();
+                    self.revalidate();
                 }
-                let matching = self.matching_template_indices();
-                if matching.is_empty() {
-                    self.selected_template_idx = 0;
-                } else if self.selected_template_idx >= matching.len() {
-                    self.selected_template_idx = matching.len() - 1;
-                }
-                self.sync_agent_with_template();
-                self.revalidate();
             }
             CreationStep::ConfigureDetails => match self.focus {
                 CreationFocus::ProjectName => {
@@ -1456,12 +1446,16 @@ impl ProjectCreationModal {
             ),
             if self.template_search_query.is_empty() {
                 Span::styled(
-                    "<type to filter templates>",
+                    if self.template_search_query.placeholder.is_empty() {
+                        "<type to filter templates>"
+                    } else {
+                        &self.template_search_query.placeholder
+                    },
                     Style::default().fg(theme.input_placeholder),
                 )
             } else {
                 Span::styled(
-                    &self.template_search_query,
+                    self.template_search_query.value(),
                     Style::default()
                         .fg(theme.input_text)
                         .add_modifier(Modifier::BOLD),
@@ -1686,7 +1680,7 @@ impl ProjectCreationModal {
         let footer_text = if self.templates.is_empty() {
             " [Esc] Cancel "
         } else {
-            " [↑/↓/j/k] Select | [Enter] Next (Configure) | [Esc] Cancel "
+            " [↑/↓] Select | [Enter] Next (Configure) | [Esc] Cancel "
         };
         let footer_line = Line::from(Span::styled(
             footer_text,
@@ -2155,27 +2149,27 @@ mod tests {
         assert_eq!(modal.matching_templates().len(), 3);
 
         // 1. Filter by template name substring "ecom"
-        modal.template_search_query = "ecom".to_string();
+        modal.template_search_query.set_value("ecom");
         assert_eq!(modal.matching_templates(), vec!["ecommerce".to_string()]);
 
         // 2. Case-insensitive match "ANALYTICS"
-        modal.template_search_query = "ANALYTICS".to_string();
+        modal.template_search_query.set_value("ANALYTICS");
         assert_eq!(modal.matching_templates(), vec!["analytics".to_string()]);
 
         // 3. Match against description "warehouse"
-        modal.template_search_query = "warehouse".to_string();
+        modal.template_search_query.set_value("warehouse");
         assert_eq!(modal.matching_templates(), vec!["analytics".to_string()]);
 
         // 4. Match against repo URL "k8s-terraform"
-        modal.template_search_query = "k8s-terraform".to_string();
+        modal.template_search_query.set_value("k8s-terraform");
         assert_eq!(modal.matching_templates(), vec!["infra".to_string()]);
 
         // 5. Match against derived repo name "shop-api"
-        modal.template_search_query = "shop-api".to_string();
+        modal.template_search_query.set_value("shop-api");
         assert_eq!(modal.matching_templates(), vec!["ecommerce".to_string()]);
 
         // 6. Non-matching query
-        modal.template_search_query = "nonexistent-xyz".to_string();
+        modal.template_search_query.set_value("nonexistent-xyz");
         assert!(modal.matching_templates().is_empty());
         assert_eq!(modal.selected_template(), None);
     }
@@ -2309,9 +2303,17 @@ mod tests {
         // inner.x = 13, prefix_len = 8 ("Filter: "), query len = 0 -> 21, inner.y = 7
         assert_eq!(pos, Some(Position::new(21, 7)));
 
-        modal.template_search_query = "xyz".to_string();
+        modal.template_search_query = TextInput::new().with_value("xyz");
         let pos = modal.cursor_position(area);
         assert_eq!(pos, Some(Position::new(24, 7)));
+
+        modal.template_search_query.move_cursor_left();
+        let pos = modal.cursor_position(area);
+        assert_eq!(pos, Some(Position::new(23, 7)));
+
+        modal.template_search_query.move_cursor_home();
+        let pos = modal.cursor_position(area);
+        assert_eq!(pos, Some(Position::new(21, 7)));
     }
 
     #[test]
@@ -3113,5 +3115,144 @@ mod tests {
         // 4. Esc cancels modal (CreationModalAction::Cancel)
         let act = modal.handle_key(key(KeyCode::Esc));
         assert_eq!(act, CreationModalAction::Cancel);
+    }
+
+    #[test]
+    fn test_template_filter_search_bar_text_input_interactions() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.alpha]
+            repos = ["repo-a"]
+            [templates.beta]
+            repos = ["repo-b"]
+            [templates.gamma]
+            repos = ["repo-c"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
+        assert_eq!(modal.selected_template(), Some("alpha"));
+        assert_eq!(modal.template_search_query.value(), "");
+        assert_eq!(modal.template_search_query.cursor(), 0);
+
+        let area = Rect::new(0, 0, 100, 30);
+        // Initial cursor at prefix_len (8): inner.x (13) + 8 = 21
+        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 7)));
+
+        // 1. Typing characters filters list, updates cursor and hardware cursor position
+        for c in "beta".chars() {
+            modal.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(modal.template_search_query.value(), "beta");
+        assert_eq!(modal.template_search_query.cursor(), 4);
+        assert_eq!(modal.matching_templates(), vec!["beta".to_string()]);
+        assert_eq!(modal.selected_template(), Some("beta"));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 7)));
+
+        // 2. Left and Right arrows move cursor within the filter query without changing template selection
+        modal.handle_key(key(KeyCode::Left));
+        assert_eq!(modal.template_search_query.cursor(), 3);
+        assert_eq!(modal.selected_template(), Some("beta"));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 7)));
+
+        modal.handle_key(key(KeyCode::Left));
+        assert_eq!(modal.template_search_query.cursor(), 2);
+        assert_eq!(modal.selected_template(), Some("beta"));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(23, 7)));
+
+        modal.handle_key(key(KeyCode::Right));
+        assert_eq!(modal.template_search_query.cursor(), 3);
+        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 7)));
+
+        // 3. Home / End and Ctrl+A / Ctrl+E move cursor to boundaries
+        modal.handle_key(key(KeyCode::Home));
+        assert_eq!(modal.template_search_query.cursor(), 0);
+        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 7)));
+
+        modal.handle_key(key(KeyCode::End));
+        assert_eq!(modal.template_search_query.cursor(), 4);
+        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 7)));
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(modal.template_search_query.cursor(), 0);
+        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 7)));
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(modal.template_search_query.cursor(), 4);
+        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 7)));
+
+        // 4. Ctrl+U clears to start
+        modal.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(modal.template_search_query.value(), "");
+        assert_eq!(modal.template_search_query.cursor(), 0);
+        assert_eq!(modal.matching_templates().len(), 3);
+
+        // 5. Up and Down arrows (and Ctrl+P / Ctrl+N, PageUp / PageDown) cycle templates without altering filter text or cursor
+        assert_eq!(modal.selected_template(), Some("alpha"));
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.selected_template(), Some("beta"));
+        assert_eq!(modal.template_search_query.value(), "");
+        assert_eq!(modal.template_search_query.cursor(), 0);
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(modal.selected_template(), Some("gamma"));
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(modal.selected_template(), Some("beta"));
+
+        modal.handle_key(key(KeyCode::PageUp));
+        assert_eq!(modal.selected_template(), Some("alpha"));
+
+        modal.handle_key(key(KeyCode::PageDown));
+        assert_eq!(modal.selected_template(), Some("beta"));
+
+        // 6. Word navigation and readline shortcuts: Ctrl+Left / Alt+B, Ctrl+Right / Alt+F, Ctrl+W, Ctrl+K
+        modal.template_search_query.set_value("alpha beta gamma");
+        modal.template_search_query.move_cursor_end();
+        assert_eq!(modal.template_search_query.cursor(), 16);
+
+        // Ctrl+Left / Alt+B
+        modal.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(modal.template_search_query.cursor(), 11); // start of "gamma"
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(modal.template_search_query.cursor(), 6); // start of "beta"
+
+        // Ctrl+Right / Alt+F
+        modal.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(modal.template_search_query.cursor(), 10); // end of "beta"
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(modal.template_search_query.cursor(), 16); // end of "gamma"
+
+        // Ctrl+W deletes word backward
+        modal.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(modal.template_search_query.value(), "alpha beta ");
+        assert_eq!(modal.template_search_query.cursor(), 11);
+
+        // Move to position 6 (start of "beta ") and Ctrl+K deletes to end
+        modal.template_search_query.set_cursor(6);
+        modal.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(modal.template_search_query.value(), "alpha ");
+        assert_eq!(modal.template_search_query.cursor(), 6);
+
+        // Delete char backward (Backspace) and forward (Delete)
+        modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(modal.template_search_query.value(), "alpha");
+        assert_eq!(modal.template_search_query.cursor(), 5);
+
+        modal.template_search_query.set_cursor(0);
+        modal.handle_key(key(KeyCode::Delete));
+        assert_eq!(modal.template_search_query.value(), "lpha");
+        assert_eq!(modal.template_search_query.cursor(), 0);
+
+        // 7. Paste sanitization and insertion at cursor
+        modal.template_search_query.set_value("a");
+        modal.template_search_query.set_cursor(1);
+        modal.handle_paste("lp\r\nha-\x07test");
+        assert_eq!(modal.template_search_query.value(), "alpha-test");
+        assert_eq!(modal.template_search_query.cursor(), 10);
     }
 }

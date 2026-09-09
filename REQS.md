@@ -421,12 +421,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Non-blocking `poll_validation()` drains validation worker responses on TUI loop ticks.
   - **Two-Step Dialog Progression**:
     1. **Step 1: Searchable Template Selection (`CreationStep::SelectTemplate`)**:
-       - **Top Filter Search Bar**: Real-time search filter query (`Filter: <query>`).
+       - **Top Filter Search Bar**: Real-time search filter powered by the reusable `TextInput` component (`Filter: <query>`), supporting in-line character cursor positioning, full readline editing keybindings (`Home`/`Ctrl+A`, `End`/`Ctrl+E`, `Left`/`Right`, `Ctrl+Left`/`Alt+B`, `Ctrl+Right`/`Alt+F`, `Backspace`, `Delete`, `Ctrl+U`, `Ctrl+K`, `Ctrl+W`), paste sanitization, and hardware terminal cursor synchronization.
        - **Comprehensive Matching Criteria**: Case-insensitive substring matching against template names, descriptions, and constituent repository names/sources.
        - **Master-Detail Split Layout**:
          - *Left Panel*: Filtered template list with active selection indicator (` > `) and matching template count.
          - *Right Preview Pane*: Live preview of the highlighted template (description, repository count, repository names and clone URLs, default agent CLI, and custom instructions).
-       - **Controls**: `Up`/`Down`/`j`/`k` (navigate list), typing text filters list, `Backspace` deletes query char, `Enter` selects template and advances to Step 2, `Esc` cancels/closes modal.
+       - **Controls**: `Up`/`Down` and `Ctrl+P`/`Ctrl+N` (navigate template list), text typing and readline shortcuts (edit search query), `Enter` selects template and advances to Step 2, `Esc` cancels/closes modal.
        - **Consistent Template Selection & Preview (No Single-Template Bypass)**: Regardless of template count (even when only one template is configured), the creation modal always begins in Step 1 (`CreationStep::SelectTemplate`) to ensure uniform visibility of template descriptions, repository sources, and configuration. When only a single template exists, it is automatically highlighted and pre-selected so the user can immediately review its preview and press `Enter` to advance.
        - **Empty-State Presentation**: If zero templates are configured in `config.toml`, Step 1 renders a helpful empty-state preview card: `"No templates found in config.toml. Run 'botai edit' to configure templates."` with `Esc` to cancel.
     2. **Step 2: Project Details & Configuration (`CreationStep::ConfigureDetails`)**:
