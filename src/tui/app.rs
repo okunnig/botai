@@ -61,13 +61,30 @@ pub struct TuiApp {
     pub pending_raw_input: Vec<u8>,
 }
 
-struct TerminalCleanupGuard;
+struct TerminalCleanupGuard {
+    in_tmux: bool,
+}
+
+impl TerminalCleanupGuard {
+    pub fn emit_tmux_modify_other_keys<W: std::io::Write>(writer: &mut W, enable: bool) -> std::io::Result<()> {
+        if enable {
+            writer.write_all(b"\x1b[>4;2m")?;
+        } else {
+            writer.write_all(b"\x1b[>4;0m")?;
+        }
+        writer.flush()
+    }
+}
 
 impl Drop for TerminalCleanupGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
+        let mut out = io::stdout();
+        if self.in_tmux {
+            let _ = Self::emit_tmux_modify_other_keys(&mut out, false);
+        }
         let _ = execute!(
-            io::stdout(),
+            out,
             PopKeyboardEnhancementFlags,
             DisableMouseCapture,
             LeaveAlternateScreen,
@@ -187,6 +204,10 @@ impl TuiApp {
     /// Runs the interactive TUI application event loop.
     pub fn run(&mut self, stdout: &mut Stdout) -> io::Result<()> {
         enable_raw_mode()?;
+        let in_tmux = std::env::var_os("TMUX").is_some();
+        if in_tmux {
+            let _ = TerminalCleanupGuard::emit_tmux_modify_other_keys(stdout, true);
+        }
         execute!(
             stdout,
             EnterAlternateScreen,
@@ -194,12 +215,15 @@ impl TuiApp {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
             crossterm::cursor::Show
         )?;
-        let _guard = TerminalCleanupGuard;
+        let _guard = TerminalCleanupGuard { in_tmux };
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
         let res = self.run_loop(&mut terminal);
 
+        if in_tmux {
+            let _ = TerminalCleanupGuard::emit_tmux_modify_other_keys(terminal.backend_mut(), false);
+        }
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),
@@ -3016,5 +3040,32 @@ repos = []
             app.registry.active_session().unwrap().status(),
             SessionStatus::Busy
         );
+    }
+
+    #[test]
+    fn test_terminal_cleanup_guard_emit_tmux_modify_other_keys() {
+        let mut buf = Vec::new();
+        TerminalCleanupGuard::emit_tmux_modify_other_keys(&mut buf, true)
+            .expect("should write enable sequence");
+        assert_eq!(buf, b"\x1b[>4;2m");
+
+        buf.clear();
+        TerminalCleanupGuard::emit_tmux_modify_other_keys(&mut buf, false)
+            .expect("should write disable sequence");
+        assert_eq!(buf, b"\x1b[>4;0m");
+    }
+
+    #[test]
+    fn test_tmux_env_detection_logic() {
+        let in_tmux = std::env::var_os("TMUX").is_some();
+        let expected = std::env::var_os("TMUX").is_some();
+        assert_eq!(in_tmux, expected);
+
+        let detect = |var: Option<std::ffi::OsString>| var.is_some();
+        assert!(detect(Some(std::ffi::OsString::from(
+            "/tmp/tmux-1000/default,1234,0"
+        ))));
+        assert!(detect(Some(std::ffi::OsString::from("tmux-session"))));
+        assert!(!detect(None));
     }
 }
