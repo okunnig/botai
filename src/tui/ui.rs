@@ -76,36 +76,41 @@ impl<'a> TerminalView<'a> {
             return;
         }
 
+        let screen = self.vt.screen();
+
         for row in 0..area.height {
             for col in 0..area.width {
                 let target_x = area.x + col;
                 let target_y = area.y + row;
 
-                if let Some(cell) = self.vt.cell(col, row) {
+                if let Some(cell) = screen.cell(row, col) {
                     let mut style = Style::default();
 
-                    if let Some(fg) = cell.fg {
-                        style = style.fg(vt_color_to_ratatui(fg));
+                    match cell.fgcolor() {
+                        vt100::Color::Default => {}
+                        other => style = style.fg(vt_color_to_ratatui(other)),
                     }
-                    if let Some(bg) = cell.bg {
-                        style = style.bg(vt_color_to_ratatui(bg));
+                    match cell.bgcolor() {
+                        vt100::Color::Default => {}
+                        other => style = style.bg(vt_color_to_ratatui(other)),
                     }
-                    if cell.bold {
+                    if cell.bold() {
                         style = style.add_modifier(Modifier::BOLD);
                     }
-                    if cell.italic {
+                    if cell.italic() {
                         style = style.add_modifier(Modifier::ITALIC);
                     }
-                    if cell.underline {
+                    if cell.underline() {
                         style = style.add_modifier(Modifier::UNDERLINED);
                     }
-                    if cell.inverse {
+                    if cell.inverse() {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
 
                     if let Some(rat_cell) = buf.cell_mut((target_x, target_y)) {
-                        if !cell.text.is_empty() {
-                            rat_cell.set_symbol(&cell.text);
+                        let contents = cell.contents();
+                        if !contents.is_empty() {
+                            rat_cell.set_symbol(contents);
                         } else {
                             rat_cell.set_char(' ');
                         }
@@ -196,4 +201,33 @@ mod tests {
         let cell_space = buffer.cell((5, 0)).expect("cell 5,0");
         assert_eq!(cell_space.symbol(), " ");
     }
+
+    #[test]
+    fn test_terminal_view_renders_all_modifiers_and_bg() {
+        let mut vt = VtScreen::new(40, 10);
+        // Italic (3), Underline (4), Inverse (7), Red fg (31), Blue bg (44)
+        vt.process(b"\x1b[3;4;7;31;44mZ\x1b[0m");
+
+        let view = TerminalView::new(&vt);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 10));
+        view.render_to_buffer(Rect::new(0, 0, 40, 10), &mut buffer);
+
+        let cell_z = buffer.cell((0, 0)).expect("cell 0,0");
+        assert_eq!(cell_z.symbol(), "Z");
+        assert_eq!(cell_z.fg, RatatuiColor::Red);
+        assert_eq!(cell_z.bg, RatatuiColor::Blue);
+        assert!(cell_z.modifier.contains(Modifier::ITALIC));
+        assert!(cell_z.modifier.contains(Modifier::UNDERLINED));
+        assert!(cell_z.modifier.contains(Modifier::REVERSED));
+
+        // Area exceeding vt screen dimensions (e.g. height 20 when vt is 10)
+        let mut large_buffer = Buffer::empty(Rect::new(0, 0, 40, 20));
+        view.render_to_buffer(Rect::new(0, 0, 40, 20), &mut large_buffer);
+        let out_of_bounds_cell = large_buffer.cell((0, 15)).expect("cell 0,15");
+        assert_eq!(out_of_bounds_cell.symbol(), " ");
+        assert_eq!(out_of_bounds_cell.fg, RatatuiColor::Reset);
+        assert_eq!(out_of_bounds_cell.bg, RatatuiColor::Reset);
+        assert_eq!(out_of_bounds_cell.modifier, Modifier::empty());
+    }
 }
+

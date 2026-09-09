@@ -89,6 +89,11 @@ impl VtScreen {
         self.parser.screen().size().0
     }
 
+    /// Returns a reference to the underlying `vt100::Screen` for zero-allocation rendering and inspection.
+    pub fn screen(&self) -> &vt100::Screen {
+        self.parser.screen()
+    }
+
     /// Inspects a specific cell at `(col, row)`.
     pub fn cell(&self, col: u16, row: u16) -> Option<VtCell> {
         let cell = self.parser.screen().cell(row, col)?;
@@ -217,6 +222,16 @@ mod tests {
         assert_eq!(screen.size(), (120, 40));
         assert_eq!(screen.cols(), 120);
         assert_eq!(screen.rows(), 40);
+    }
+
+    #[test]
+    fn test_vt_screen_reference() {
+        let mut screen = VtScreen::new(80, 24);
+        screen.process(b"ZeroAlloc");
+        let vt100_screen = screen.screen();
+        assert_eq!(vt100_screen.size(), (24, 80));
+        let cell = vt100_screen.cell(0, 0).expect("Expected cell at 0,0");
+        assert_eq!(cell.contents(), "Z");
     }
 
     #[test]
