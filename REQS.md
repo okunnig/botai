@@ -247,6 +247,10 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Mode 2 (`\x1b[>4;2m`): Enabled when running inside `tmux` (detected via `TMUX` environment variable) to guarantee modifier reporting through tmux's internal terminal multiplexing layer.
     - None (no escape sequence emitted): For Alacritty 0.13+, WezTerm, Kitty, Ghostty, and standard terminals, relying on the native Kitty Keyboard Protocol (`\x1b[>1u`) rather than sending `modifyOtherKeys` Mode 1 (`\x1b[>4;1m`) which would override Alacritty/WezTerm's Kitty mode and suppress Shift+Enter escape sequences.
   - Ensures `PopKeyboardEnhancementFlags` and disabling `modifyOtherKeys` (`\x1b[>4;0m`) are executed during teardown and in `TerminalCleanupGuard::drop`, guaranteeing the host terminal's original keyboard state is fully restored even on unexpected exit or error.
+- **Terminal State Restoration & Panic Hook**:
+  - `install_panic_hook` ensures terminal restoration (raw mode disabled, alternate screen exited, mouse capture disabled, keyboard enhancement flags popped, cursor shown) before diagnostics are printed on any unexpected panic.
+  - Installed via `std::panic::set_hook` at program startup (`src/main.rs`), wrapping the previous panic hook.
+  - Intercepts panics occurring in any thread, immediately invoking `crossterm::terminal::disable_raw_mode()`, resetting tmux `modifyOtherKeys` (`\x1b[>4;0m` if inside a tmux session), executing `PopKeyboardEnhancementFlags`, `DisableMouseCapture`, `LeaveAlternateScreen`, and `crossterm::cursor::Show` before handing control back to the previous hook to format backtraces and panic reports onto a clean host terminal.
 - **Full CSI-u / ANSI Modifier Key Passthrough & Stream Demuxing**:
   - Encodes and decodes modified key events using standard Xterm / CSI-u modifier parameter values:
     `modifier_code = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0) + (Super/Meta ? 8 : 0)`.

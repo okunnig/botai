@@ -93,6 +93,30 @@ impl Drop for TerminalCleanupGuard {
     }
 }
 
+/// Installs a panic hook that restores the host terminal to a clean, usable state
+/// (disabling raw mode, resetting tmux modifyOtherKeys, leaving alternate screen,
+/// disabling mouse capture, popping keyboard enhancement flags, and revealing the cursor)
+/// before delegating to the previous panic hook.
+pub fn install_panic_hook() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let in_tmux = std::env::var_os("TMUX").is_some();
+        let _ = crossterm::terminal::disable_raw_mode();
+        let mut stdout = std::io::stdout();
+        if in_tmux {
+            let _ = TerminalCleanupGuard::emit_tmux_modify_other_keys(&mut stdout, false);
+        }
+        let _ = crossterm::execute!(
+            stdout,
+            crossterm::event::PopKeyboardEnhancementFlags,
+            crossterm::event::DisableMouseCapture,
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
+        previous_hook(panic_info);
+    }));
+}
+
 /// Renders an error / crash banner at the bottom line of the given viewport area.
 pub fn render_error_banner(exit_code: Option<u32>, area: Rect, buf: &mut Buffer, theme: &Theme) {
     if area.height == 0 || area.width == 0 {
@@ -3067,5 +3091,31 @@ repos = []
         ))));
         assert!(detect(Some(std::ffi::OsString::from("tmux-session"))));
         assert!(!detect(None));
+    }
+
+    #[test]
+    fn test_install_panic_hook() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let hook_called = Arc::new(AtomicBool::new(false));
+        let hook_called_clone = Arc::clone(&hook_called);
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |_info| {
+            hook_called_clone.store(true, Ordering::SeqCst);
+        }));
+
+        install_panic_hook();
+
+        let result = std::panic::catch_unwind(|| {
+            panic!("test panic hook trigger");
+        });
+
+        assert!(result.is_err());
+        assert!(hook_called.load(Ordering::SeqCst));
+
+        // Restore original hook
+        std::panic::set_hook(prev);
     }
 }

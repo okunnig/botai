@@ -10,7 +10,7 @@ pub mod text_input;
 pub mod theme;
 pub mod ui;
 
-pub use app::TuiApp;
+pub use app::{install_panic_hook, TuiApp};
 pub use creation_modal::{CreationFocus, CreationModalAction, CreationStep, ProjectCreationModal};
 pub use dashboard::{
     render_dashboard, CreationModalState, DashboardAction, DashboardState, DestroyModalState,

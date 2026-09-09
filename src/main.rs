@@ -13,6 +13,7 @@ use botai::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, VtS
 use botai::tui::{DashboardState, TuiApp};
 
 fn main() -> Result<()> {
+    botai::tui::install_panic_hook();
     let cli = Cli::parse_args();
 
     if let Some(Commands::Init { force, stdout }) = cli.command {
