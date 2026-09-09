@@ -1187,6 +1187,10 @@ mod tests {
 
         assert!(expected_project_dir.exists());
         assert!(expected_project_dir.join("AGENTS.md").exists());
+        assert_eq!(
+            fs::read_to_string(expected_project_dir.join("CLAUDE.md")).expect("CLAUDE.md"),
+            "@AGENTS.md\n"
+        );
         assert!(expected_project_dir.join("backend").exists());
         assert!(expected_project_dir
             .join("backend")
@@ -1298,6 +1302,10 @@ mod tests {
         let project_dir = project_cwd.join("checkout-feat");
         assert!(project_dir.exists());
         assert!(project_dir.join("AGENTS.md").exists());
+        assert_eq!(
+            fs::read_to_string(project_dir.join("CLAUDE.md")).expect("CLAUDE.md"),
+            "@AGENTS.md\n"
+        );
         assert!(project_dir.join("backend").exists());
         assert!(project_dir.join("backend").join("README.md").exists());
 

@@ -167,7 +167,7 @@ impl ContextSynthesizer {
         md
     }
 
-    /// Generates `AGENTS.md` in the specified project root directory and creates a `CLAUDE.md` symlink.
+    /// Generates `AGENTS.md` in the specified project root directory and creates a `CLAUDE.md` context import file.
     pub fn generate_agents_md(
         project_root: &Path,
         context: &ProjectContext,
@@ -179,53 +179,29 @@ impl ContextSynthesizer {
         let content = Self::synthesize(context);
         std::fs::write(&target_path, &content)?;
 
-        // Also create a symlink named `CLAUDE.md` in the project root pointing to `AGENTS.md` (relative target "AGENTS.md").
-        // If symlink creation fails (or on platforms/environments where symlinks might fail), fall back to copying `AGENTS.md` to `CLAUDE.md`.
-        let claude_md_path = project_root.join("CLAUDE.md");
-        create_claude_md_link(&target_path, &claude_md_path, &content)?;
+        // Automatically create a `CLAUDE.md` file at the project root containing `@AGENTS.md` so that
+        // Claude Code imports and evaluates the synthesized multi-repo orientation context directly
+        // via its native `@include` directive without duplicating file content or relying on fragile OS filesystem symlinks.
+        create_claude_md_import(project_root)?;
 
         Ok(target_path)
     }
 }
 
-fn create_claude_md_link(
-    target_path: &Path,
-    claude_md_path: &Path,
-    content: &str,
-) -> Result<(), std::io::Error> {
-    if std::fs::symlink_metadata(claude_md_path).is_ok() {
-        let _ = std::fs::remove_file(claude_md_path);
-    }
-
-    #[cfg(unix)]
-    {
-        if std::os::unix::fs::symlink(Path::new("AGENTS.md"), claude_md_path).is_err()
-            && std::fs::copy(target_path, claude_md_path).is_err()
-        {
-            std::fs::write(claude_md_path, content)?;
+fn create_claude_md_import(project_root: &Path) -> Result<(), std::io::Error> {
+    let claude_md_path = project_root.join("CLAUDE.md");
+    if let Ok(meta) = std::fs::symlink_metadata(&claude_md_path) {
+        if meta.is_dir() {
+            let _ = std::fs::remove_dir_all(&claude_md_path);
+        } else {
+            let _ = std::fs::remove_file(&claude_md_path);
         }
     }
-
-    #[cfg(windows)]
-    {
-        if std::os::windows::fs::symlink_file(Path::new("AGENTS.md"), claude_md_path).is_err()
-            && std::fs::copy(target_path, claude_md_path).is_err()
-        {
-            std::fs::write(claude_md_path, content)?;
-        }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        if std::fs::copy(target_path, claude_md_path).is_err() {
-            std::fs::write(claude_md_path, content)?;
-        }
-    }
-
+    std::fs::write(&claude_md_path, "@AGENTS.md\n")?;
     Ok(())
 }
 
-/// Convenience function for generating `AGENTS.md`.
+/// Convenience function for generating `AGENTS.md` and `CLAUDE.md`.
 pub fn generate_agents_md(
     project_root: &Path,
     context: &ProjectContext,
@@ -422,12 +398,12 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_agents_md_creates_claude_md_symlink() {
+    fn test_generate_agents_md_creates_claude_md_import() {
         let temp_dir = TempDir::new().expect("create tempdir");
         let project_root = temp_dir.path().join("my-project");
 
         let context = ProjectContext::new("my-project", "my-template")
-            .with_description("Project for testing CLAUDE.md link")
+            .with_description("Project for testing CLAUDE.md import")
             .with_repos(vec![RepoMapping::new(
                 "backend",
                 PathBuf::from("/repos/backend"),
@@ -442,16 +418,36 @@ mod tests {
 
         let claude_md_path = project_root.join("CLAUDE.md");
         assert!(claude_md_path.exists());
+        assert!(claude_md_path.is_file());
 
-        #[cfg(unix)]
-        {
-            let link_target = fs::read_link(&claude_md_path).expect("read CLAUDE.md symlink");
-            assert_eq!(link_target, PathBuf::from("AGENTS.md"));
-        }
+        let metadata = fs::symlink_metadata(&claude_md_path).expect("read symlink metadata");
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "CLAUDE.md must be a regular file, not a symlink"
+        );
 
-        let agents_content = fs::read_to_string(&agents_md_path).expect("read AGENTS.md");
         let claude_content = fs::read_to_string(&claude_md_path).expect("read CLAUDE.md");
-        assert_eq!(agents_content, claude_content);
-        assert!(claude_content.contains("Project for testing CLAUDE.md link"));
+        assert_eq!(claude_content, "@AGENTS.md\n");
+    }
+
+    #[test]
+    fn test_generate_agents_md_overwrites_existing_claude_md() {
+        let temp_dir = TempDir::new().expect("create tempdir");
+        let project_root = temp_dir.path().join("existing-project");
+        fs::create_dir_all(&project_root).expect("create project dir");
+
+        let claude_md_path = project_root.join("CLAUDE.md");
+        fs::write(&claude_md_path, "legacy-content").expect("write old file");
+
+        let context = ProjectContext::new("existing-project", "template-v2")
+            .with_description("Updated template");
+
+        generate_agents_md(&project_root, &context).expect("generate agents md");
+
+        let claude_content = fs::read_to_string(&claude_md_path).expect("read CLAUDE.md");
+        assert_eq!(claude_content, "@AGENTS.md\n");
+
+        let metadata = fs::symlink_metadata(&claude_md_path).expect("read symlink metadata");
+        assert!(!metadata.file_type().is_symlink());
     }
 }

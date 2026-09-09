@@ -123,6 +123,16 @@ fn test_full_git_worktree_and_context_synthesis_lifecycle() {
     assert_eq!(agents_md_path, project_root.join("AGENTS.md"));
     assert!(agents_md_path.exists());
 
+    let claude_md_path = project_root.join("CLAUDE.md");
+    assert!(claude_md_path.exists());
+    let claude_meta = fs::symlink_metadata(&claude_md_path).expect("CLAUDE.md metadata");
+    assert!(
+        !claude_meta.file_type().is_symlink(),
+        "CLAUDE.md must be a regular file, not a symlink"
+    );
+    let claude_content = fs::read_to_string(&claude_md_path).expect("Failed to read CLAUDE.md");
+    assert_eq!(claude_content, "@AGENTS.md\n");
+
     let agents_content = fs::read_to_string(&agents_md_path).expect("Failed to read AGENTS.md");
     assert!(agents_content.contains(project_name));
     assert!(agents_content.contains(template_name));
@@ -205,6 +215,13 @@ fn test_template_agents_md_append_integration() {
     let agents_md_path =
         generate_agents_md(&project_root, &context).expect("Failed to generate AGENTS.md");
     assert!(agents_md_path.exists());
+
+    let claude_md_path = project_root.join("CLAUDE.md");
+    assert!(claude_md_path.exists());
+    assert_eq!(
+        fs::read_to_string(&claude_md_path).expect("read CLAUDE.md"),
+        "@AGENTS.md\n"
+    );
 
     let content = fs::read_to_string(&agents_md_path).expect("Failed to read AGENTS.md");
     assert!(content.contains(project_name));
