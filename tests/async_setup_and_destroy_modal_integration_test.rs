@@ -8,6 +8,7 @@ use tempfile::tempdir;
 use botai::config::Config;
 use botai::session::SessionRegistry;
 use botai::tui::dashboard::{DashboardAction, DashboardState, DestroyModalState};
+use botai::tui::destroy_progress_modal::render_destroy_progress_modal;
 use botai::tui::setup_modal::render_setup_modal;
 use botai::tui::theme::Theme;
 use botai::tui::TuiApp;
@@ -84,6 +85,20 @@ fn test_integration_destroy_confirmation_modal_lifecycle() {
         .with_cwd(cwd.clone());
 
     app.handle_dashboard_action(action);
+    assert!(app.destroy_progress_modal.is_some());
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        app.poll_destroy_progress();
+        if let Some(modal) = &app.destroy_progress_modal {
+            if modal.is_finished {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    app.handle_destroy_progress_modal_key(key(KeyCode::Enter));
+    assert!(app.destroy_progress_modal.is_none());
     assert!(!proj_del.exists());
     assert!(proj_keep.exists());
 }
@@ -324,4 +339,237 @@ repos = ["nonexistent-repo-that-does-not-exist"]
 
     // Failing project directory should not remain
     assert!(!cwd.join("failing-proj").exists());
+}
+
+#[test]
+fn test_integration_async_project_destroy_progress_streaming_and_success() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    let tmp = tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+
+    // 1. Setup mock central repo
+    let central_repo = cwd.join("repos").join("worker_service");
+    fs::create_dir_all(&central_repo).expect("create repo dir");
+
+    let init = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&central_repo)
+        .status()
+        .or_else(|_| {
+            std::process::Command::new("git")
+                .arg("init")
+                .current_dir(&central_repo)
+                .status()
+        })
+        .expect("git init");
+    assert!(init.success());
+
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Tester"])
+        .current_dir(&central_repo)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "tester@botai.dev"])
+        .current_dir(&central_repo)
+        .status();
+
+    fs::write(central_repo.join("README.md"), "# Central Worker\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(&central_repo)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&central_repo)
+        .status();
+
+    // 2. Setup project with worktree and pre_destroy marker
+    let project_name = "async-del-service";
+    let project_dir = cwd.join(project_name);
+    fs::create_dir_all(&project_dir).expect("create project dir");
+
+    let pre_destroy_marker = cwd.join("pre_destroy_ran.log");
+
+    let config_toml = format!(
+        r#"
+default_agent = "mock"
+repos_dir = "{}/repos"
+
+[agents.mock]
+command = "sh"
+args = []
+
+[templates.del_tpl]
+repos = ["worker_service"]
+pre_destroy = [
+    ["sh", "-c", "echo executed_pre_destroy > {}"]
+]
+"#,
+        cwd.display().to_string().replace('\\', "/"),
+        pre_destroy_marker.display().to_string().replace('\\', "/")
+    );
+    let config = Config::load_from_str(&config_toml).unwrap();
+
+    fs::write(
+        project_dir.join("AGENTS.md"),
+        "# Multi-Repo Project\n\nTemplate: **del_tpl**\n",
+    )
+    .unwrap();
+
+    let worktree_path = project_dir.join("worker_service");
+    botai::git::create_worktree(&central_repo, &worktree_path, project_name)
+        .expect("create worktree");
+
+    let registry = SessionRegistry::new();
+    let dashboard = DashboardState::from_env(&config, &cwd);
+    let mut app = TuiApp::new(registry)
+        .with_dashboard(dashboard)
+        .with_config(config)
+        .with_cwd(cwd.clone());
+
+    // Trigger destruction action
+    app.handle_dashboard_action(DashboardAction::Destroy(project_name.to_string()));
+
+    assert!(app.destroy_progress_modal.is_some());
+    let initial_modal = app.destroy_progress_modal.as_ref().unwrap();
+    assert_eq!(initial_modal.project_name, project_name);
+
+    // Poll until completion
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        app.poll_destroy_progress();
+        if let Some(modal) = &app.destroy_progress_modal {
+            if modal.is_finished {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(
+        app.destroy_progress_modal.is_some(),
+        "Modal remains open upon completion"
+    );
+    let modal = app.destroy_progress_modal.as_ref().unwrap();
+    assert!(modal.is_finished);
+    assert!(modal.is_success);
+    assert!(modal.error.is_none());
+    assert_eq!(modal.current_step, 4);
+
+    // Render the finished modal
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    let theme = Theme::default();
+    render_destroy_progress_modal(modal, area, &mut buf, &theme);
+    let rendered = buf
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
+    assert!(rendered.contains("Project Destroyed: async-del-service"));
+    assert!(rendered.contains("Destroyed Successfully"));
+    assert!(rendered.contains("Destruction Logs"));
+    assert!(rendered.contains("[Enter] / [Esc] Return to dashboard"));
+
+    // Test mouse scrolling
+    let scroll_up = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 10,
+        modifiers: KeyModifiers::empty(),
+    };
+    app.handle_destroy_progress_modal_mouse(scroll_up);
+    assert_eq!(
+        app.destroy_progress_modal.as_ref().unwrap().scroll_offset,
+        3
+    );
+
+    // Test key scrolling
+    app.handle_destroy_progress_modal_key(key(KeyCode::Up));
+    assert_eq!(
+        app.destroy_progress_modal.as_ref().unwrap().scroll_offset,
+        4
+    );
+    app.handle_destroy_progress_modal_key(key(KeyCode::Down));
+    assert_eq!(
+        app.destroy_progress_modal.as_ref().unwrap().scroll_offset,
+        3
+    );
+
+    // Non-dismiss key does not dismiss
+    app.handle_destroy_progress_modal_key(key(KeyCode::Char('x')));
+    assert!(app.destroy_progress_modal.is_some());
+
+    // Enter dismisses modal and refreshes dashboard
+    app.handle_destroy_progress_modal_key(key(KeyCode::Enter));
+    assert!(app.destroy_progress_modal.is_none());
+
+    // Verify project deleted on disk
+    assert!(!project_dir.exists());
+    assert!(pre_destroy_marker.exists());
+    assert_eq!(
+        fs::read_to_string(&pre_destroy_marker).unwrap().trim(),
+        "executed_pre_destroy"
+    );
+
+    // Verify dashboard refreshed
+    assert!(!app
+        .dashboard
+        .as_ref()
+        .unwrap()
+        .local_projects
+        .contains(&project_name.to_string()));
+}
+
+#[test]
+fn test_integration_async_project_destroy_error_retention_and_dismissal() {
+    let tmp = tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+
+    let registry = SessionRegistry::new();
+    let mut app = TuiApp::new(registry).with_cwd(cwd.clone());
+
+    // Start destruction of non-existent project
+    app.start_project_destruction("nonexistent-dir");
+    assert!(app.destroy_progress_modal.is_some());
+
+    // Poll until failure event arrives
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(5) {
+        app.poll_destroy_progress();
+        if let Some(modal) = &app.destroy_progress_modal {
+            if modal.is_finished {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let modal = app.destroy_progress_modal.as_ref().unwrap();
+    assert!(modal.is_finished);
+    assert!(!modal.is_success);
+    assert!(modal.error.is_some());
+
+    // Render error modal
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    let theme = Theme::default();
+    render_destroy_progress_modal(modal, area, &mut buf, &theme);
+    let text = buf
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
+    assert!(text.contains("Project Destruction Failed: nonexistent-dir"));
+    assert!(text.contains("Reason:"));
+    assert!(text.contains("[Enter] / [Esc] Return to dashboard"));
+
+    // Character key keeps modal open
+    app.handle_destroy_progress_modal_key(key(KeyCode::Char('k')));
+    assert!(app.destroy_progress_modal.is_some());
+
+    // Esc dismisses modal
+    app.handle_destroy_progress_modal_key(key(KeyCode::Esc));
+    assert!(app.destroy_progress_modal.is_none());
 }

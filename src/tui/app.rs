@@ -29,6 +29,9 @@ use crate::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
 };
 use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
+use crate::tui::destroy_progress_modal::{
+    render_destroy_progress_modal, DestroyProgressModalState,
+};
 use crate::tui::events::{
     is_incomplete_sgr_mouse, is_shift_enter, parse_raw_events, parse_sgr_mouse,
     translate_mouse_event, RawAction, RawLeaderDecoder,
@@ -48,6 +51,7 @@ pub struct TuiApp {
     pub dashboard: Option<DashboardState>,
     pub quick_launcher: Option<QuickLauncherState>,
     pub setup_modal: Option<SetupModalState>,
+    pub destroy_progress_modal: Option<DestroyProgressModalState>,
     pub config: Option<Config>,
     pub cwd: Option<PathBuf>,
     pub viewport_size: Option<(u16, u16)>,
@@ -108,6 +112,7 @@ impl TuiApp {
             dashboard: None,
             quick_launcher: None,
             setup_modal: None,
+            destroy_progress_modal: None,
             config: None,
             cwd: None,
             viewport_size: None,
@@ -140,6 +145,12 @@ impl TuiApp {
     /// Sets the setup modal state on `TuiApp`.
     pub fn with_setup_modal(mut self, setup_modal: SetupModalState) -> Self {
         self.setup_modal = Some(setup_modal);
+        self
+    }
+
+    /// Sets the destroy progress modal state on `TuiApp`.
+    pub fn with_destroy_progress_modal(mut self, modal: DestroyProgressModalState) -> Self {
+        self.destroy_progress_modal = Some(modal);
         self
     }
 
@@ -282,6 +293,7 @@ impl TuiApp {
 
             // 1. Poll setup progress events and modal validation
             self.poll_setup_progress();
+            self.poll_destroy_progress();
             if let Some(dashboard) = &mut self.dashboard {
                 dashboard.poll_validation();
             }
@@ -354,6 +366,15 @@ impl TuiApp {
                     if let Some(setup_modal) = &self.setup_modal {
                         render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
                     }
+
+                    if let Some(destroy_modal) = &self.destroy_progress_modal {
+                        render_destroy_progress_modal(
+                            destroy_modal,
+                            f.area(),
+                            f.buffer_mut(),
+                            &theme,
+                        );
+                    }
                 })
                 .map_err(|e| io::Error::other(e.to_string()))?;
 
@@ -382,7 +403,17 @@ impl TuiApp {
 
     /// Routes incoming raw input bytes either to active modal/dashboard event decoders or directly to PTY passthrough/leader decoder.
     pub fn handle_input_bytes(&mut self, bytes: &[u8]) {
-        if self.setup_modal.is_some() {
+        if self.destroy_progress_modal.is_some() {
+            let events = parse_raw_events(bytes);
+            for event in events {
+                match event {
+                    Event::Key(key) => self.handle_destroy_progress_modal_key(key),
+                    Event::Paste(_) => {}
+                    Event::Mouse(mouse) => self.handle_destroy_progress_modal_mouse(mouse),
+                    _ => {}
+                }
+            }
+        } else if self.setup_modal.is_some() {
             let events = parse_raw_events(bytes);
             for event in events {
                 match event {
@@ -425,6 +456,7 @@ impl TuiApp {
         let active_session_id = self.registry.active_session().map(|s| s.id().to_string());
         let is_focused_mode = self.quick_launcher.is_none()
             && self.setup_modal.is_none()
+            && self.destroy_progress_modal.is_none()
             && !self.is_showing_dashboard();
 
         for session in self.registry.list_mut() {
@@ -648,11 +680,7 @@ impl TuiApp {
                 self.start_project_creation(&template, &project, prompt.as_deref());
             }
             DashboardAction::Destroy(project) => {
-                if let Some(session) = self.registry.get_by_project(&project) {
-                    let id = session.id().to_string();
-                    let _ = self.registry.remove(&id);
-                }
-                let _ = self.destroy_project(&project);
+                self.start_project_destruction(&project);
             }
             DashboardAction::None => {}
         }
@@ -689,6 +717,58 @@ impl TuiApp {
         if let Some(modal) = &mut self.setup_modal {
             let _ = modal.handle_mouse(mouse);
         }
+    }
+
+    /// Polls destruction progress events and advances modal spinner animation.
+    pub fn poll_destroy_progress(&mut self) {
+        if let Some(modal) = &mut self.destroy_progress_modal {
+            modal.tick();
+            modal.poll_events();
+        }
+    }
+
+    /// Handles keyboard events when the destruction progress modal is active.
+    /// Dismisses the modal and refreshes dashboard on completion/error.
+    pub fn handle_destroy_progress_modal_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(modal) = &mut self.destroy_progress_modal {
+            if modal.handle_key(key) {
+                self.destroy_progress_modal = None;
+                self.refresh_dashboard();
+            }
+        }
+    }
+
+    /// Handles mouse events (such as scroll wheel) when the destruction progress modal is active.
+    pub fn handle_destroy_progress_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        if let Some(modal) = &mut self.destroy_progress_modal {
+            let _ = modal.handle_mouse(mouse);
+        }
+    }
+
+    /// Starts asynchronous project destruction on a background worker thread and activates `destroy_progress_modal`.
+    pub fn start_project_destruction(&mut self, project_name: &str) {
+        if let Some(session) = self.registry.get_by_project(project_name) {
+            let id = session.id().to_string();
+            let _ = self.registry.remove(&id);
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let modal = DestroyProgressModalState::new(project_name, rx);
+        self.destroy_progress_modal = Some(modal);
+
+        let cwd = self
+            .cwd
+            .clone()
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let config = self.config.clone();
+        let proj_name = project_name.to_string();
+
+        std::thread::spawn(move || {
+            crate::tui::destroy_progress_modal::run_destroy_worker(
+                config, cwd, proj_name, true, tx,
+            );
+        });
     }
 
     /// Starts asynchronous project creation on a background worker thread and activates `setup_modal`.
@@ -1117,6 +1197,7 @@ impl TuiApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn test_tui_app_creation_and_quit() {
@@ -1848,9 +1929,26 @@ repos = []
         // Destroy the project from dashboard
         app.handle_dashboard_action(DashboardAction::Destroy("active-proj".to_string()));
 
-        // Session must be removed from registry
+        // Session must be removed from registry immediately
         assert_eq!(app.registry.len(), 0);
         assert!(app.registry.get_by_project("active-proj").is_none());
+        assert!(app.destroy_progress_modal.is_some());
+
+        // Wait for asynchronous destruction to complete
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            app.poll_destroy_progress();
+            if let Some(modal) = &app.destroy_progress_modal {
+                if modal.is_finished {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Dismiss modal
+        app.handle_destroy_progress_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.destroy_progress_modal.is_none());
 
         // Directory must be removed
         assert!(!proj_dir.exists());

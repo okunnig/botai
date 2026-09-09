@@ -180,8 +180,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - The multi-repo structure and mapping of child worktree directories.
     - Each repository's purpose and inter-dependencies.
     - Guidance for the AI agent on navigating, building, and modifying multiple repos simultaneously.
-  - **`CLAUDE.md` Compatibility Symlink**:
-    - When `AGENTS.md` is created at the project root, automatically creates a symlink from `CLAUDE.md` pointing to `AGENTS.md` (`CLAUDE.md -> AGENTS.md`) so agents expecting `CLAUDE.md` (e.g. Claude Code) seamlessly discover project context without duplication. On systems where symlink creation fails due to platform restrictions, falls back to copying `AGENTS.md` to `CLAUDE.md`.
+  - **`CLAUDE.md` Context Import (`@AGENTS.md`)**:
+    - When `AGENTS.md` is created at the project root, automatically creates a `CLAUDE.md` file at the project root containing `@AGENTS.md` so that Claude Code imports and evaluates the synthesized multi-repo orientation context directly via its native `@include` directive without duplicating file content or relying on fragile OS filesystem symlinks.
 - **Custom Template Instructions (`agents_md_append`)**:
   - Optional custom markdown instructions configured per template in `config.toml` via `agents_md_append`.
   - When configured and non-empty after trimming, automatically appended to `AGENTS.md` under a dedicated `## Template Instructions` section.
@@ -388,10 +388,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Exits `botai` with the editor process's exit status code (silent pass-through without blocking on syntax validation).
 - **`botai destroy <project-name> [--force]`**:
   - Validates all child worktrees for uncommitted changes upfront and refuses deletion unless `--force` is specified.
+  - Executes configured template `pre_destroy` lifecycle hooks sequentially at the project root directory before unlinking worktrees, capturing command output and logging warnings on failures.
   - Automatically resolves the underlying source repository in `repos_dir` (or local path) for every child worktree via `resolve_main_repo`.
   - Executes `git worktree remove` and `git worktree prune` directly against the backing central cached repositories via `remove_worktree_auto`, thoroughly clearing worktree metadata, `.git/worktrees/<name>` directories, and internal git registrations.
   - Removes the project directory and its worktrees from disk.
   - Preserves git branches (leaving code intact in git history) and enables immediate re-creation without stale metadata collisions.
+  - Streams real-time structured destruction events (`ProjectDestroyEvent`: Step, Log, Success, Error) to CLI stdout or the TUI destruction modal, ensuring progress visibility without blocking.
 
 ---
 
@@ -463,6 +465,23 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `Up` / `Down` / `j` / `k` (or mouse wheel scroll): Navigate between local projects in the list.
   - `Enter`: Attach/resume focus on the selected project session.
   - `d`: Open the confirmation modal (` Confirm Destroy Project `) for clean worktree removal and directory deletion.
+- **Asynchronous Live Project Destruction Progress & Log Modal (`DestroyProgressModalState`)**:
+  - **Non-Blocking Background Worker**: Upon confirming destruction with `y` or `Enter`, `botai` does NOT block or freeze the TUI event loop; it launches the destruction pipeline inside a dedicated background worker thread (`std::thread::spawn`).
+  - **Structured Progress Events**: Emits sequential `ProjectDestroyEvent` events (`Step`, `Log`, `Success`, `Error`) over an `mpsc::channel` to drive the modal UI.
+  - **Destruction Lifecycle Steps**:
+    1. `Step [1/4]`: Executing template `pre_destroy` lifecycle hooks (streaming hook command output).
+    2. `Step [2/4]`: Validating worktrees and checking uncommitted changes (enforcing safety unless forced).
+    3. `Step [3/4]`: Removing git worktrees and pruning metadata across backing central repositories via `remove_worktree_auto`.
+    4. `Step [4/4]`: Recursively deleting the project workspace directory.
+  - **Rich Modal Presentation**:
+    - Centered floating dialog styled with active theme colors.
+    - Title bar: ` Destroying Project: <name> ` (with dynamic status colors: busy/yellow while in progress, green on success, red on error).
+    - Header: Displays active step counter and status message with an animated spinner (`⠋`, `⠙`, `⠹`, etc.).
+    - Scrollable Log Box (` Destruction Logs `): Retains all timestamped/streamed log lines with full mouse wheel and keyboard scrolling (`Up`, `Down`, `PageUp`, `PageDown`).
+    - Footer Hints: Informs user of running status, or prompts `[Enter] / [Esc] Return to dashboard` upon completion.
+  - **Completion & Dismissal**:
+    - Stays open upon completion so the user can inspect final status and logs at their own pace.
+    - Dismissing via `Enter`, `Esc`, `q`, or `Space` closes the modal and automatically refreshes the dashboard's project list.
   - `q` / `Esc`: Quit `botai`.
 
 ---

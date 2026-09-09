@@ -315,6 +315,19 @@ repos = []
         .contains(&"destroy-me".to_string()));
 
     app.handle_dashboard_action(DashboardAction::Destroy("destroy-me".to_string()));
+    assert!(app.destroy_progress_modal.is_some());
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(5) {
+        app.poll_destroy_progress();
+        if let Some(modal) = &app.destroy_progress_modal {
+            if modal.is_finished {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    app.handle_destroy_progress_modal_key(key(KeyCode::Enter));
+    assert!(app.destroy_progress_modal.is_none());
     assert!(!to_destroy.exists());
     assert!(!app
         .dashboard

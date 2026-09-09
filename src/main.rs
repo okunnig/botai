@@ -375,7 +375,30 @@ fn cmd_list(config: &Config) -> Result<()> {
 /// `botai destroy <project> [--force]`
 fn cmd_destroy(config: Option<&Config>, project_name: &str, force: bool) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current working directory")?;
-    botai::project::destroy_project_workspace(config, &cwd, project_name, force)?;
-    println!("Successfully destroyed project '{project_name}' and cleaned up worktrees.");
+    let progress_sink = |event: botai::project::ProjectDestroyEvent| match event {
+        botai::project::ProjectDestroyEvent::Step {
+            current,
+            total,
+            message,
+        } => {
+            println!("[{current}/{total}] {message}");
+        }
+        botai::project::ProjectDestroyEvent::Log(msg) => {
+            println!("{msg}");
+        }
+        botai::project::ProjectDestroyEvent::Success => {
+            println!("✓ Successfully destroyed project '{project_name}' and cleaned up worktrees.");
+        }
+        botai::project::ProjectDestroyEvent::Error(err) => {
+            eprintln!("✗ Error: {err}");
+        }
+    };
+    botai::project::destroy_project_workspace_with_progress(
+        config,
+        &cwd,
+        project_name,
+        force,
+        progress_sink,
+    )?;
     Ok(())
 }

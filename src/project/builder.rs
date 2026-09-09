@@ -63,6 +63,19 @@ pub enum ProjectSetupEvent {
     Error(String),
 }
 
+/// Structured events emitted during the project destruction pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectDestroyEvent {
+    Step {
+        current: usize,
+        total: usize,
+        message: String,
+    },
+    Log(String),
+    Success,
+    Error(String),
+}
+
 /// Detailed pre-validation result for project creation inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectValidation {
@@ -757,6 +770,209 @@ pub fn extract_template_name_from_agents_md<P: AsRef<std::path::Path>>(
     None
 }
 
+/// Safely tears down a project workspace with streaming progress events:
+/// 1. Executes template `pre_destroy` lifecycle hooks if template is configured.
+/// 2. Validates uncommitted changes across worktrees (unless `force` is true).
+/// 3. Removes git worktrees and prunes central repository metadata.
+/// 4. Removes the project directory.
+pub fn destroy_project_workspace_with_progress<F>(
+    config: Option<&Config>,
+    cwd: &std::path::Path,
+    project_name: &str,
+    force: bool,
+    mut progress_sink: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(ProjectDestroyEvent),
+{
+    use anyhow::Context;
+    let project_dir = cwd.join(project_name);
+
+    let res = (|| -> anyhow::Result<()> {
+        if !project_dir.exists() {
+            anyhow::bail!("Project directory {project_dir:?} does not exist.");
+        }
+
+        // Step 1: Running pre-destroy hooks
+        progress_sink(ProjectDestroyEvent::Step {
+            current: 1,
+            total: 4,
+            message: "Running pre-destroy hooks...".to_string(),
+        });
+
+        let mut ran_hooks = false;
+        if let Some(cfg) = config {
+            if let Some(tpl_name) = extract_template_name_from_agents_md(&project_dir) {
+                if let Some(tpl) = cfg.get_template(&tpl_name) {
+                    for cmd in &tpl.pre_destroy {
+                        if cmd.is_empty() {
+                            continue;
+                        }
+                        ran_hooks = true;
+                        let prog = &cmd[0];
+                        let args = &cmd[1..];
+                        let cmd_display = cmd.join(" ");
+                        progress_sink(ProjectDestroyEvent::Log(format!(
+                            "Running pre_destroy hook: {cmd_display}"
+                        )));
+
+                        let mut command = std::process::Command::new(prog);
+                        command.args(args);
+                        command.current_dir(&project_dir);
+                        for (k, v) in &tpl.env {
+                            command.env(k, v);
+                        }
+
+                        match command.output() {
+                            Ok(output) => {
+                                if !output.status.success() {
+                                    let exit_code = output
+                                        .status
+                                        .code()
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "signal".to_string());
+                                    let stderr_snippet = String::from_utf8_lossy(&output.stderr);
+                                    let trimmed_err = stderr_snippet.trim();
+                                    let msg = if trimmed_err.is_empty() {
+                                        format!("exit code {exit_code}")
+                                    } else {
+                                        format!("exit code {exit_code}: {trimmed_err}")
+                                    };
+                                    progress_sink(ProjectDestroyEvent::Log(format!(
+                                        "⚠ Warning: Pre-destroy hook failed: {msg}"
+                                    )));
+                                } else {
+                                    progress_sink(ProjectDestroyEvent::Log(format!(
+                                        "✓ Pre-destroy hook completed: {cmd_display}"
+                                    )));
+                                }
+                            }
+                            Err(err) => {
+                                progress_sink(ProjectDestroyEvent::Log(format!(
+                                    "⚠ Warning: Pre-destroy hook failed: {err}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !ran_hooks {
+            progress_sink(ProjectDestroyEvent::Log(
+                "No pre-destroy hooks configured.".to_string(),
+            ));
+        }
+
+        // Step 2: Validating worktrees
+        progress_sink(ProjectDestroyEvent::Step {
+            current: 2,
+            total: 4,
+            message: "Validating worktrees...".to_string(),
+        });
+
+        let child_paths: Vec<_> = if let Ok(entries) = fs::read_dir(&project_dir) {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && p.join(".git").exists())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if child_paths.is_empty() {
+            progress_sink(ProjectDestroyEvent::Log(
+                "No child git worktrees found.".to_string(),
+            ));
+        } else {
+            progress_sink(ProjectDestroyEvent::Log(format!(
+                "Found {} child worktree(s) to inspect.",
+                child_paths.len()
+            )));
+        }
+
+        if !force {
+            for child_path in &child_paths {
+                let repo_name = child_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                if crate::git::has_uncommitted_changes(child_path)? {
+                    let err_msg = format!(
+                        "Worktree '{repo_name}' ({child_path:?}) has uncommitted changes. Use --force to destroy anyway."
+                    );
+                    anyhow::bail!("{err_msg}");
+                }
+            }
+        }
+        progress_sink(ProjectDestroyEvent::Log(
+            "Worktree validation passed.".to_string(),
+        ));
+
+        // Step 3: Removing git worktrees
+        progress_sink(ProjectDestroyEvent::Step {
+            current: 3,
+            total: 4,
+            message: "Removing git worktrees...".to_string(),
+        });
+
+        for child_path in &child_paths {
+            let repo_name = child_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+            progress_sink(ProjectDestroyEvent::Log(format!(
+                "Removing worktree '{repo_name}'..."
+            )));
+            match crate::git::remove_worktree_auto(child_path, force) {
+                Ok(_) => {
+                    progress_sink(ProjectDestroyEvent::Log(format!(
+                        "✓ Removed worktree '{repo_name}' and pruned metadata."
+                    )));
+                }
+                Err(err) => {
+                    progress_sink(ProjectDestroyEvent::Log(format!(
+                        "⚠ Warning removing worktree '{repo_name}': {err}"
+                    )));
+                }
+            }
+        }
+
+        // Step 4: Removing project directory
+        progress_sink(ProjectDestroyEvent::Step {
+            current: 4,
+            total: 4,
+            message: "Removing project directory...".to_string(),
+        });
+
+        if project_dir.exists() {
+            progress_sink(ProjectDestroyEvent::Log(format!(
+                "Deleting project directory {project_dir:?}..."
+            )));
+            fs::remove_dir_all(&project_dir)
+                .with_context(|| format!("Failed to remove project directory {project_dir:?}"))?;
+            progress_sink(ProjectDestroyEvent::Log(
+                "✓ Project directory removed successfully.".to_string(),
+            ));
+        }
+
+        Ok(())
+    })();
+
+    match res {
+        Ok(()) => {
+            progress_sink(ProjectDestroyEvent::Success);
+            Ok(())
+        }
+        Err(err) => {
+            let err_msg = err.to_string();
+            progress_sink(ProjectDestroyEvent::Log(format!("✗ Error: {err_msg}")));
+            progress_sink(ProjectDestroyEvent::Error(err_msg));
+            Err(err)
+        }
+    }
+}
+
 /// Safely tears down a project workspace:
 /// 1. Executes template `pre_destroy` lifecycle hooks if template is configured.
 /// 2. Validates uncommitted changes across worktrees (unless `force` is true).
@@ -768,65 +984,7 @@ pub fn destroy_project_workspace(
     project_name: &str,
     force: bool,
 ) -> anyhow::Result<()> {
-    use anyhow::Context;
-    let project_dir = cwd.join(project_name);
-    if !project_dir.exists() {
-        anyhow::bail!("Project directory {project_dir:?} does not exist.");
-    }
-
-    // 1. Run pre_destroy hooks if template is resolved
-    if let Some(cfg) = config {
-        if let Some(tpl_name) = extract_template_name_from_agents_md(&project_dir) {
-            if let Some(tpl) = cfg.get_template(&tpl_name) {
-                for cmd in &tpl.pre_destroy {
-                    if cmd.is_empty() {
-                        continue;
-                    }
-                    let prog = &cmd[0];
-                    let args = &cmd[1..];
-                    let mut command = std::process::Command::new(prog);
-                    command.args(args);
-                    command.current_dir(&project_dir);
-                    for (k, v) in &tpl.env {
-                        command.env(k, v);
-                    }
-                    let _ = command.output();
-                }
-            }
-        }
-    }
-
-    // 2. Validate uncommitted changes across child worktrees
-    if let Ok(entries) = fs::read_dir(&project_dir) {
-        let child_paths: Vec<_> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir() && p.join(".git").exists())
-            .collect();
-
-        if !force {
-            for child_path in &child_paths {
-                if crate::git::has_uncommitted_changes(child_path)? {
-                    anyhow::bail!(
-                        "Worktree {child_path:?} has uncommitted changes. Use --force to destroy anyway."
-                    );
-                }
-            }
-        }
-
-        // 3. Remove git worktrees
-        for child_path in &child_paths {
-            let _ = crate::git::remove_worktree_auto(child_path, force);
-        }
-    }
-
-    // 4. Remove project directory
-    if project_dir.exists() {
-        fs::remove_dir_all(&project_dir)
-            .with_context(|| format!("Failed to remove project directory {project_dir:?}"))?;
-    }
-
-    Ok(())
+    destroy_project_workspace_with_progress(config, cwd, project_name, force, |_| {})
 }
 
 #[cfg(test)]
@@ -1626,5 +1784,174 @@ mod tests {
             fs::read_to_string(&cleanup_marker).unwrap().trim(),
             "cleanup-ok"
         );
+    }
+
+    #[test]
+    fn test_destroy_project_workspace_with_progress_streams_all_steps_and_events() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_backend = repos_dir.join("backend");
+        create_mock_git_repo(&repo_backend);
+
+        let cleanup_marker = temp_dir.path().join("pre_destroy_stream.marker");
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.stream_tpl]
+            repos = ["backend"]
+            pre_destroy = [
+                ["sh", "-c", "echo 'stream-cleanup' > {}"]
+            ]
+            "#,
+            repos_dir.display(),
+            cleanup_marker.display()
+        );
+
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder =
+            ProjectBuilder::new(config.clone(), "stream_tpl", "proj-stream").with_cwd(&project_cwd);
+
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+        assert!(project_dir.exists());
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = destroy_project_workspace_with_progress(
+            Some(&config),
+            &project_cwd,
+            "proj-stream",
+            false,
+            move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            },
+        );
+
+        assert!(res.is_ok());
+        assert!(!project_dir.exists());
+        assert!(cleanup_marker.exists());
+
+        let evs = events.lock().unwrap();
+        let steps: Vec<usize> = evs
+            .iter()
+            .filter_map(|e| match e {
+                ProjectDestroyEvent::Step { current, .. } => Some(*current),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(steps, vec![1, 2, 3, 4]);
+
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectDestroyEvent::Success)));
+        assert!(evs.iter().any(|e| match e {
+            ProjectDestroyEvent::Log(msg) => msg.contains("pre_destroy hook"),
+            _ => false,
+        }));
+        assert!(evs.iter().any(|e| match e {
+            ProjectDestroyEvent::Log(msg) => msg.contains("backend"),
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn test_destroy_project_workspace_with_progress_error_on_missing_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = destroy_project_workspace_with_progress(
+            None,
+            &project_cwd,
+            "nonexistent-proj",
+            false,
+            move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            },
+        );
+
+        assert!(res.is_err());
+        let evs = events.lock().unwrap();
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectDestroyEvent::Error(_))));
+    }
+
+    #[test]
+    fn test_destroy_project_workspace_with_progress_uncommitted_changes_prevented() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_backend = repos_dir.join("backend");
+        create_mock_git_repo(&repo_backend);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.safety_tpl]
+            repos = ["backend"]
+            "#,
+            repos_dir.display(),
+        );
+
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder =
+            ProjectBuilder::new(config.clone(), "safety_tpl", "proj-safety").with_cwd(&project_cwd);
+
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+        assert!(project_dir.exists());
+
+        // Introduce uncommitted change
+        fs::write(project_dir.join("backend").join("new_file.txt"), "dirty").unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        // Attempt destruction without force -> must fail
+        let res = destroy_project_workspace_with_progress(
+            Some(&config),
+            &project_cwd,
+            "proj-safety",
+            false,
+            move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            },
+        );
+
+        assert!(res.is_err());
+        assert!(
+            project_dir.exists(),
+            "Directory must NOT be deleted if uncommitted changes exist"
+        );
+
+        let evs = events.lock().unwrap();
+        assert!(evs.iter().any(|e| match e {
+            ProjectDestroyEvent::Error(err) => err.contains("uncommitted changes"),
+            _ => false,
+        }));
+
+        // Now destroy with force -> must succeed
+        let res_force = destroy_project_workspace_with_progress(
+            Some(&config),
+            &project_cwd,
+            "proj-safety",
+            true,
+            |_| {},
+        );
+        assert!(res_force.is_ok());
+        assert!(!project_dir.exists());
     }
 }
