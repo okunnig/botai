@@ -2399,6 +2399,8 @@ repos = []
         app.quick_launcher = None;
         let mut dashboard = DashboardState::new(vec!["tpl1".to_string()], vec![]);
         dashboard.open_creation_modal();
+        dashboard.creation_modal.as_mut().unwrap().step =
+            crate::tui::CreationStep::ConfigureDetails;
         app.dashboard = Some(dashboard);
         app.handle_dashboard_paste("dash-project");
         assert_eq!(

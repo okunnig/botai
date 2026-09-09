@@ -640,6 +640,7 @@ mod tests {
         );
         state.open_creation_modal();
         if let Some(ref mut modal) = state.creation_modal {
+            modal.step = crate::tui::CreationStep::ConfigureDetails;
             modal.set_project_name("new-checkout");
             modal.prompt_input = "Implement Stripe".to_string();
         }
@@ -706,6 +707,7 @@ mod tests {
         assert!(rendered.contains("проект-тест 💻"));
 
         state.open_creation_modal();
+        state.handle_key(key(KeyCode::Enter));
         for c in "проект-юникод".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
@@ -916,7 +918,16 @@ command = "claude"
         let mut state = DashboardState::new(vec!["cloud-infra".into()], vec![]);
         state.open_creation_modal();
 
-        // 1. Trying to submit with empty project name returns DashboardAction::None (stays open)
+        // 1. Advance from SelectTemplate to ConfigureDetails
+        let action = state.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, DashboardAction::None);
+        assert!(state.creation_modal.is_some());
+        assert_eq!(
+            state.creation_modal.as_ref().unwrap().step,
+            crate::tui::CreationStep::ConfigureDetails
+        );
+
+        // In ConfigureDetails, trying to submit with empty project name returns DashboardAction::None (stays open)
         let action = state.handle_key(key(KeyCode::Enter));
         assert_eq!(action, DashboardAction::None);
         assert!(state.creation_modal.is_some());
@@ -950,6 +961,7 @@ command = "claude"
     fn test_modal_submission_with_empty_prompt_is_none() {
         let mut state = DashboardState::new(vec!["ws".into()], vec![]);
         state.open_creation_modal();
+        state.handle_key(key(KeyCode::Enter));
 
         for c in "my-project".chars() {
             state.handle_key(key(KeyCode::Char(c)));

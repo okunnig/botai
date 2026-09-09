@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
 };
 
 use crate::config::Config;
@@ -138,13 +138,9 @@ impl ProjectCreationModal {
         let mut templates: Vec<String> = config.templates.keys().cloned().collect();
         templates.sort();
 
-        // Smart single-template bypass: If config.templates.len() <= 1, initialize in CreationStep::ConfigureDetails.
-        // If more than 1 template exists, initialize in CreationStep::SelectTemplate.
-        let step = if templates.len() <= 1 {
-            CreationStep::ConfigureDetails
-        } else {
-            CreationStep::SelectTemplate
-        };
+        // The creation modal always starts in CreationStep::SelectTemplate regardless of template count,
+        // ensuring consistent template selection, configuration review, and preview.
+        let step = CreationStep::SelectTemplate;
 
         let global_selected_idx = default_template
             .and_then(|t| templates.iter().position(|w| w == t))
@@ -822,22 +818,20 @@ impl ProjectCreationModal {
     }
 
     /// Deletes the character before the project name cursor (Backspace).
-    /// If the project name is empty, returns to template selection step (when multiple templates exist).
+    /// If the project name is empty, returns to template selection step.
     pub fn delete_project_name_char_backward(&mut self) {
         self.sync_project_name_cursor();
         if self.project_name_input.is_empty() {
-            if self.templates.len() > 1 {
-                let cur_tpl = self.selected_template().map(str::to_string);
-                self.step = CreationStep::SelectTemplate;
-                let matching = self.matching_template_indices();
-                if let Some(tpl) = cur_tpl {
-                    self.selected_template_idx = matching
-                        .iter()
-                        .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
-                        .unwrap_or(0);
-                } else {
-                    self.selected_template_idx = 0;
-                }
+            let cur_tpl = self.selected_template().map(str::to_string);
+            self.step = CreationStep::SelectTemplate;
+            let matching = self.matching_template_indices();
+            if let Some(tpl) = cur_tpl {
+                self.selected_template_idx = matching
+                    .iter()
+                    .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
+                    .unwrap_or(0);
+            } else {
+                self.selected_template_idx = 0;
             }
             return;
         }
@@ -1077,26 +1071,7 @@ impl ProjectCreationModal {
             CreationStep::ConfigureDetails => {
                 if self.focus == CreationFocus::Prompt {
                     match key.code {
-                        KeyCode::Esc => {
-                            if self.templates.len() > 1 {
-                                let cur_tpl = self.selected_template().map(str::to_string);
-                                self.step = CreationStep::SelectTemplate;
-                                let matching = self.matching_template_indices();
-                                if let Some(tpl) = cur_tpl {
-                                    self.selected_template_idx = matching
-                                        .iter()
-                                        .position(|&i| {
-                                            self.templates.get(i).map(String::as_str) == Some(&tpl)
-                                        })
-                                        .unwrap_or(0);
-                                } else {
-                                    self.selected_template_idx = 0;
-                                }
-                                CreationModalAction::None
-                            } else {
-                                CreationModalAction::Cancel
-                            }
-                        }
+                        KeyCode::Esc => self.handle_back_or_cancel(),
                         KeyCode::Tab => {
                             self.next_focus();
                             CreationModalAction::None
@@ -1331,24 +1306,20 @@ impl ProjectCreationModal {
         }
     }
 
-    /// Handles backtracking to template selection or cancelling if only one template exists.
+    /// Handles backtracking to template selection.
     pub fn handle_back_or_cancel(&mut self) -> CreationModalAction {
-        if self.templates.len() > 1 {
-            let cur_tpl = self.selected_template().map(str::to_string);
-            self.step = CreationStep::SelectTemplate;
-            let matching = self.matching_template_indices();
-            if let Some(tpl) = cur_tpl {
-                self.selected_template_idx = matching
-                    .iter()
-                    .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
-                    .unwrap_or(0);
-            } else {
-                self.selected_template_idx = 0;
-            }
-            CreationModalAction::None
+        let cur_tpl = self.selected_template().map(str::to_string);
+        self.step = CreationStep::SelectTemplate;
+        let matching = self.matching_template_indices();
+        if let Some(tpl) = cur_tpl {
+            self.selected_template_idx = matching
+                .iter()
+                .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
+                .unwrap_or(0);
         } else {
-            CreationModalAction::Cancel
+            self.selected_template_idx = 0;
         }
+        CreationModalAction::None
     }
 
     /// Handles pasted text into the active focused text input field or search filter.
@@ -1555,10 +1526,17 @@ impl ProjectCreationModal {
         ];
 
         if matching.is_empty() {
-            left_lines.push(Line::from(Span::styled(
-                "  (No matches)",
-                Style::default().fg(theme.input_placeholder),
-            )));
+            if self.templates.is_empty() {
+                left_lines.push(Line::from(Span::styled(
+                    "  (No templates)",
+                    Style::default().fg(theme.input_placeholder),
+                )));
+            } else {
+                left_lines.push(Line::from(Span::styled(
+                    "  (No matches)",
+                    Style::default().fg(theme.input_placeholder),
+                )));
+            }
         } else {
             let max_display = (left_area.height as usize).saturating_sub(2);
             let start_idx = if self.selected_template_idx >= max_display {
@@ -1688,13 +1666,22 @@ impl ProjectCreationModal {
                     }
                 }
             }
+        } else if self.templates.is_empty() {
+            right_lines.push(Line::from(Span::styled(
+                "No templates found in config.toml.",
+                Style::default().fg(theme.input_placeholder),
+            )));
+            right_lines.push(Line::from(Span::styled(
+                "Run 'botai edit' to configure templates.",
+                Style::default().fg(theme.input_placeholder),
+            )));
         } else {
             right_lines.push(Line::from(Span::styled(
                 "No template selected",
                 Style::default().fg(theme.input_placeholder),
             )));
         }
-        let right_par = Paragraph::new(right_lines);
+        let right_par = Paragraph::new(right_lines).wrap(Wrap { trim: false });
         right_par.render(right_inner, buf);
 
         // 4. Bottom Divider
@@ -1711,8 +1698,13 @@ impl ProjectCreationModal {
         );
 
         // 5. Footer Hints
+        let footer_text = if self.templates.is_empty() {
+            " [Esc] Cancel "
+        } else {
+            " [↑/↓/j/k] Select | [Enter] Next (Configure) | [Esc] Cancel "
+        };
         let footer_line = Line::from(Span::styled(
-            " [↑/↓/j/k] Select | [Enter] Next (Configure) | [Esc] Cancel ",
+            footer_text,
             Style::default()
                 .fg(theme.key_hint)
                 .add_modifier(Modifier::BOLD),
@@ -2067,7 +2059,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_template_bypass_and_lifecycle() {
+    fn test_modal_full_workflow_and_submission() {
         let toml_str = r#"
             default_agent = "claude"
             repos_dir = ".repos"
@@ -2086,12 +2078,25 @@ mod tests {
 
         let mut modal = ProjectCreationModal::new(&config, cwd, Some("ecommerce"));
 
-        // Single template bypass should initialize in ConfigureDetails
-        assert_eq!(modal.step, CreationStep::ConfigureDetails);
+        // Modal starts in SelectTemplate even with a single template configured
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
         assert_eq!(modal.selected_template(), Some("ecommerce"));
         assert_eq!(modal.selected_agent(), "agy");
+
+        // Advance to ConfigureDetails via Enter
+        let act = modal.handle_key(key(KeyCode::Enter));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
         assert_eq!(modal.focus, CreationFocus::ProjectName);
         assert!(!modal.validation.is_valid); // Name is empty
+
+        // Esc backtracks to SelectTemplate, and Enter returns to ConfigureDetails
+        let act = modal.handle_key(key(KeyCode::Esc));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
+        let act = modal.handle_key(key(KeyCode::Enter));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
 
         // Type project name: "feat-pay"
         for c in "feat-pay".chars() {
@@ -2404,6 +2409,7 @@ mod tests {
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("core_tpl"));
+        modal.step = CreationStep::ConfigureDetails;
 
         // Type colliding name
         for c in "existing-branch".chars() {
@@ -2472,6 +2478,7 @@ mod tests {
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("alpha_tpl"));
+        modal.step = CreationStep::ConfigureDetails;
 
         // Fast validation immediately reflects non-empty input
         modal.set_project_name("collision-target");
@@ -2503,6 +2510,7 @@ mod tests {
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.step = CreationStep::ConfigureDetails;
 
         let area = Rect::new(0, 0, 100, 30);
         modal.focus = CreationFocus::ProjectName;
@@ -2649,6 +2657,7 @@ mod tests {
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.step = CreationStep::ConfigureDetails;
         modal.focus = CreationFocus::Prompt;
         modal.prompt_input = "line 1\nline 2\nline 3".to_string();
         modal.prompt_cursor = 0;
@@ -2724,6 +2733,7 @@ mod tests {
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.step = CreationStep::ConfigureDetails;
         modal.focus = CreationFocus::Prompt;
 
         // Shift+Enter inserts newline without submitting
@@ -2770,6 +2780,7 @@ mod tests {
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.step = CreationStep::ConfigureDetails;
 
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
@@ -3000,5 +3011,102 @@ mod tests {
 
         modal.project_name_cursor = 5;
         assert_eq!(modal.cursor_position(area), Some(Position::new(34, 10)));
+    }
+
+    #[test]
+    fn test_single_template_workflow_and_backtrack() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.solo_service]
+            description = "Solo service template"
+            repos = ["repo-one"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+
+        // 1. Modal starts in CreationStep::SelectTemplate
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
+
+        // 2. Single template is pre-selected and visible in preview
+        assert_eq!(modal.selected_template(), Some("solo_service"));
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+        modal.render_modal(area, &mut buf, &theme);
+        let rendered = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("solo_service"));
+        assert!(rendered.contains("Solo service template"));
+
+        // 3. Enter advances to CreationStep::ConfigureDetails
+        let act = modal.handle_key(key(KeyCode::Enter));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+
+        // 4. Esc returns to CreationStep::SelectTemplate
+        let act = modal.handle_key(key(KeyCode::Esc));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
+        assert_eq!(modal.selected_template(), Some("solo_service"));
+
+        // 5. Enter advances again
+        let act = modal.handle_key(key(KeyCode::Enter));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
+
+        // 6. Backspace when project name is empty returns to CreationStep::SelectTemplate
+        assert!(modal.project_name_input.is_empty());
+        let act = modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
+
+        // 7. Esc in CreationStep::SelectTemplate cancels with CreationModalAction::Cancel
+        let act = modal.handle_key(key(KeyCode::Esc));
+        assert_eq!(act, CreationModalAction::Cancel);
+    }
+
+    #[test]
+    fn test_zero_templates_empty_state_and_cancel() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+
+        // 1. Modal starts in CreationStep::SelectTemplate
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
+        assert_eq!(modal.selected_template(), None);
+
+        // 2. render_modal contains empty-state message, (No templates), and [Esc] Cancel
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+        modal.render_modal(area, &mut buf, &theme);
+        let rendered = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("No templates found in config.toml."));
+        assert!(rendered.contains("Run 'botai edit' to configure templates."));
+        assert!(rendered.contains("(No templates)"));
+        assert!(rendered.contains("[Esc] Cancel"));
+
+        // 3. Enter is a no-op (remains in SelectTemplate, does not advance)
+        let act = modal.handle_key(key(KeyCode::Enter));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
+
+        // 4. Esc cancels modal (CreationModalAction::Cancel)
+        let act = modal.handle_key(key(KeyCode::Esc));
+        assert_eq!(act, CreationModalAction::Cancel);
     }
 }
