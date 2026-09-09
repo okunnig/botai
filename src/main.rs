@@ -278,26 +278,48 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
 
     let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
 
+    let template_name = botai::project::extract_template_name_from_agents_md(&project_dir);
+    let agent_name = template_name
+        .as_deref()
+        .and_then(|t| config.get_template(t))
+        .and_then(|t| t.default_agent.as_deref())
+        .unwrap_or(&config.default_agent);
+
     let agent = config
-        .get_agent(&config.default_agent)
-        .with_context(|| format!("Default agent '{}' not found", config.default_agent))?;
+        .get_agent(agent_name)
+        .with_context(|| format!("Agent '{agent_name}' not found"))?;
 
     let (term_cols, term_rows) = crossterm::terminal::size()
         .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
         .unwrap_or((100, 30));
 
-    let pty_config = PtyConfig::new(&agent.command, &project_dir)
+    let mut pty_config = PtyConfig::new(&agent.command, &project_dir)
         .with_args(agent.args.clone())
         .with_dimensions(term_cols, term_rows);
 
+    for (k, v) in &agent.env {
+        pty_config = pty_config.with_env(k, v);
+    }
+    if let Some(tpl) = template_name.as_deref().and_then(|t| config.get_template(t)) {
+        for (k, v) in &tpl.env {
+            pty_config = pty_config.with_env(k, v);
+        }
+    }
+
     let pty = PtySession::spawn(pty_config)?;
     let vt = VtScreen::new(term_cols, term_rows);
-    let ps = ProjectSession::new(project_name, "attached", &config.default_agent);
+    let ps = ProjectSession::new(
+        project_name,
+        template_name.as_deref().unwrap_or("attached"),
+        agent_name,
+    );
 
     let mut registry = SessionRegistry::new();
     registry.add(ps, pty, vt)?;
 
-    let mut app = TuiApp::new(registry);
+    let mut app = TuiApp::new(registry)
+        .with_config(config.clone())
+        .with_cwd(cwd);
     let mut stdout = io::stdout();
     app.run(&mut stdout)?;
 
