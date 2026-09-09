@@ -429,6 +429,7 @@ impl PtySession {
             .map_err(|_| SessionError::Other("Mutex poisoned".to_string()))?;
         match child.kill() {
             Ok(()) => {
+                let _ = child.wait();
                 if let Ok(mut cached) = self.cached_exit_status.lock() {
                     if cached.is_none() {
                         *cached = Some(ExitStatus::terminated());
@@ -449,9 +450,30 @@ impl PtySession {
         }
     }
 
+    /// Returns the OS process ID (PID) of the child process, if available.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.lock().ok().and_then(|c| c.process_id())
+    }
+
     /// Returns a reference to the configuration used to spawn this session.
     pub fn config(&self) -> &PtyConfig {
         &self.config
+    }
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        if let Ok(cached) = self.cached_exit_status.lock() {
+            if cached.is_some() {
+                return;
+            }
+        }
+        if let Ok(mut child) = self.child.lock() {
+            if let Ok(None) = child.try_wait() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
 }
 
@@ -684,5 +706,117 @@ mod tests {
             output.contains(&*expected_path_str) || output.contains(tmp.path().to_str().unwrap()),
             "Expected output to contain working directory '{expected_path_str}', got: '{output}'"
         );
+    }
+
+    #[test]
+    fn test_pty_session_drop_terminates_and_reaps_process() {
+        let tmp = tempdir().expect("Failed to create tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("ping", vec!["127.0.0.1", "-n", "60"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sleep", vec!["60"]);
+
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let session = PtySession::spawn(config).expect("Failed to spawn PTY session");
+        let pid = session.process_id().expect("Failed to get child process ID");
+        assert!(pid > 0);
+
+        // Verify the process is initially running
+        #[cfg(unix)]
+        {
+            let status = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status();
+            assert!(
+                status.map(|s| s.success()).unwrap_or(false),
+                "Process should be alive before drop"
+            );
+        }
+
+        // Drop the session, which should kill and reap the child process
+        drop(session);
+
+        // Verify the process has been terminated and reaped
+        #[cfg(unix)]
+        {
+            let mut alive = true;
+            for _ in 0..50 {
+                let status = std::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                if let Ok(s) = status {
+                    if !s.success() {
+                        alive = false;
+                        break;
+                    }
+                } else {
+                    alive = false;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(!alive, "Process should be terminated and reaped after drop");
+        }
+
+        #[cfg(windows)]
+        {
+            let mut alive = true;
+            for _ in 0..50 {
+                let output = std::process::Command::new("tasklist")
+                    .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                    .output();
+                if let Ok(out) = output {
+                    let s = String::from_utf8_lossy(&out.stdout);
+                    if !s.contains(&pid.to_string()) {
+                        alive = false;
+                        break;
+                    }
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(!alive, "Process should be terminated after drop on windows");
+        }
+    }
+
+    #[test]
+    fn test_pty_session_kill_reaps_process() {
+        let tmp = tempdir().expect("Failed to create tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("ping", vec!["127.0.0.1", "-n", "60"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sleep", vec!["60"]);
+
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let mut session = PtySession::spawn(config).expect("Failed to spawn PTY session");
+        let pid = session.process_id().expect("Failed to get child process ID");
+        assert!(pid > 0);
+
+        // Terminate and reap explicitly via kill()
+        assert!(session.kill().is_ok());
+        assert!(!session.is_alive());
+
+        #[cfg(unix)]
+        {
+            let mut alive = true;
+            for _ in 0..50 {
+                let status = std::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                if let Ok(s) = status {
+                    if !s.success() {
+                        alive = false;
+                        break;
+                    }
+                } else {
+                    alive = false;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(!alive, "Process should be terminated and reaped after kill()");
+        }
     }
 }

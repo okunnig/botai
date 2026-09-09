@@ -772,7 +772,9 @@ impl TuiApp {
     pub fn start_project_destruction(&mut self, project_name: &str) {
         if let Some(session) = self.registry.get_by_project(project_name) {
             let id = session.id().to_string();
-            let _ = self.registry.remove(&id);
+            if let Ok(Some(mut entry)) = self.registry.remove(&id) {
+                let _ = entry.pty.kill();
+            }
         }
 
         let (tx, rx) = std::sync::mpsc::channel();

@@ -317,6 +317,10 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - If `botai` was launched from the dashboard, terminating the last session automatically transitions back to the interactive project dashboard (with refreshed project directories).
     - If `botai` was launched directly via CLI (`botai create --attach` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
   - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
+- **Child Process Lifecycle Management & Process Reaping (`PtySession`)**:
+  - `PtySession` implements `Drop` to kill and reap child processes automatically when dropped (or when an active session, `SessionEntry`, or `SessionRegistry` is removed or dropped), preventing orphaned or zombie processes in the operating system process table.
+  - `PtySession::kill()` explicitly terminates running processes and invokes `child.wait()` to reap process entries from the OS process table.
+  - `PtySession::process_id()` exposes the underlying OS child process identifier (`Option<u32>`) when available.
 - **Session Detachment & Background Persistence**:
   - Detaching from an active session (`Ctrl + Space` then `d`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
@@ -393,6 +397,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Executes `git worktree remove` and `git worktree prune` directly against the backing central cached repositories via `remove_worktree_auto`, thoroughly clearing worktree metadata, `.git/worktrees/<name>` directories, and internal git registrations.
   - Removes the project directory and its worktrees from disk.
   - Preserves git branches (leaving code intact in git history) and enables immediate re-creation without stale metadata collisions.
+  - Explicitly terminates running sessions for the project and reaps child processes before worktree removal and directory cleanup, avoiding process and file lock contention across Unix and Windows platforms.
   - Streams real-time structured destruction events (`ProjectDestroyEvent`: Step, Log, Success, Error) to CLI stdout or the TUI destruction modal, ensuring progress visibility without blocking.
 
 ---
@@ -483,6 +488,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `d`: Open the confirmation modal (` Confirm Destroy Project `) for clean worktree removal and directory deletion.
 - **Asynchronous Live Project Destruction Progress & Log Modal (`DestroyProgressModalState`)**:
   - **Non-Blocking Background Worker**: Upon confirming destruction with `y` or `Enter`, `botai` does NOT block or freeze the TUI event loop; it launches the destruction pipeline inside a dedicated background worker thread (`std::thread::spawn`).
+  - **Pre-Destruction Session Termination**: Before launching the background destruction worker thread, any active or background session for the project is removed from the `SessionRegistry` and its child process is explicitly terminated and reaped (`entry.pty.kill()`), preventing orphaned processes and file lock contention during worktree removal and directory deletion.
   - **Structured Progress Events**: Emits sequential `ProjectDestroyEvent` events (`Step`, `Log`, `Success`, `Error`) over an `mpsc::channel` to drive the modal UI.
   - **Destruction Lifecycle Steps**:
     1. `Step [1/4]`: Executing template `pre_destroy` lifecycle hooks (streaming hook command output).
