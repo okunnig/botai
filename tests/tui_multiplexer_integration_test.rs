@@ -34,11 +34,11 @@ fn create_mock_session(
 fn test_integration_tui_multiplexer_navigation_and_rendering() {
     let mut registry = SessionRegistry::new();
 
-    let (mut ps1, pty1, mut vt1) = create_mock_session("backend-api", "payments", "claude");
+    let (mut ps1, pty1, mut vt1) = create_mock_session("backend-api", "workspace", "claude");
     ps1.set_status(SessionStatus::Busy);
     vt1.process(b"API server running on port 8080...\n");
 
-    let (mut ps2, pty2, mut vt2) = create_mock_session("frontend-ui", "payments", "agy");
+    let (mut ps2, pty2, mut vt2) = create_mock_session("frontend-ui", "workspace", "agy");
     ps2.set_status(SessionStatus::WaitingForInput);
     vt2.process(b"Ready for prompt> ");
 
@@ -105,8 +105,8 @@ fn test_integration_tui_multiplexer_navigation_and_rendering() {
         .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
 
-    assert!(rendered_text.contains("● 1: backend-api"));
-    assert!(rendered_text.contains("● 2: frontend-ui"));
+    assert!(rendered_text.contains("● 1: [workspace] backend-api"));
+    assert!(rendered_text.contains("● 2: [workspace] frontend-ui"));
     assert!(rendered_text.contains("API server running on port 8080"));
 }
 
