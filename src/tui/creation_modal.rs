@@ -13,6 +13,7 @@ use ratatui::{
 
 use crate::config::Config;
 use crate::project::{ProjectBuilder, ProjectValidation};
+use crate::tui::text_input::TextInput;
 use crate::tui::theme::Theme;
 
 /// Active step within the two-step Project Creation Modal flow.
@@ -69,7 +70,8 @@ pub struct ProjectCreationModal {
     pub template_search_query: String,
     pub templates: Vec<String>,
     pub selected_template_idx: usize,
-    pub project_name_input: String,
+    pub project_name_input: TextInput,
+    pub project_name_cursor: usize,
     pub agent_list: Vec<String>,
     pub selected_agent_idx: usize,
     pub prompt_input: String,
@@ -93,6 +95,7 @@ impl Clone for ProjectCreationModal {
             templates: self.templates.clone(),
             selected_template_idx: self.selected_template_idx,
             project_name_input: self.project_name_input.clone(),
+            project_name_cursor: self.project_name_cursor,
             agent_list: self.agent_list.clone(),
             selected_agent_idx: self.selected_agent_idx,
             prompt_input: self.prompt_input.clone(),
@@ -116,6 +119,7 @@ impl PartialEq for ProjectCreationModal {
             && self.templates == other.templates
             && self.selected_template_idx == other.selected_template_idx
             && self.project_name_input == other.project_name_input
+            && self.project_name_cursor == other.project_name_cursor
             && self.agent_list == other.agent_list
             && self.selected_agent_idx == other.selected_agent_idx
             && self.prompt_input == other.prompt_input
@@ -180,7 +184,8 @@ impl ProjectCreationModal {
             template_search_query: String::new(),
             templates,
             selected_template_idx,
-            project_name_input: String::new(),
+            project_name_input: TextInput::new().with_placeholder("<enter project name>"),
+            project_name_cursor: 0,
             agent_list,
             selected_agent_idx,
             prompt_input: String::new(),
@@ -393,9 +398,13 @@ impl ProjectCreationModal {
     /// git branch collision checks across template repositories if fast checks pass.
     pub fn revalidate(&mut self) {
         let tpl_name = self.selected_template().unwrap_or("");
-        let builder = ProjectBuilder::new(self.config.clone(), tpl_name, &self.project_name_input)
-            .with_cwd(&self.cwd)
-            .with_agent(self.selected_agent());
+        let builder = ProjectBuilder::new(
+            self.config.clone(),
+            tpl_name,
+            self.project_name_input.value(),
+        )
+        .with_cwd(&self.cwd)
+        .with_agent(self.selected_agent());
 
         self.validation = builder.validate_fast();
         self.validation_generation = self.validation_generation.wrapping_add(1);
@@ -785,6 +794,135 @@ impl ProjectCreationModal {
         self.sync_prompt_scroll(PROMPT_VISIBLE_LINES, self.prompt_width());
     }
 
+    /// Returns the current project name string slice.
+    pub fn project_name(&self) -> &str {
+        self.project_name_input.value()
+    }
+
+    /// Sets the project name value, moves the cursor to the end, and triggers revalidation.
+    pub fn set_project_name(&mut self, name: impl Into<String>) {
+        self.project_name_input.set_value(name);
+        self.project_name_input.move_cursor_end();
+        self.project_name_cursor = self.project_name_input.cursor;
+        self.revalidate();
+    }
+
+    fn sync_project_name_cursor(&mut self) {
+        self.project_name_input.cursor = self
+            .project_name_cursor
+            .min(self.project_name_input.chars().count());
+    }
+
+    /// Inserts a character into the project name input at the current cursor offset.
+    pub fn insert_project_name_char(&mut self, c: char) {
+        self.sync_project_name_cursor();
+        self.project_name_input.insert_char(c);
+        self.project_name_cursor = self.project_name_input.cursor;
+        self.revalidate();
+    }
+
+    /// Deletes the character before the project name cursor (Backspace).
+    /// If the project name is empty, returns to template selection step (when multiple templates exist).
+    pub fn delete_project_name_char_backward(&mut self) {
+        self.sync_project_name_cursor();
+        if self.project_name_input.is_empty() {
+            if self.templates.len() > 1 {
+                let cur_tpl = self.selected_template().map(str::to_string);
+                self.step = CreationStep::SelectTemplate;
+                let matching = self.matching_template_indices();
+                if let Some(tpl) = cur_tpl {
+                    self.selected_template_idx = matching
+                        .iter()
+                        .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
+                        .unwrap_or(0);
+                } else {
+                    self.selected_template_idx = 0;
+                }
+            }
+            return;
+        }
+        if self.project_name_input.delete_char_backward() {
+            self.project_name_cursor = self.project_name_input.cursor;
+            self.revalidate();
+        }
+    }
+
+    /// Deletes the character under the project name cursor (Delete).
+    pub fn delete_project_name_char_forward(&mut self) {
+        self.sync_project_name_cursor();
+        if self.project_name_input.delete_char_forward() {
+            self.project_name_cursor = self.project_name_input.cursor;
+            self.revalidate();
+        }
+    }
+
+    /// Deletes characters from the project name cursor to the beginning of the line (Ctrl+U).
+    pub fn delete_project_name_to_start(&mut self) {
+        self.sync_project_name_cursor();
+        if self.project_name_input.delete_to_start() {
+            self.project_name_cursor = self.project_name_input.cursor;
+            self.revalidate();
+        }
+    }
+
+    /// Deletes characters from the project name cursor to the end of the line (Ctrl+K).
+    pub fn delete_project_name_to_end(&mut self) {
+        self.sync_project_name_cursor();
+        if self.project_name_input.delete_to_end() {
+            self.project_name_cursor = self.project_name_input.cursor;
+            self.revalidate();
+        }
+    }
+
+    /// Deletes the word immediately preceding the project name cursor (Ctrl+W).
+    pub fn delete_project_name_word_backward(&mut self) {
+        self.sync_project_name_cursor();
+        if self.project_name_input.delete_word_backward() {
+            self.project_name_cursor = self.project_name_input.cursor;
+            self.revalidate();
+        }
+    }
+
+    /// Moves the project name cursor backward one word (Ctrl+Left / Alt+B).
+    pub fn move_project_name_word_backward(&mut self) {
+        self.sync_project_name_cursor();
+        self.project_name_input.move_word_backward();
+        self.project_name_cursor = self.project_name_input.cursor;
+    }
+
+    /// Moves the project name cursor forward one word (Ctrl+Right / Alt+F).
+    pub fn move_project_name_word_forward(&mut self) {
+        self.sync_project_name_cursor();
+        self.project_name_input.move_word_forward();
+        self.project_name_cursor = self.project_name_input.cursor;
+    }
+
+    /// Moves the project name cursor left by one character.
+    pub fn move_project_name_cursor_left(&mut self) {
+        self.sync_project_name_cursor();
+        self.project_name_input.move_cursor_left();
+        self.project_name_cursor = self.project_name_input.cursor;
+    }
+
+    /// Moves the project name cursor right by one character.
+    pub fn move_project_name_cursor_right(&mut self) {
+        self.sync_project_name_cursor();
+        self.project_name_input.move_cursor_right();
+        self.project_name_cursor = self.project_name_input.cursor;
+    }
+
+    /// Moves the project name cursor to the start of the line (Home / Ctrl+A).
+    pub fn move_project_name_cursor_home(&mut self) {
+        self.project_name_input.move_cursor_home();
+        self.project_name_cursor = self.project_name_input.cursor;
+    }
+
+    /// Moves the project name cursor to the end of the line (End / Ctrl+E).
+    pub fn move_project_name_cursor_end(&mut self) {
+        self.project_name_input.move_cursor_end();
+        self.project_name_cursor = self.project_name_input.cursor;
+    }
+
     /// Calculates the hardware cursor position within the modal area when an editable text input is focused.
     pub fn cursor_position(&self, area: Rect) -> Option<Position> {
         let width = 76.min(area.width.saturating_sub(4));
@@ -819,8 +957,9 @@ impl ProjectCreationModal {
             CreationStep::ConfigureDetails => match self.focus {
                 CreationFocus::ProjectName => {
                     let prefix_len = 16u16; // "▶ Project Name: "
-                    let cursor_x =
-                        inner.x + prefix_len + self.project_name_input.chars().count() as u16;
+                    let total_chars = self.project_name_input.chars().count();
+                    let cursor_offset = self.project_name_cursor.min(total_chars) as u16;
+                    let cursor_x = inner.x + prefix_len + cursor_offset;
                     let cursor_y = inner.y + 3;
                     if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                         Some(Position::new(cursor_x, cursor_y))
@@ -953,93 +1092,65 @@ impl ProjectCreationModal {
                                 } else {
                                     self.selected_template_idx = 0;
                                 }
-                                return CreationModalAction::None;
+                                CreationModalAction::None
                             } else {
-                                return CreationModalAction::Cancel;
+                                CreationModalAction::Cancel
                             }
                         }
                         KeyCode::Tab => {
                             self.next_focus();
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::BackTab => {
                             self.prev_focus();
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Up => {
                             if !self.move_prompt_cursor_up() {
                                 self.prev_focus();
                             }
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Down => {
                             if !self.move_prompt_cursor_down() {
                                 self.next_focus();
                             }
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Left => {
                             self.move_prompt_cursor_left();
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Right => {
                             self.move_prompt_cursor_right();
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Home => {
                             self.move_prompt_cursor_home();
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::End => {
                             self.move_prompt_cursor_end();
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Backspace => {
                             self.delete_prompt_char_before_cursor();
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Delete => {
                             self.delete_prompt_char_at_cursor();
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
                             if has_shift || has_alt =>
                         {
                             self.insert_newline_prompt();
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
                             if !has_shift && !has_alt =>
                         {
-                            self.poll_validation();
-                            if self.validation.is_valid {
-                                let tpl_name = self.selected_template().unwrap_or("");
-                                let builder = ProjectBuilder::new(
-                                    self.config.clone(),
-                                    tpl_name,
-                                    &self.project_name_input,
-                                )
-                                .with_cwd(&self.cwd)
-                                .with_agent(self.selected_agent());
-                                self.validation = builder.validate_detailed();
-                            }
-                            if self.validation.is_valid {
-                                let trimmed = self.project_name_input.trim();
-                                if let Some(tpl) = self.selected_template() {
-                                    let prompt = if self.prompt_input.trim().is_empty() {
-                                        None
-                                    } else {
-                                        Some(self.prompt_input.trim().to_string())
-                                    };
-                                    return CreationModalAction::Submit {
-                                        template: tpl.to_string(),
-                                        project: trimmed.to_string(),
-                                        agent_override: Some(self.selected_agent().to_string()),
-                                        prompt,
-                                    };
-                                }
-                            }
-                            return CreationModalAction::None;
+                            self.try_submit()
                         }
                         KeyCode::Char(c) if has_ctrl => {
                             match c {
@@ -1050,145 +1161,193 @@ impl ProjectCreationModal {
                                 'u' | 'U' => self.clear_prompt_line_or_all(),
                                 _ => {}
                             }
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
                         KeyCode::Char(c) if !has_ctrl && !has_alt => {
                             self.insert_char_prompt(c);
-                            return CreationModalAction::None;
+                            CreationModalAction::None
                         }
-                        _ => return CreationModalAction::None,
+                        _ => CreationModalAction::None,
                     }
-                }
+                } else if self.focus == CreationFocus::ProjectName {
+                    if (key.code == KeyCode::Left && (has_ctrl || has_alt))
+                        || ((key.code == KeyCode::Char('b') || key.code == KeyCode::Char('B'))
+                            && has_alt)
+                    {
+                        self.move_project_name_word_backward();
+                        return CreationModalAction::None;
+                    }
 
-                match key.code {
-                    KeyCode::Esc => {
-                        if self.templates.len() > 1 {
-                            let cur_tpl = self.selected_template().map(str::to_string);
-                            self.step = CreationStep::SelectTemplate;
-                            let matching = self.matching_template_indices();
-                            if let Some(tpl) = cur_tpl {
-                                self.selected_template_idx = matching
-                                    .iter()
-                                    .position(|&i| {
-                                        self.templates.get(i).map(String::as_str) == Some(&tpl)
-                                    })
-                                    .unwrap_or(0);
-                            } else {
-                                self.selected_template_idx = 0;
+                    if (key.code == KeyCode::Right && (has_ctrl || has_alt))
+                        || ((key.code == KeyCode::Char('f') || key.code == KeyCode::Char('F'))
+                            && has_alt)
+                    {
+                        self.move_project_name_word_forward();
+                        return CreationModalAction::None;
+                    }
+
+                    match key.code {
+                        KeyCode::Esc => self.handle_back_or_cancel(),
+                        KeyCode::Tab => {
+                            self.next_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::BackTab => {
+                            self.prev_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Up => {
+                            self.prev_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Down => {
+                            self.next_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Left => {
+                            self.move_project_name_cursor_left();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Right => {
+                            self.move_project_name_cursor_right();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Home => {
+                            self.move_project_name_cursor_home();
+                            CreationModalAction::None
+                        }
+                        KeyCode::End => {
+                            self.move_project_name_cursor_end();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Backspace => {
+                            self.delete_project_name_char_backward();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Delete => {
+                            self.delete_project_name_char_forward();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Enter => self.try_submit(),
+                        KeyCode::Char(c) if has_ctrl => {
+                            match c {
+                                'a' | 'A' => self.move_project_name_cursor_home(),
+                                'e' | 'E' => self.move_project_name_cursor_end(),
+                                'u' | 'U' => self.delete_project_name_to_start(),
+                                'k' | 'K' => self.delete_project_name_to_end(),
+                                'w' | 'W' => self.delete_project_name_word_backward(),
+                                _ => {}
                             }
                             CreationModalAction::None
-                        } else {
-                            CreationModalAction::Cancel
                         }
-                    }
-                    KeyCode::Tab => {
-                        self.next_focus();
-                        CreationModalAction::None
-                    }
-                    KeyCode::BackTab => {
-                        self.prev_focus();
-                        CreationModalAction::None
-                    }
-                    KeyCode::Up => {
-                        self.prev_focus();
-                        CreationModalAction::None
-                    }
-                    KeyCode::Down => {
-                        self.next_focus();
-                        CreationModalAction::None
-                    }
-                    KeyCode::Left => {
-                        if self.focus == CreationFocus::Agent {
-                            self.cycle_agent_prev();
+                        KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                            self.insert_project_name_char(c);
+                            CreationModalAction::None
                         }
-                        CreationModalAction::None
+                        _ => CreationModalAction::None,
                     }
-                    KeyCode::Right => {
-                        if self.focus == CreationFocus::Agent {
-                            self.cycle_agent_next();
+                } else {
+                    match key.code {
+                        KeyCode::Esc => self.handle_back_or_cancel(),
+                        KeyCode::Tab => {
+                            self.next_focus();
+                            CreationModalAction::None
                         }
-                        CreationModalAction::None
-                    }
-                    KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                        match self.focus {
-                            CreationFocus::ProjectName => {
-                                self.project_name_input.push(c);
-                                self.revalidate();
+                        KeyCode::BackTab => {
+                            self.prev_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Up => {
+                            self.prev_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Down => {
+                            self.next_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Left => {
+                            if self.focus == CreationFocus::Agent {
+                                self.cycle_agent_prev();
                             }
-                            CreationFocus::Agent => {
+                            CreationModalAction::None
+                        }
+                        KeyCode::Right => {
+                            if self.focus == CreationFocus::Agent {
+                                self.cycle_agent_next();
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                            if self.focus == CreationFocus::Agent {
                                 if c == 'h' || c == 'k' {
                                     self.cycle_agent_prev();
                                 } else if c == 'l' || c == 'j' {
                                     self.cycle_agent_next();
                                 }
                             }
-                            CreationFocus::Template | CreationFocus::Prompt => {}
-                        }
-                        CreationModalAction::None
-                    }
-                    KeyCode::Backspace => {
-                        if self.focus == CreationFocus::ProjectName {
-                            if self.project_name_input.is_empty() {
-                                if self.templates.len() > 1 {
-                                    let cur_tpl = self.selected_template().map(str::to_string);
-                                    self.step = CreationStep::SelectTemplate;
-                                    let matching = self.matching_template_indices();
-                                    if let Some(tpl) = cur_tpl {
-                                        self.selected_template_idx = matching
-                                            .iter()
-                                            .position(|&i| {
-                                                self.templates.get(i).map(String::as_str)
-                                                    == Some(&tpl)
-                                            })
-                                            .unwrap_or(0);
-                                    } else {
-                                        self.selected_template_idx = 0;
-                                    }
-                                }
-                            } else {
-                                self.project_name_input.pop();
-                                self.revalidate();
-                            }
-                        }
-                        CreationModalAction::None
-                    }
-                    KeyCode::Enter => {
-                        self.poll_validation();
-                        if self.validation.is_valid {
-                            let tpl_name = self.selected_template().unwrap_or("");
-                            let builder = ProjectBuilder::new(
-                                self.config.clone(),
-                                tpl_name,
-                                &self.project_name_input,
-                            )
-                            .with_cwd(&self.cwd)
-                            .with_agent(self.selected_agent());
-                            self.validation = builder.validate_detailed();
-                        }
-                        if self.validation.is_valid {
-                            let trimmed = self.project_name_input.trim();
-                            if let Some(tpl) = self.selected_template() {
-                                let prompt = if self.prompt_input.trim().is_empty() {
-                                    None
-                                } else {
-                                    Some(self.prompt_input.trim().to_string())
-                                };
-                                CreationModalAction::Submit {
-                                    template: tpl.to_string(),
-                                    project: trimmed.to_string(),
-                                    agent_override: Some(self.selected_agent().to_string()),
-                                    prompt,
-                                }
-                            } else {
-                                CreationModalAction::None
-                            }
-                        } else {
                             CreationModalAction::None
                         }
+                        KeyCode::Enter => self.try_submit(),
+                        _ => CreationModalAction::None,
                     }
-                    _ => CreationModalAction::None,
                 }
             }
+        }
+    }
+
+    /// Attempts to validate and submit the project creation modal.
+    pub fn try_submit(&mut self) -> CreationModalAction {
+        self.poll_validation();
+        if self.validation.is_valid {
+            let tpl_name = self.selected_template().unwrap_or("");
+            let builder = ProjectBuilder::new(
+                self.config.clone(),
+                tpl_name,
+                self.project_name_input.value(),
+            )
+            .with_cwd(&self.cwd)
+            .with_agent(self.selected_agent());
+            self.validation = builder.validate_detailed();
+        }
+        if self.validation.is_valid {
+            let trimmed = self.project_name_input.trim();
+            if let Some(tpl) = self.selected_template() {
+                let prompt = if self.prompt_input.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.prompt_input.trim().to_string())
+                };
+                CreationModalAction::Submit {
+                    template: tpl.to_string(),
+                    project: trimmed.to_string(),
+                    agent_override: Some(self.selected_agent().to_string()),
+                    prompt,
+                }
+            } else {
+                CreationModalAction::None
+            }
+        } else {
+            CreationModalAction::None
+        }
+    }
+
+    /// Handles backtracking to template selection or cancelling if only one template exists.
+    pub fn handle_back_or_cancel(&mut self) -> CreationModalAction {
+        if self.templates.len() > 1 {
+            let cur_tpl = self.selected_template().map(str::to_string);
+            self.step = CreationStep::SelectTemplate;
+            let matching = self.matching_template_indices();
+            if let Some(tpl) = cur_tpl {
+                self.selected_template_idx = matching
+                    .iter()
+                    .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
+                    .unwrap_or(0);
+            } else {
+                self.selected_template_idx = 0;
+            }
+            CreationModalAction::None
+        } else {
+            CreationModalAction::Cancel
         }
     }
 
@@ -1212,12 +1371,11 @@ impl ProjectCreationModal {
             }
             CreationStep::ConfigureDetails => match self.focus {
                 CreationFocus::ProjectName => {
-                    for c in text.chars() {
-                        if !c.is_control() {
-                            self.project_name_input.push(c);
-                        }
+                    self.sync_project_name_cursor();
+                    if self.project_name_input.handle_paste(text) {
+                        self.project_name_cursor = self.project_name_input.cursor;
+                        self.revalidate();
                     }
-                    self.revalidate();
                 }
                 CreationFocus::Prompt => {
                     self.insert_str_prompt(text);
@@ -1657,9 +1815,8 @@ impl ProjectCreationModal {
                 Style::default().fg(theme.input_placeholder),
             )
         } else {
-            let cursor = if proj_focused { " " } else { "" };
             Span::styled(
-                format!("{}{}", self.project_name_input, cursor),
+                self.project_name_input.value(),
                 Style::default()
                     .fg(theme.input_text)
                     .add_modifier(Modifier::BOLD),
@@ -2317,16 +2474,14 @@ mod tests {
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("alpha_tpl"));
 
         // Fast validation immediately reflects non-empty input
-        modal.project_name_input = "collision-target".to_string();
-        modal.revalidate();
+        modal.set_project_name("collision-target");
         let gen1 = modal.validation_generation;
 
         // Immediate state before background thread finishes is fast-valid
         assert!(modal.validation.is_valid);
 
         // Simulate typing more characters before gen1 finishes
-        modal.project_name_input = "collision-target-extra".to_string();
-        modal.revalidate();
+        modal.set_project_name("collision-target-extra");
         let gen2 = modal.validation_generation;
         assert_ne!(gen1, gen2);
 
@@ -2351,7 +2506,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         modal.focus = CreationFocus::ProjectName;
-        modal.project_name_input = "my-proj".to_string();
+        modal.set_project_name("my-proj");
 
         let pos = modal.cursor_position(area);
         assert_eq!(pos, Some(Position::new(36, 10)));
@@ -2645,5 +2800,205 @@ mod tests {
         assert!(content2.contains("First instruction line"));
         assert!(content2.contains("Second instruction line"));
         assert!(content2.contains("Third instruction line"));
+    }
+
+    #[test]
+    fn test_project_name_inline_cursor_movement_and_field_isolation() {
+        let config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::ProjectName;
+
+        // Set initial project name
+        modal.set_project_name("alpha-beta-gamma");
+        assert_eq!(modal.project_name_cursor, 16);
+
+        // Left arrow moves cursor left by 1 without changing focus
+        modal.handle_key(key(KeyCode::Left));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+        assert_eq!(modal.project_name_cursor, 15);
+
+        // Right arrow moves cursor right by 1 without changing focus
+        modal.handle_key(key(KeyCode::Right));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+        assert_eq!(modal.project_name_cursor, 16);
+
+        // Right arrow at end does not overflow
+        modal.handle_key(key(KeyCode::Right));
+        assert_eq!(modal.project_name_cursor, 16);
+
+        // Home key moves cursor to 0
+        modal.handle_key(key(KeyCode::Home));
+        assert_eq!(modal.project_name_cursor, 0);
+
+        // Left arrow at start does not underflow
+        modal.handle_key(key(KeyCode::Left));
+        assert_eq!(modal.project_name_cursor, 0);
+
+        // End key moves cursor to end
+        modal.handle_key(key(KeyCode::End));
+        assert_eq!(modal.project_name_cursor, 16);
+
+        // Ctrl+A moves to start
+        modal.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(modal.project_name_cursor, 0);
+
+        // Ctrl+E moves to end
+        modal.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(modal.project_name_cursor, 16);
+
+        // Ctrl+Left moves back one word
+        modal.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        assert_eq!(modal.project_name_cursor, 11); // Start of "gamma"
+
+        // Alt+B moves back one word
+        modal.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(modal.project_name_cursor, 6); // Start of "beta"
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+        assert_eq!(modal.project_name_cursor, 0); // Start of "alpha"
+
+        // Ctrl+Right moves forward one word
+        modal.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+        assert_eq!(modal.project_name_cursor, 5); // End of "alpha"
+
+        // Alt+F moves forward one word
+        modal.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(modal.project_name_cursor, 10); // End of "beta"
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(modal.project_name_cursor, 16); // End of "gamma"
+
+        // Field navigation isolation: Up / Down or Tab switch focus
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+    }
+
+    #[test]
+    fn test_project_name_readline_kills() {
+        let config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::ProjectName;
+
+        // 1. Ctrl+W (delete word backward)
+        modal.set_project_name("billing-api-service");
+        assert_eq!(modal.project_name_cursor, 19);
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(modal.project_name(), "billing-api-");
+        assert_eq!(modal.project_name_cursor, 12);
+
+        modal.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(modal.project_name(), "billing-");
+        assert_eq!(modal.project_name_cursor, 8);
+
+        // 2. Ctrl+K (delete to end)
+        modal.set_project_name("customer-portal-web");
+        modal.project_name_cursor = 8; // At '-' before portal
+        modal.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(modal.project_name(), "customer");
+        assert_eq!(modal.project_name_cursor, 8);
+
+        // 3. Ctrl+U (delete to start)
+        modal.set_project_name("customer-portal-web");
+        modal.project_name_cursor = 9; // At 'p' in portal
+        modal.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(modal.project_name(), "portal-web");
+        assert_eq!(modal.project_name_cursor, 0);
+    }
+
+    #[test]
+    fn test_project_name_insertions_and_deletions() {
+        let config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::ProjectName;
+
+        // Type characters
+        for c in "pay-svc".chars() {
+            modal.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(modal.project_name(), "pay-svc");
+        assert_eq!(modal.project_name_cursor, 7);
+
+        // Move to position 3 ("pay|-svc") and insert 's'
+        modal.project_name_cursor = 3;
+        modal.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(modal.project_name(), "pays-svc");
+        assert_eq!(modal.project_name_cursor, 4);
+
+        // Delete key deletes char under cursor ('-')
+        modal.handle_key(key(KeyCode::Delete));
+        assert_eq!(modal.project_name(), "payssvc");
+        assert_eq!(modal.project_name_cursor, 4);
+
+        // Backspace deletes char before cursor ('s')
+        modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(modal.project_name(), "paysvc");
+        assert_eq!(modal.project_name_cursor, 3);
+
+        // Move to start (pos 0) and Backspace does not delete or crash
+        modal.handle_key(key(KeyCode::Home));
+        assert_eq!(modal.project_name_cursor, 0);
+        modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(modal.project_name(), "paysvc");
+        assert_eq!(modal.project_name_cursor, 0);
+    }
+
+    #[test]
+    fn test_project_name_paste_sanitization_at_cursor() {
+        let config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::ProjectName;
+
+        modal.set_project_name("my-app");
+        modal.project_name_cursor = 3; // Between '-' and 'a'
+
+        // Paste text containing \r\n and control characters
+        modal.handle_paste("super\r\n-\x01cool-");
+        assert_eq!(modal.project_name(), "my-super-cool-app");
+        assert_eq!(modal.project_name_cursor, 14);
+    }
+
+    #[test]
+    fn test_project_name_hardware_cursor_position() {
+        let config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::ProjectName;
+
+        let area = Rect::new(0, 0, 100, 30);
+        // inner.x = 13, prefix_len = 16 -> start x = 29, inner.y = 7 -> y = 10
+        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 10)));
+
+        modal.set_project_name("test-project");
+        assert_eq!(modal.cursor_position(area), Some(Position::new(41, 10)));
+
+        modal.move_project_name_cursor_home();
+        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 10)));
+
+        modal.project_name_cursor = 5;
+        assert_eq!(modal.cursor_position(area), Some(Position::new(34, 10)));
     }
 }

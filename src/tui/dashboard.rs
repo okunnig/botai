@@ -640,7 +640,7 @@ mod tests {
         );
         state.open_creation_modal();
         if let Some(ref mut modal) = state.creation_modal {
-            modal.project_name_input = "new-checkout".to_string();
+            modal.set_project_name("new-checkout");
             modal.prompt_input = "Implement Stripe".to_string();
         }
 

@@ -427,12 +427,28 @@ env = { PORT = "8080", NODE_ENV = "development" }
          - *Left Panel*: Filtered template list with active selection indicator (` > `) and matching template count.
          - *Right Preview Pane*: Live preview of the highlighted template (description, repository count, repository names and clone URLs, default agent CLI, and custom instructions).
        - **Controls**: `Up`/`Down`/`j`/`k` (navigate list), typing text filters list, `Backspace` deletes query char, `Enter` selects template and advances to Step 2, `Esc` cancels/closes modal.
-       - **Smart Single-Template Bypass**: If only one template is configured in `config.toml`, initializes directly into Step 2 with that template pre-selected.
+       - **Consistent Template Selection & Preview (No Single-Template Bypass)**: Regardless of template count (even when only one template is configured), the creation modal always begins in Step 1 (`CreationStep::SelectTemplate`) to ensure uniform visibility of template descriptions, repository sources, and configuration. When only a single template exists, it is automatically highlighted and pre-selected so the user can immediately review its preview and press `Enter` to advance.
+       - **Empty-State Presentation**: If zero templates are configured in `config.toml`, Step 1 renders a helpful empty-state preview card: `"No templates found in config.toml. Run 'botai edit' to configure templates."` with `Esc` to cancel.
     2. **Step 2: Project Details & Configuration (`CreationStep::ConfigureDetails`)**:
        - **Modal Header**: Displays step progress and selected template name (`Create New Project (Template: <name>)`).
-       - **Form Fields**:
-         - `Project Name:` Text input with real-time pre-validation badges (`[✓ Ready]`, `[✗ Collision]`, `[Required]`).
-         - `Agent CLI:` Interactive tool selector (`claude`, `agy`, `copilot`, `aider`, etc. cycled via `Left`/`Right`).
+        - **Form Fields**:
+          - `Project Name:` Editable one-line text input powered by the reusable `TextInput` widget component with:
+            - **In-Line Cursor Navigation**: `Left` / `Right` arrows exclusively move the cursor character-by-character within the text without transitioning field focus.
+            - **Standard Readline Keybindings**:
+              - `Ctrl+A` / `Home`: Move cursor to the beginning of the project name.
+              - `Ctrl+E` / `End`: Move cursor to the end of the project name.
+              - `Backspace`: Delete character before the cursor.
+              - `Delete`: Delete character under the cursor.
+              - `Ctrl+U`: Delete from cursor to the beginning of the line.
+              - `Ctrl+K`: Delete from cursor to the end of the line.
+              - `Ctrl+W`: Delete the word immediately preceding the cursor.
+              - `Ctrl+Left` / `Alt+B`: Move cursor backward one word.
+              - `Ctrl+Right` / `Alt+F`: Move cursor forward one word.
+            - **Field Navigation Isolation**: Focus switching is handled exclusively by `Tab` / `Shift+Tab` or `Up` / `Down` arrows.
+            - **Paste Handling**: Sanitizes pasted text by stripping newlines and inserting content at the current cursor position.
+            - **Accurate Terminal Hardware Cursor**: Positions the terminal cursor at the exact column offset matching the current cursor position.
+            - **Real-Time Pre-Validation Badges**: Dynamically displays `[✓ Ready]`, `[✗ Collision]`, or `[Required]`.
+          - `Agent CLI:` Interactive tool selector (`claude`, `agy`, `copilot`, `aider`, etc. cycled via `Left`/`Right`).
          - `Initial Prompt:` Optional task instruction prompt rendered in a dedicated multi-line box (3–4 visible lines) with:
            - **Word Wrapping & Sizing**: Automatic line wrapping according to available modal width, preserving line breaks.
            - **Internal Vertical Scrolling**: Automatic vertical scrolling keeping the active line and cursor in view when text exceeds visible lines.

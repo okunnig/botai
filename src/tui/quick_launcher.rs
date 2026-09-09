@@ -192,9 +192,10 @@ impl QuickLauncherState {
             match self.focus {
                 LauncherFocus::ProjectName => {
                     let prefix_len = 16u16;
-                    let cursor_x = body_area.x
-                        + prefix_len
-                        + self.creation_modal.project_name_input.chars().count() as u16;
+                    let total_chars = self.creation_modal.project_name_input.chars().count();
+                    let cursor_offset =
+                        self.creation_modal.project_name_cursor.min(total_chars) as u16;
+                    let cursor_x = body_area.x + prefix_len + cursor_offset;
                     let cursor_y = body_area.y + 2;
                     if cursor_x < body_area.x + body_area.width
                         && cursor_y < body_area.y + body_area.height
@@ -490,6 +491,75 @@ impl QuickLauncherState {
             }
         }
 
+        if self.tab == LauncherTab::Create && self.focus == LauncherFocus::ProjectName {
+            if (key.code == KeyCode::Left && (has_ctrl || has_alt))
+                || ((key.code == KeyCode::Char('b') || key.code == KeyCode::Char('B')) && has_alt)
+            {
+                self.creation_modal.move_project_name_word_backward();
+                return QuickLauncherAction::None;
+            }
+            if (key.code == KeyCode::Right && (has_ctrl || has_alt))
+                || ((key.code == KeyCode::Char('f') || key.code == KeyCode::Char('F')) && has_alt)
+            {
+                self.creation_modal.move_project_name_word_forward();
+                return QuickLauncherAction::None;
+            }
+            match key.code {
+                KeyCode::Left => {
+                    self.creation_modal.move_project_name_cursor_left();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Right => {
+                    self.creation_modal.move_project_name_cursor_right();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Home => {
+                    self.creation_modal.move_project_name_cursor_home();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::End => {
+                    self.creation_modal.move_project_name_cursor_end();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Backspace => {
+                    self.creation_modal.delete_project_name_char_backward();
+                    self.clear_error();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Delete => {
+                    self.creation_modal.delete_project_name_char_forward();
+                    self.clear_error();
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Char(c) if has_ctrl => {
+                    match c {
+                        'a' | 'A' => self.creation_modal.move_project_name_cursor_home(),
+                        'e' | 'E' => self.creation_modal.move_project_name_cursor_end(),
+                        'u' | 'U' => {
+                            self.creation_modal.delete_project_name_to_start();
+                            self.clear_error();
+                        }
+                        'k' | 'K' => {
+                            self.creation_modal.delete_project_name_to_end();
+                            self.clear_error();
+                        }
+                        'w' | 'W' => {
+                            self.creation_modal.delete_project_name_word_backward();
+                            self.clear_error();
+                        }
+                        _ => {}
+                    }
+                    return QuickLauncherAction::None;
+                }
+                KeyCode::Char(c) if !has_ctrl && !has_alt => {
+                    self.creation_modal.insert_project_name_char(c);
+                    self.clear_error();
+                    return QuickLauncherAction::None;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Tab => {
                 self.next_focus();
@@ -586,22 +656,6 @@ impl QuickLauncherState {
                 self.switch_tab(LauncherTab::Attach);
                 QuickLauncherAction::None
             }
-            KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                if self.tab == LauncherTab::Create && self.focus == LauncherFocus::ProjectName {
-                    self.creation_modal.project_name_input.push(c);
-                    self.creation_modal.revalidate();
-                    self.clear_error();
-                }
-                QuickLauncherAction::None
-            }
-            KeyCode::Backspace => {
-                if self.tab == LauncherTab::Create && self.focus == LauncherFocus::ProjectName {
-                    self.creation_modal.project_name_input.pop();
-                    self.creation_modal.revalidate();
-                    self.clear_error();
-                }
-                QuickLauncherAction::None
-            }
             KeyCode::Enter => match self.tab {
                 LauncherTab::Create => {
                     let trimmed_name = self.creation_modal.project_name_input.trim();
@@ -645,12 +699,7 @@ impl QuickLauncherState {
         if self.tab == LauncherTab::Create {
             match self.focus {
                 LauncherFocus::ProjectName => {
-                    for c in text.chars() {
-                        if !c.is_control() {
-                            self.creation_modal.project_name_input.push(c);
-                        }
-                    }
-                    self.creation_modal.revalidate();
+                    self.creation_modal.handle_paste(text);
                     self.clear_error();
                 }
                 LauncherFocus::Prompt => {
@@ -899,9 +948,8 @@ pub fn render_quick_launcher(
                         Style::default().fg(theme.input_placeholder),
                     )
                 } else {
-                    let cursor = if proj_focused { " " } else { "" };
                     Span::styled(
-                        format!("{}{}", state.creation_modal.project_name_input, cursor),
+                        state.creation_modal.project_name_input.value(),
                         Style::default()
                             .fg(theme.input_text)
                             .add_modifier(Modifier::BOLD),
@@ -1513,7 +1561,7 @@ mod tests {
         assert_eq!(launcher.cursor_position(area), Some(Position::new(31, 12)));
 
         // Focus on ProjectName, with input "demo-api"
-        launcher.creation_modal.project_name_input = "demo-api".to_string();
+        launcher.creation_modal.set_project_name("demo-api");
         assert_eq!(launcher.cursor_position(area), Some(Position::new(39, 12)));
 
         // 3. Focus on Prompt, empty input
