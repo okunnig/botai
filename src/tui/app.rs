@@ -552,8 +552,13 @@ impl TuiApp {
             .map(|s| s.template_name().to_string());
 
         let running = self.running_sessions_map();
-        let launcher = QuickLauncherState::new(templates, local_projects, active_tpl.as_deref())
-            .with_running_sessions(running);
+        let launcher = if let Some(cfg) = &self.config {
+            QuickLauncherState::from_config(cfg, &cwd, local_projects, active_tpl.as_deref())
+                .with_running_sessions(running)
+        } else {
+            QuickLauncherState::new(templates, local_projects, active_tpl.as_deref())
+                .with_running_sessions(running)
+        };
         self.quick_launcher = Some(launcher);
     }
 
@@ -1485,6 +1490,55 @@ repos = []
         );
         app.handle_launcher_key(esc_key);
         assert!(app.quick_launcher.is_none());
+    }
+
+    #[test]
+    fn test_tui_app_open_quick_launcher_preserves_config() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let config_toml = r#"
+default_agent = "custom-agent"
+repos_dir = "/custom/repos/path"
+
+[agents.custom-agent]
+command = "custom-agent-bin"
+args = ["--interactive"]
+
+[repos.custom_repo]
+url = "https://github.com/example/custom_repo.git"
+default_branch = "feature"
+
+[templates.custom_template]
+repos = ["custom_repo"]
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_config(config)
+            .with_cwd(cwd);
+
+        app.open_quick_launcher();
+        let launcher = app.quick_launcher.as_ref().expect("launcher must be opened");
+        let modal_config = &launcher.creation_modal.config;
+
+        assert_eq!(modal_config.default_agent, "custom-agent");
+        assert_eq!(modal_config.repos_dir, PathBuf::from("/custom/repos/path"));
+        assert!(modal_config.agents.contains_key("custom-agent"));
+        assert_eq!(
+            modal_config.agents["custom-agent"].command,
+            "custom-agent-bin"
+        );
+        assert_eq!(
+            modal_config.agents["custom-agent"].args,
+            vec!["--interactive"]
+        );
+        assert!(modal_config.repos.contains_key("custom_repo"));
+        assert_eq!(
+            modal_config.repos["custom_repo"].url.as_deref(),
+            Some("https://github.com/example/custom_repo.git")
+        );
+        assert!(modal_config.templates.contains_key("custom_template"));
     }
 
     #[test]
