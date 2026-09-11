@@ -221,7 +221,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Emits native OS desktop notifications (via `notify-rust` / terminal notifications) with per-project debouncing and cooldown:
     - An agent CLI process completes a task or exits.
     - An agent transitions to an idle state awaiting user input / approval, or emits a `BEL` / OSC notification.
-  - **Focus-Aware Notification Filtering**: Desktop notifications for waiting/attention events are suppressed if the user is actively viewing and interacting with that specific session, triggering only when the session is running in the background (different project tab, modal dialog, quick launcher, or dashboard open).
+  - **Focus-Aware Notification Filtering**: Desktop notifications for waiting/attention events are suppressed if the user is actively viewing and interacting with that specific session, triggering only when the session is running in the background (different project tab, modal dialog, or dashboard open).
 - **Real-Time Session Indicators in TUI**:
   - Live status indicators formatted as a leading solid round dot symbol (`●` U+25CF) inside project tabs in the status bar (e.g., `  ● 1: [ecommerce] payment-api  `, falling back to `  ● 1: payment-api  ` if template name is empty, with active/inactive styling):
     - ● **Busy / Thinking**: Themed Busy color (`theme.status_busy`, e.g., Cyan / Electric Blue / Amber) when agent is actively executing.
@@ -310,7 +310,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Bracketed Paste Event Passthrough**:
   - Formats pasted clipboard text as standard bracketed paste escape sequence (`\x1b[200~<text>\x1b[201~`) via `paste_to_bytes`.
   - When an active session is focused and leader mode is inactive, forwarded directly to the active session's PTY master/slave writer, updating activity tracking and resetting scrollback to live output.
-  - When dialogs or modals are active (Project Creation Modal, In-Session Quick Launcher, Dashboard), forwarded to the active text input field or search filter, preserving whitespace and newlines for multiline prompts.
+  - When dialogs or modals are active (Project Creation Modal, Dashboard), forwarded to the active text input field or search filter, preserving whitespace and newlines for multiline prompts.
 - **Mouse Event Capture & Dual-Mode Scroll Handling**:
   - Enables terminal mouse capture (`crossterm::event::EnableMouseCapture`) on application startup and cleanly releases it (`crossterm::event::DisableMouseCapture`) on termination / cleanup.
   - **Child Process Mouse Protocol (SGR 1006) & Viewport Coordinate Translation**:
@@ -414,7 +414,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 8. Unified Project Creation Engine & Interactive TUI Creation Modal
 - **Unified Backend Engine (`ProjectBuilder`)**:
-  - Single, centralized project initialization pipeline in `src/project/` used across CLI `botai create` (both non-attached and attached modes), the TUI Dashboard, and In-Session Quick Launcher.
+  - Single, centralized project initialization pipeline in `src/project/` used across CLI `botai create` (both non-attached and attached modes), the TUI Dashboard, and In-Session project creation.
   - **Sequential Pipeline Steps**:
     1. **Pre-Validation**: Multi-tier validation with `validate_fast` (immediate 0ms local validation of project name, template existence, and CWD directory collision) and `check_branch_collisions` / `validate_detailed` (git branch collision verification across constituent template repositories).
     2. **Repository Resolution & Cloning**: Clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch for existing repos.
@@ -429,7 +429,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Event & Progress Streaming**: Emits structured `ProjectSetupEvent` (Steps, Logs, Success, Error) consumed by CLI stdout or the TUI setup modal.
   - **Atomic Rollback**: On any core initialization error (e.g. branch collision, clone failure, worktree creation failure, agent spawn failure), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory. (Note: Non-zero exit codes from user setup/post-create hooks log warnings and do not trigger destructive rollback).
 - **Unified Interactive Project Creation Modal (Two-Step Flow)**:
-  - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session Quick Launcher.
+  - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session creation.
   - **Asynchronous Non-Blocking Pre-Validation**:
     - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
     - Git branch collisions are checked asynchronously in background worker threads with generation counters to prevent stale results and UI freezing.
@@ -474,7 +474,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
            - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
          - Live pre-validation status banner at the bottom.
        - **Back-Navigation**: Pressing `Esc` in Step 2 returns to Step 1 without losing configuration. Pressing `Backspace` inside editable text fields strictly performs character deletion (no-op when empty or at cursor offset 0) and never navigates away from the step.
-       - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, and optional initial prompt. The selected agent override is plumbed through `DashboardAction::CreateProject` and `QuickLauncherAction::Create` directly into `start_project_creation` and `run_setup_worker` to instantiate the chosen agent CLI.
+       - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, and optional initial prompt. The selected agent override is plumbed through `DashboardAction::CreateProject` and `CreationModalAction::Submit` directly into `start_project_creation` and `run_setup_worker` to instantiate the chosen agent CLI.
 
 ---
 
@@ -518,17 +518,16 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ---
 
-## 10. In-Session Quick Launcher & Project Navigation Modal
-- **In-Session Trigger (`Ctrl + Space` then `c` / `n`)**:
+## 10. In-Session Project Creation & Navigation
+- **In-Session Project Creation (`Ctrl + Space` then `c`)**:
   - Can be invoked at any time while working inside an active terminal session.
-- **Tabbed Modal Views**:
-  - **Create New Project Tab**: Embedded unified `ProjectCreationModal`.
-  - **Attach Existing Project Tab**: Lists local projects in CWD with status indicators for quick switching or attaching.
-- **Navigation & Controls**:
-  - `Tab` / `BackTab` (`Shift+Tab`): Move focus between tabs and form fields.
-  - `Left` / `Right`: Switch tabs or cycle template/agent choices.
-  - `Enter`: Submit create or attach action.
-  - `Esc`: Dismiss modal and return focus to active terminal PTY.
+  - Opens the unified two-step `ProjectCreationModal` floating dialog directly (identical workflow and presentation as the overview dashboard):
+    - **Step 1 (`CreationStep::SelectTemplate`)**: Searchable template list with real-time text input filter, matching count, and full template preview pane. Defaults to the global default template from `config.toml`. `Enter` advances to Step 2, `Esc` dismisses the modal and returns focus to the active session.
+    - **Step 2 (`CreationStep::ConfigureDetails`)**: Editable project name with readline editing and real-time pre-validation badges, interactive Agent CLI selector, and multiline word-wrapped initial prompt box. `Enter` validates inputs, dismisses the modal, and transitions directly into the Asynchronous Live Setup Modal. `Esc` returns to Step 1.
+- **In-Session Project Navigation & Detachment**:
+  - Direct session switching: `Ctrl + Space` followed by `1`..`9` jumps directly to session index 0..8.
+  - Relative session switching: `Ctrl + Space` followed by `n` (next session) or `p` (previous session) cycles through active sessions.
+  - Overview detachment: `Ctrl + Space` followed by `d` detaches from the active session back to the interactive project dashboard (overview), allowing full-screen browsing and attaching of local existing projects.
 
 
 ---
@@ -549,7 +548,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Status Bar**: Background, default text, active session tab, inactive tabs, tab index numbers (1..9), leader mode indicator badge and hints.
   - **Agent Status Indicators**: Distinct contextual theme colors applied to the leading round status dot (`●`) for Thinking / Busy (`status_busy`), Waiting for Input (`status_waiting`), Done / Idle (`status_done`), and Error / Interrupted (`status_error`), with Initializing and Terminated states rendered in `status_bar_fg`.
   - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, and top header status bar key hints.
-  - **Modals (Creation Modal & Quick Launcher)**: Dialog borders, active/inactive tab bars, focused input borders/prompts, placeholder text, field labels, and button/key hints.
+  - **Modals (Creation Modal, Setup Progress Modal & Destroy Modal)**: Dialog borders, focused input borders/prompts, placeholder text, field labels, and button/key hints.
   - **Exit & Crash Banners**: High-visibility error notification banners rendered across the bottom line upon non-zero process exits.
 
 ---

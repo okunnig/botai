@@ -7,10 +7,9 @@ use botai::session::{
 };
 use botai::tui::app::render_error_banner;
 use botai::tui::dashboard::{render_dashboard, DashboardState};
-use botai::tui::quick_launcher::{render_quick_launcher, QuickLauncherState};
 use botai::tui::status_bar::StatusBar;
 use botai::tui::ui::compute_layout;
-use botai::tui::TuiApp;
+use botai::tui::{ProjectCreationModal, TuiApp};
 use botai::Theme;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -81,18 +80,14 @@ repos = ["/tmp/repos/shop"]
     let border_cell = buf.cell((0, 1)).unwrap();
     assert_eq!(border_cell.fg, theme.border_focused);
 
-    // 3. Test Quick Launcher rendering with Cyberpunk theme
-    let launcher_state = QuickLauncherState::new(
-        vec!["ecommerce".to_string()],
-        vec!["shop-service".to_string()],
-        Some("ecommerce"),
-    );
-    let mut launcher_buf = Buffer::empty(area);
-    render_quick_launcher(&launcher_state, area, &mut launcher_buf, &theme);
+    // 3. Test Creation Modal rendering with Cyberpunk theme
+    let modal = ProjectCreationModal::new(&config, dir.path(), Some("ecommerce"));
+    let mut modal_buf = Buffer::empty(area);
+    modal.render_modal(area, &mut modal_buf, &theme);
 
-    // Verify launcher container border matches cyberpunk border_focused
-    let l_border_cell = launcher_buf.cell((4, 2)).unwrap();
-    assert_eq!(l_border_cell.fg, theme.border_focused);
+    // Verify modal container border matches cyberpunk modal_title
+    let m_border_cell = modal_buf.cell((2, 1)).unwrap();
+    assert_eq!(m_border_cell.fg, theme.modal_title);
 
     // 4. Test Status Bar rendering with Cyberpunk theme
     let mut registry = SessionRegistry::new();

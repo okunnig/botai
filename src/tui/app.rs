@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::env;
-use std::fs;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -28,6 +27,7 @@ use crate::project::ProjectBuilder;
 use crate::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
 };
+use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
 use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
 use crate::tui::destroy_progress_modal::{
     render_destroy_progress_modal, DestroyProgressModalState,
@@ -36,7 +36,6 @@ use crate::tui::events::{
     is_incomplete_sgr_mouse, is_shift_enter, parse_raw_events, parse_sgr_mouse,
     translate_mouse_event, RawAction, RawLeaderDecoder,
 };
-use crate::tui::quick_launcher::{render_quick_launcher, QuickLauncherAction, QuickLauncherState};
 use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
 use crate::tui::status_bar::StatusBar;
 use crate::tui::theme::Theme;
@@ -49,7 +48,7 @@ pub struct TuiApp {
     pub should_quit: bool,
     pub tick_rate: Duration,
     pub dashboard: Option<DashboardState>,
-    pub quick_launcher: Option<QuickLauncherState>,
+    pub creation_modal: Option<ProjectCreationModal>,
     pub setup_modal: Option<SetupModalState>,
     pub destroy_progress_modal: Option<DestroyProgressModalState>,
     pub config: Option<Config>,
@@ -154,7 +153,7 @@ impl TuiApp {
             should_quit: false,
             tick_rate: Duration::from_millis(30),
             dashboard: None,
-            quick_launcher: None,
+            creation_modal: None,
             setup_modal: None,
             destroy_progress_modal: None,
             config: None,
@@ -179,10 +178,9 @@ impl TuiApp {
         self
     }
 
-    /// Sets the quick launcher state on `TuiApp`.
-    pub fn with_quick_launcher(mut self, mut quick_launcher: QuickLauncherState) -> Self {
-        quick_launcher.set_running_sessions(self.running_sessions_map());
-        self.quick_launcher = Some(quick_launcher);
+    /// Sets the creation modal state on `TuiApp`.
+    pub fn with_creation_modal(mut self, creation_modal: ProjectCreationModal) -> Self {
+        self.creation_modal = Some(creation_modal);
         self
     }
 
@@ -349,20 +347,17 @@ impl TuiApp {
             if let Some(dashboard) = &mut self.dashboard {
                 dashboard.poll_validation();
             }
-            if let Some(launcher) = &mut self.quick_launcher {
-                launcher.poll_validation();
+            if let Some(modal) = &mut self.creation_modal {
+                modal.poll_validation();
             }
 
             // 2. Process PTY outputs for all sessions
             self.process_pty_streams();
 
-            // Synchronize running sessions on dashboard and quick_launcher
+            // Synchronize running sessions on dashboard
             let running = self.running_sessions_map();
             if let Some(dashboard) = &mut self.dashboard {
-                dashboard.set_running_sessions(running.clone());
-            }
-            if let Some(launcher) = &mut self.quick_launcher {
-                launcher.set_running_sessions(running);
+                dashboard.set_running_sessions(running);
             }
 
             // 3. Draw active frame
@@ -408,9 +403,9 @@ impl TuiApp {
                         }
                     }
 
-                    if let Some(launcher) = &self.quick_launcher {
-                        render_quick_launcher(launcher, f.area(), f.buffer_mut(), &theme);
-                        if let Some(pos) = launcher.cursor_position(f.area()) {
+                    if let Some(modal) = &self.creation_modal {
+                        modal.render_modal(f.area(), f.buffer_mut(), &theme);
+                        if let Some(pos) = modal.cursor_position(f.area()) {
                             f.set_cursor_position(pos);
                         }
                     }
@@ -475,13 +470,13 @@ impl TuiApp {
                     _ => {}
                 }
             }
-        } else if self.quick_launcher.is_some() {
+        } else if self.creation_modal.is_some() {
             let events = parse_raw_events(bytes);
             for event in events {
                 match event {
-                    Event::Key(key) => self.handle_launcher_key(key),
-                    Event::Paste(text) => self.handle_launcher_paste(&text),
-                    Event::Mouse(mouse) => self.handle_launcher_mouse(mouse),
+                    Event::Key(key) => self.handle_creation_modal_key(key),
+                    Event::Paste(text) => self.handle_creation_modal_paste(&text),
+                    Event::Mouse(mouse) => self.handle_creation_modal_mouse(mouse),
                     _ => {}
                 }
             }
@@ -506,7 +501,7 @@ impl TuiApp {
         let mut clean_exits = Vec::new();
 
         let active_session_id = self.registry.active_session().map(|s| s.id().to_string());
-        let is_focused_mode = self.quick_launcher.is_none()
+        let is_focused_mode = self.creation_modal.is_none()
             && self.setup_modal.is_none()
             && self.destroy_progress_modal.is_none()
             && !self.is_showing_dashboard();
@@ -571,64 +566,46 @@ impl TuiApp {
         }
     }
 
-    /// Opens the in-session Quick Project Launcher modal.
-    pub fn open_quick_launcher(&mut self) {
+    /// Opens the in-session project creation modal.
+    pub fn open_creation_modal(&mut self) {
         let cwd = self
             .cwd
             .clone()
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
 
-        let mut local_projects = Vec::new();
-        if let Ok(entries) = fs::read_dir(&cwd) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() && path.join("AGENTS.md").is_file() {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        local_projects.push(name.to_string());
-                    }
-                }
-            }
-        }
-        local_projects.sort();
-
-        let mut templates = Vec::new();
-        if let Some(cfg) = &self.config {
-            templates = cfg.templates.keys().cloned().collect();
-        }
-        templates.sort();
-
-        let active_tpl = self
-            .registry
-            .active_session()
-            .map(|s| s.template_name().to_string());
-
-        let running = self.running_sessions_map();
-        let launcher = if let Some(cfg) = &self.config {
-            QuickLauncherState::from_config(cfg, &cwd, local_projects, active_tpl.as_deref())
-                .with_running_sessions(running)
+        let modal = if let Some(cfg) = &self.config {
+            ProjectCreationModal::new(cfg, &cwd, None)
         } else {
-            QuickLauncherState::new(templates, local_projects, active_tpl.as_deref())
-                .with_running_sessions(running)
+            let fallback_cfg =
+                Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                    .unwrap_or_else(|_| Config {
+                        default_agent: "claude".to_string(),
+                        theme: "tokyo-night".to_string(),
+                        repos_dir: PathBuf::from(".botai_repos"),
+                        repos: HashMap::new(),
+                        agents: HashMap::new(),
+                        templates: HashMap::new(),
+                    });
+            ProjectCreationModal::new(&fallback_cfg, &cwd, None)
         };
-        self.quick_launcher = Some(launcher);
+        self.creation_modal = Some(modal);
     }
 
-    /// Dispatches a key event to the quick launcher and handles any triggered action.
-    pub fn handle_launcher_key(&mut self, key: crossterm::event::KeyEvent) {
-        if let Some(mut launcher) = self.quick_launcher.take() {
-            let action = launcher.handle_key(key);
-            match action {
-                QuickLauncherAction::Cancel => {
-                    self.quick_launcher = None;
+    /// Dispatches a key event to the creation modal and handles any triggered action.
+    pub fn handle_creation_modal_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(mut modal) = self.creation_modal.take() {
+            match modal.handle_key(key) {
+                CreationModalAction::Cancel => {
+                    self.creation_modal = None;
                 }
-                QuickLauncherAction::Create {
+                CreationModalAction::Submit {
                     template,
                     project,
                     agent_override,
                     prompt,
                 } => {
-                    self.quick_launcher = None;
+                    self.creation_modal = None;
                     self.start_project_creation(
                         &template,
                         &project,
@@ -636,69 +613,17 @@ impl TuiApp {
                         prompt.as_deref(),
                     );
                 }
-                QuickLauncherAction::Attach(project) => {
-                    if let Some(pos) = self
-                        .registry
-                        .list()
-                        .iter()
-                        .position(|s| s.project_name() == project)
-                    {
-                        let _ = self.registry.set_active_index(pos);
-                        self.showing_dashboard = false;
-                    } else if self.attach_project(&project).is_ok() {
-                        let new_idx = self.registry.len().saturating_sub(1);
-                        let _ = self.registry.set_active_index(new_idx);
-                        self.showing_dashboard = false;
-                    }
-                }
-                QuickLauncherAction::None => {
-                    self.quick_launcher = Some(launcher);
+                CreationModalAction::None => {
+                    self.creation_modal = Some(modal);
                 }
             }
         }
     }
 
-    /// Dispatches a mouse event to the quick launcher and handles any triggered action.
-    pub fn handle_launcher_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
-        if let Some(mut launcher) = self.quick_launcher.take() {
-            let action = launcher.handle_mouse(mouse);
-            match action {
-                QuickLauncherAction::Cancel => {
-                    self.quick_launcher = None;
-                }
-                QuickLauncherAction::Create {
-                    template,
-                    project,
-                    agent_override,
-                    prompt,
-                } => {
-                    self.quick_launcher = None;
-                    self.start_project_creation(
-                        &template,
-                        &project,
-                        agent_override.as_deref(),
-                        prompt.as_deref(),
-                    );
-                }
-                QuickLauncherAction::Attach(project) => {
-                    if let Some(pos) = self
-                        .registry
-                        .list()
-                        .iter()
-                        .position(|s| s.project_name() == project)
-                    {
-                        let _ = self.registry.set_active_index(pos);
-                        self.showing_dashboard = false;
-                    } else if self.attach_project(&project).is_ok() {
-                        let new_idx = self.registry.len().saturating_sub(1);
-                        let _ = self.registry.set_active_index(new_idx);
-                        self.showing_dashboard = false;
-                    }
-                }
-                QuickLauncherAction::None => {
-                    self.quick_launcher = Some(launcher);
-                }
-            }
+    /// Dispatches a mouse event to the creation modal.
+    pub fn handle_creation_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        if let Some(modal) = &mut self.creation_modal {
+            modal.handle_mouse(mouse);
         }
     }
 
@@ -1087,7 +1012,7 @@ impl TuiApp {
             RawAction::OpenLauncher => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
-                self.open_quick_launcher();
+                self.open_creation_modal();
             }
             RawAction::CloseSession => {
                 self.leader_active = false;
@@ -1218,10 +1143,10 @@ impl TuiApp {
         }
     }
 
-    /// Forwards pasted text to the quick launcher if active.
-    pub fn handle_launcher_paste(&mut self, text: &str) {
-        if let Some(launcher) = &mut self.quick_launcher {
-            launcher.handle_paste(text);
+    /// Forwards pasted text to the creation modal if active.
+    pub fn handle_creation_modal_paste(&mut self, text: &str) {
+        if let Some(modal) = &mut self.creation_modal {
+            modal.handle_paste(text);
         }
     }
 
@@ -1278,6 +1203,7 @@ impl TuiApp {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::fs;
 
     #[test]
     fn test_tui_app_creation_and_quit() {
@@ -1350,7 +1276,7 @@ repos = []
         let registry = SessionRegistry::new();
         let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
 
-        assert!(app.quick_launcher.is_none());
+        assert!(app.creation_modal.is_none());
 
         // Send Ctrl+Space to activate leader
         app.handle_raw_bytes(&[0x00]);
@@ -1360,13 +1286,65 @@ repos = []
         app.handle_raw_bytes(b"c");
 
         assert!(!app.leader_active);
-        assert!(app.quick_launcher.is_some());
-        let launcher = app.quick_launcher.as_ref().unwrap();
-        assert_eq!(launcher.templates, vec!["ecommerce".to_string()]);
+        assert!(app.creation_modal.is_some());
+        let modal = app.creation_modal.as_ref().unwrap();
+        assert_eq!(modal.step, crate::tui::CreationStep::SelectTemplate);
+        assert_eq!(modal.templates, vec!["ecommerce".to_string()]);
     }
 
     #[test]
-    fn test_tui_app_launcher_create_project_lifecycle() {
+    fn test_tui_app_creation_modal_step_transitions_and_cancel() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let config_toml = r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[templates.tpl]
+repos = []
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
+
+        // 1. Open creation modal -> Step 1
+        app.open_creation_modal();
+        assert!(app.creation_modal.is_some());
+        assert_eq!(
+            app.creation_modal.as_ref().unwrap().step,
+            crate::tui::CreationStep::SelectTemplate
+        );
+
+        // 2. Press Enter -> advances to Step 2
+        let enter_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_creation_modal_key(enter_key);
+        assert_eq!(
+            app.creation_modal.as_ref().unwrap().step,
+            crate::tui::CreationStep::ConfigureDetails
+        );
+
+        // 3. Press Esc in Step 2 -> returns to Step 1 without losing modal
+        let esc_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        );
+        app.handle_creation_modal_key(esc_key);
+        assert!(app.creation_modal.is_some());
+        assert_eq!(
+            app.creation_modal.as_ref().unwrap().step,
+            crate::tui::CreationStep::SelectTemplate
+        );
+
+        // 4. Press Esc in Step 1 -> cancels and closes modal
+        app.handle_creation_modal_key(esc_key);
+        assert!(app.creation_modal.is_none());
+    }
+
+    #[test]
+    fn test_tui_app_creation_modal_submit_lifecycle() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
 
@@ -1394,30 +1372,40 @@ repos = []
             .with_config(config)
             .with_cwd(cwd.clone());
 
-        // 1. Open launcher
-        app.open_quick_launcher();
-        assert!(app.quick_launcher.is_some());
+        // 1. Open creation modal
+        app.open_creation_modal();
+        assert!(app.creation_modal.is_some());
+        assert_eq!(
+            app.creation_modal.as_ref().unwrap().step,
+            crate::tui::CreationStep::SelectTemplate
+        );
 
-        // 2. Type project name
-        let mut launcher = app.quick_launcher.take().unwrap();
-        launcher.focus = crate::tui::quick_launcher::LauncherFocus::ProjectName;
-        for c in "billing-service".chars() {
-            launcher.handle_key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(c),
-                crossterm::event::KeyModifiers::NONE,
-            ));
-        }
-        app.quick_launcher = Some(launcher);
-
-        // 3. Submit with Enter
+        // 2. Advance to Step 2 with Enter
         let enter_key = crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         );
-        app.handle_launcher_key(enter_key);
+        app.handle_creation_modal_key(enter_key);
+        assert_eq!(
+            app.creation_modal.as_ref().unwrap().step,
+            crate::tui::CreationStep::ConfigureDetails
+        );
 
-        // Quick launcher should close and setup_modal should open
-        assert!(app.quick_launcher.is_none());
+        // 3. Type project name
+        for c in "billing-service".chars() {
+            app.handle_creation_modal_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(c),
+                crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        assert_eq!(
+            app.creation_modal.as_ref().unwrap().project_name_input,
+            "billing-service"
+        );
+
+        // 4. Submit with Enter -> triggers start_project_creation and clears creation_modal
+        app.handle_creation_modal_key(enter_key);
+        assert!(app.creation_modal.is_none());
         assert!(app.setup_modal.is_some());
 
         // Wait for setup worker to finish
@@ -1438,116 +1426,130 @@ repos = []
             cwd.join("billing-service").canonicalize().unwrap()
         );
         assert!(cwd.join("billing-service").join("AGENTS.md").is_file());
-
-        // 4. Try creating another project with the same name -> Collision should open setup_modal with error
-        app.open_quick_launcher();
-        let mut launcher = app.quick_launcher.take().unwrap();
-        launcher.focus = crate::tui::quick_launcher::LauncherFocus::ProjectName;
-        for c in "billing-service".chars() {
-            launcher.handle_key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(c),
-                crossterm::event::KeyModifiers::NONE,
-            ));
-        }
-        app.quick_launcher = Some(launcher);
-
-        app.handle_launcher_key(enter_key);
-        assert!(app.quick_launcher.is_none());
-        assert!(
-            app.setup_modal.is_some(),
-            "Setup modal must be open on error"
-        );
-        assert!(
-            app.setup_modal.as_ref().unwrap().error.is_some(),
-            "Error message must be set in setup_modal on collision"
-        );
     }
 
     #[test]
-    fn test_tui_app_launcher_attach_and_switch_focus() {
+    fn test_tui_app_creation_modal_hardware_cursor_position() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
-
-        #[cfg(windows)]
-        let (cmd, args) = ("cmd.exe", r#"["/c", "exit 0"]"#);
-        #[cfg(not(windows))]
-        let (cmd, args) = ("sh", r#"["-c", "exit 0"]"#);
-
-        let config_toml = format!(
-            r#"
+        let config_toml = r#"
 default_agent = "mock"
 repos_dir = "/tmp/repos"
 
-[agents.mock]
-command = "{cmd}"
-args = {args}
-
-[templates.ws1]
+[templates.ecommerce]
 repos = []
-"#
-        );
-        let config = Config::load_from_str(&config_toml).unwrap();
-
-        // Create existing project directory with AGENTS.md
-        let proj_dir = cwd.join("existing-proj");
-        fs::create_dir(&proj_dir).unwrap();
-        fs::write(proj_dir.join("AGENTS.md"), "# Project").unwrap();
-
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
         let registry = SessionRegistry::new();
-        let mut app = TuiApp::new(registry)
-            .with_config(config)
-            .with_cwd(cwd.clone());
+        let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
 
-        // 1. Open launcher, switch to Attach tab and attach "existing-proj"
-        app.open_quick_launcher();
-        let mut launcher = app.quick_launcher.take().unwrap();
-        launcher.switch_tab(crate::tui::quick_launcher::LauncherTab::Attach);
-        app.quick_launcher = Some(launcher);
+        app.open_creation_modal();
+        assert!(app.creation_modal.is_some());
 
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        // Step 1: hardware cursor is positioned on search filter input
+        let area = Rect::new(0, 0, 80, 24);
+        let expected_pos = app.creation_modal.as_ref().unwrap().cursor_position(area);
+        assert!(expected_pos.is_some());
+
+        terminal
+            .draw(|f| {
+                if let Some(modal) = &app.creation_modal {
+                    let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                    modal.render_modal(f.area(), f.buffer_mut(), &theme);
+                    if let Some(pos) = modal.cursor_position(f.area()) {
+                        f.set_cursor_position(pos);
+                    }
+                }
+            })
+            .unwrap();
+
+        assert_eq!(terminal.get_cursor_position().ok(), expected_pos);
+
+        // Advance to Step 2: cursor is positioned on project name input
         let enter_key = crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         );
-        app.handle_launcher_key(enter_key);
+        app.handle_creation_modal_key(enter_key);
 
-        assert!(app.quick_launcher.is_none());
-        assert_eq!(app.registry.len(), 1);
-        let active = app.registry.active_session().unwrap();
-        assert_eq!(active.project_name(), "existing-proj");
-        assert!(active.pty().config().working_dir.is_absolute());
-        assert_eq!(
-            active.pty().config().working_dir,
-            cwd.join("existing-proj").canonicalize().unwrap()
-        );
+        let step2_pos = app.creation_modal.as_ref().unwrap().cursor_position(area);
+        assert!(step2_pos.is_some());
 
-        // 2. Open launcher again, attaching the already-running project should switch focus to it
-        app.open_quick_launcher();
-        let mut launcher = app.quick_launcher.take().unwrap();
-        launcher.switch_tab(crate::tui::quick_launcher::LauncherTab::Attach);
-        app.quick_launcher = Some(launcher);
+        terminal
+            .draw(|f| {
+                if let Some(modal) = &app.creation_modal {
+                    let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                    modal.render_modal(f.area(), f.buffer_mut(), &theme);
+                    if let Some(pos) = modal.cursor_position(f.area()) {
+                        f.set_cursor_position(pos);
+                    }
+                }
+            })
+            .unwrap();
 
-        app.handle_launcher_key(enter_key);
-        assert!(app.quick_launcher.is_none());
-        assert_eq!(app.registry.len(), 1);
-        assert_eq!(app.registry.active_index(), Some(0));
+        assert_eq!(terminal.get_cursor_position().ok(), step2_pos);
     }
 
     #[test]
-    fn test_tui_app_launcher_cancel_on_esc() {
-        let registry = SessionRegistry::new();
-        let mut app = TuiApp::new(registry);
-        app.quick_launcher = Some(QuickLauncherState::new(vec![], vec![], None));
+    fn test_tui_app_creation_modal_paste_and_mouse_routing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let config_toml = r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
 
-        let esc_key = crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Esc,
+[templates.alpha]
+repos = []
+
+[templates.beta]
+repos = []
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
+
+        app.open_creation_modal();
+        assert!(app.creation_modal.is_some());
+
+        // Initial selected template is index 0 ("alpha")
+        assert_eq!(
+            app.creation_modal.as_ref().unwrap().selected_template(),
+            Some("alpha")
+        );
+
+        // Route mouse scroll down event: cycles to next template ("beta")
+        let scroll_down = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        app.handle_creation_modal_mouse(scroll_down);
+        assert_eq!(
+            app.creation_modal.as_ref().unwrap().selected_template(),
+            Some("beta")
+        );
+
+        // Advance to Step 2
+        let enter_key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         );
-        app.handle_launcher_key(esc_key);
-        assert!(app.quick_launcher.is_none());
+        app.handle_creation_modal_key(enter_key);
+
+        // Route paste event: pastes text into project_name_input
+        app.handle_creation_modal_paste("my-pasted-app");
+        assert_eq!(
+            app.creation_modal.as_ref().unwrap().project_name_input,
+            "my-pasted-app"
+        );
     }
 
     #[test]
-    fn test_tui_app_open_quick_launcher_preserves_config() {
+    fn test_tui_app_open_creation_modal_preserves_config() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
 
@@ -1570,12 +1572,12 @@ repos = ["custom_repo"]
         let registry = SessionRegistry::new();
         let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
 
-        app.open_quick_launcher();
-        let launcher = app
-            .quick_launcher
+        app.open_creation_modal();
+        let modal = app
+            .creation_modal
             .as_ref()
-            .expect("launcher must be opened");
-        let modal_config = &launcher.creation_modal.config;
+            .expect("creation modal must be opened");
+        let modal_config = &modal.config;
 
         assert_eq!(modal_config.default_agent, "custom-agent");
         assert_eq!(modal_config.repos_dir, PathBuf::from("/custom/repos/path"));
@@ -2570,22 +2572,23 @@ repos = []
         app.handle_raw_bytes(b"echo 'pasted text'\n");
         assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
 
-        // 3. Quick launcher paste
-        let mut launcher = QuickLauncherState::new(vec!["tpl1".to_string()], vec![], None);
-        launcher.focus = crate::tui::quick_launcher::LauncherFocus::ProjectName;
-        app.quick_launcher = Some(launcher);
-        app.handle_launcher_paste("pasted-project-name");
+        // 3. Creation modal paste
+        let cfg = Config::load_from_str(
+            "default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n[templates.tpl1]\nrepos = []\n",
+        )
+        .unwrap();
+        let mut modal = ProjectCreationModal::new(&cfg, std::path::Path::new("."), None);
+        modal.step = crate::tui::CreationStep::ConfigureDetails;
+        modal.focus = crate::tui::CreationFocus::ProjectName;
+        app.creation_modal = Some(modal);
+        app.handle_creation_modal_paste("pasted-project-name");
         assert_eq!(
-            app.quick_launcher
-                .as_ref()
-                .unwrap()
-                .creation_modal
-                .project_name_input,
+            app.creation_modal.as_ref().unwrap().project_name_input,
             "pasted-project-name"
         );
 
         // 4. Dashboard paste
-        app.quick_launcher = None;
+        app.creation_modal = None;
         let mut dashboard = DashboardState::new(vec!["tpl1".to_string()], vec![]);
         dashboard.open_creation_modal();
         dashboard.creation_modal.as_mut().unwrap().step =
@@ -2709,7 +2712,7 @@ repos = []
         let registry = SessionRegistry::new();
         let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
 
-        assert!(app.quick_launcher.is_none());
+        assert!(app.creation_modal.is_none());
 
         // Send Kitty Ctrl+Space (\x1b[32;5u)
         app.handle_raw_bytes(b"\x1b[32;5u");
@@ -2718,7 +2721,7 @@ repos = []
         // Send 'c' to open launcher
         app.handle_raw_bytes(b"c");
         assert!(!app.leader_active);
-        assert!(app.quick_launcher.is_some());
+        assert!(app.creation_modal.is_some());
     }
 
     #[test]

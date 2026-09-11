@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
+use botai::config::Config;
 use botai::notify::{
     ActivityTracker, NotificationEvent, NotificationService, StreamControlEvent, StreamScanner,
 };
@@ -8,7 +9,7 @@ use botai::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
 };
 use botai::tui::app::TuiApp;
-use botai::tui::quick_launcher::QuickLauncherState;
+use botai::tui::ProjectCreationModal;
 
 fn create_mock_session(
     project_name: &str,
@@ -182,7 +183,7 @@ fn test_background_aware_notification_filtering_focused_vs_background() {
     };
 
     let is_focused_mode =
-        app.quick_launcher.is_none() && app.setup_modal.is_none() && !app.is_showing_dashboard();
+        app.creation_modal.is_none() && app.setup_modal.is_none() && !app.is_showing_dashboard();
     let active_id = app.registry.active_session().map(|s| s.id().to_string());
 
     for mut event in notifs1 {
@@ -240,8 +241,16 @@ fn test_background_aware_filtering_when_modal_or_launcher_active() {
     let mut app = TuiApp::new(registry);
     app.notifier = NotificationService::new(true, Duration::from_millis(0));
 
-    // Open Quick Launcher modal (so active session is obstructed / modal active)
-    app.quick_launcher = Some(QuickLauncherState::new(vec!["tpl".into()], vec![], None));
+    // Open Creation Modal (so active session is obstructed / modal active)
+    let cfg = Config::load_from_str(
+        "default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n[templates.tpl]\nrepos = []\n",
+    )
+    .unwrap();
+    app.creation_modal = Some(ProjectCreationModal::new(
+        &cfg,
+        std::path::Path::new("."),
+        None,
+    ));
 
     let (notifs, name, id) = {
         let session = app.registry.get_mut(&id1).unwrap();
@@ -255,7 +264,7 @@ fn test_background_aware_filtering_when_modal_or_launcher_active() {
     };
 
     let is_focused_mode =
-        app.quick_launcher.is_none() && app.setup_modal.is_none() && !app.is_showing_dashboard();
+        app.creation_modal.is_none() && app.setup_modal.is_none() && !app.is_showing_dashboard();
     let active_id = app.registry.active_session().map(|s| s.id().to_string());
 
     let mut notified = false;

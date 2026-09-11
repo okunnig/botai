@@ -1,8 +1,6 @@
-use std::fs;
-
 use botai::config::Config;
-use botai::session::SessionRegistry;
-use botai::tui::{render_quick_launcher, LauncherFocus, LauncherTab, TuiApp};
+use botai::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry};
+use botai::tui::{CreationFocus, CreationStep, TuiApp};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -13,7 +11,7 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 #[test]
-fn test_integration_in_session_quick_launcher_lifecycle() {
+fn test_integration_in_session_creation_modal_lifecycle() {
     let tmp = tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
 
@@ -42,53 +40,57 @@ repos = []
     );
     let config = Config::load_from_str(&config_toml).expect("load config");
 
-    // Setup an existing local project
-    let existing_proj = cwd.join("legacy-service");
-    fs::create_dir(&existing_proj).unwrap();
-    fs::write(
-        existing_proj.join("AGENTS.md"),
-        "# Legacy Service\nOrientation context.",
-    )
-    .unwrap();
+    // 1. Start an initial active session in the registry
+    #[cfg(windows)]
+    let (init_cmd, init_args) = ("cmd.exe", vec!["/c", "exit 0"]);
+    #[cfg(not(windows))]
+    let (init_cmd, init_args) = ("sh", vec!["-c", "true"]);
 
-    let registry = SessionRegistry::new();
+    let pty_config = PtyConfig::new(init_cmd, cwd.clone())
+        .with_args(init_args)
+        .with_dimensions(80, 24);
+    let pty = PtySession::spawn(pty_config).expect("spawn initial pty");
+    let vt = botai::session::VtScreen::new(80, 24);
+    let ps = ProjectSession::new("initial-service", "notifications", "mock_agent");
+
+    let mut registry = SessionRegistry::new();
+    registry.add(ps, pty, vt).expect("add session to registry");
+    registry.set_active_index(0).expect("set active session");
+
     let mut app = TuiApp::new(registry)
         .with_config(config)
         .with_cwd(cwd.clone());
 
-    // 1. Initially no active sessions and no launcher
-    assert!(app.registry.is_empty());
-    assert!(app.quick_launcher.is_none());
+    // Verify initial active session and that creation_modal is not open
+    assert_eq!(app.registry.len(), 1);
+    assert!(app.creation_modal.is_none());
 
-    // 2. Open quick launcher via Ctrl+Space then 'c'
+    // 2. Open creation modal via Ctrl+Space (0x00) then 'c'
     app.handle_raw_bytes(&[0x00]);
     assert!(app.leader_active);
     app.handle_raw_bytes(b"c");
     assert!(!app.leader_active);
-    assert!(app.quick_launcher.is_some());
+    assert!(app.creation_modal.is_some());
 
-    let launcher = app.quick_launcher.as_ref().unwrap();
+    let modal = app.creation_modal.as_ref().unwrap();
+    assert_eq!(modal.step, CreationStep::SelectTemplate);
     assert_eq!(
-        launcher.templates,
+        modal.templates,
         vec!["notifications".to_string(), "payments".to_string()]
     );
-    assert_eq!(launcher.local_projects, vec!["legacy-service".to_string()]);
-    assert_eq!(launcher.tab, LauncherTab::Create);
-    assert_eq!(launcher.focus, LauncherFocus::Template);
-    assert_eq!(launcher.selected_template(), Some("notifications"));
 
-    // 3. Test Ratatui TestBackend rendering of launcher modal
+    // 3. Renders creation_modal with render_modal -> verify it contains Step 1 template list/preview
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).expect("ratatui test terminal");
 
     terminal
         .draw(|f| {
-            if let Some(l) = &app.quick_launcher {
+            if let Some(m) = &app.creation_modal {
                 let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
-                render_quick_launcher(l, f.area(), f.buffer_mut(), &theme);
+                m.render_modal(f.area(), f.buffer_mut(), &theme);
             }
         })
-        .expect("draw launcher");
+        .expect("draw creation modal");
 
     let rendered = terminal
         .backend()
@@ -98,161 +100,108 @@ repos = []
         .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
 
-    assert!(rendered.contains("Quick Project Launcher (Ctrl+Space c)"));
-    assert!(rendered.contains("1. Create New Project"));
-    assert!(rendered.contains("2. Attach Existing Project"));
-    assert!(rendered.contains("Template:"));
+    assert!(rendered.contains("Create New Project"));
+    assert!(rendered.contains("Templates"));
     assert!(rendered.contains("notifications"));
+    assert!(rendered.contains("payments"));
 
-    // 4. Cycle template with Right arrow to "payments"
-    app.handle_launcher_key(key(KeyCode::Right));
+    // 4. Advances to Step 2 (Enter)
+    app.handle_creation_modal_key(key(KeyCode::Enter));
+    assert!(app.creation_modal.is_some());
     assert_eq!(
-        app.quick_launcher.as_ref().unwrap().selected_template(),
-        Some("payments")
+        app.creation_modal.as_ref().unwrap().step,
+        CreationStep::ConfigureDetails
     );
 
-    // 5. Navigate to Project Name input with Tab
-    app.handle_launcher_key(key(KeyCode::Tab));
-    assert_eq!(
-        app.quick_launcher.as_ref().unwrap().focus,
-        LauncherFocus::ProjectName
-    );
-
-    // 6. Type project name
+    // 5. Enters project name and prompt
     for c in "stripe-webhooks".chars() {
-        app.handle_launcher_key(key(KeyCode::Char(c)));
+        app.handle_creation_modal_key(key(KeyCode::Char(c)));
     }
     assert_eq!(
-        app.quick_launcher
-            .as_ref()
-            .unwrap()
-            .creation_modal
-            .project_name_input,
+        app.creation_modal.as_ref().unwrap().project_name_input,
         "stripe-webhooks"
     );
 
-    // 7. Navigate to Prompt input with Tab
-    app.handle_launcher_key(key(KeyCode::Tab));
+    // Tab to Agent
+    app.handle_creation_modal_key(key(KeyCode::Tab));
     assert_eq!(
-        app.quick_launcher.as_ref().unwrap().focus,
-        LauncherFocus::Prompt
+        app.creation_modal.as_ref().unwrap().focus,
+        CreationFocus::Agent
     );
 
-    // 8. Type prompt
+    // Tab to Prompt
+    app.handle_creation_modal_key(key(KeyCode::Tab));
+    assert_eq!(
+        app.creation_modal.as_ref().unwrap().focus,
+        CreationFocus::Prompt
+    );
+
     for c in "Implement idempotency keys".chars() {
-        app.handle_launcher_key(key(KeyCode::Char(c)));
+        app.handle_creation_modal_key(key(KeyCode::Char(c)));
     }
     assert_eq!(
-        app.quick_launcher
-            .as_ref()
-            .unwrap()
-            .creation_modal
-            .prompt_input,
+        app.creation_modal.as_ref().unwrap().prompt_input,
         "Implement idempotency keys"
     );
 
-    // 9. Submit creation with Enter
-    app.handle_launcher_key(key(KeyCode::Enter));
-
-    // Quick launcher closes and setup modal opens
-    assert!(app.quick_launcher.is_none());
+    // 6. Submits (Enter) -> app.setup_modal.is_some()
+    app.handle_creation_modal_key(key(KeyCode::Enter));
+    assert!(app.creation_modal.is_none());
     assert!(app.setup_modal.is_some());
 
+    // 7. Polls setup progress until complete
     let start = std::time::Instant::now();
     while app.setup_modal.is_some() && start.elapsed() < std::time::Duration::from_secs(5) {
         app.poll_setup_progress();
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 
-    // Modal closes and session is active
+    // 8. Session is created and active!
     assert!(app.setup_modal.is_none());
-    assert_eq!(app.registry.len(), 1);
-    assert_eq!(
-        app.registry.active_session().unwrap().project_name(),
-        "stripe-webhooks"
-    );
-    assert_eq!(
-        app.registry.active_session().unwrap().template_name(),
-        "payments"
-    );
+    assert_eq!(app.registry.len(), 2);
+    let active = app.registry.active_session().unwrap();
+    assert_eq!(active.project_name(), "stripe-webhooks");
+    assert_eq!(active.template_name(), "notifications");
     assert!(cwd.join("stripe-webhooks").join("AGENTS.md").is_file());
 
-    // 10. Open launcher again via Ctrl+Space then 'C' from inside the active session
+    // 9. Tests dismiss via Esc:
+    // From active session, open creation modal
     app.handle_raw_bytes(&[0x00]);
     assert!(app.leader_active);
-    app.handle_raw_bytes(b"C");
+    app.handle_raw_bytes(b"c");
     assert!(!app.leader_active);
-    assert!(app.quick_launcher.is_some());
-    // Active template should default to "payments" (the active session's template)
+    assert!(app.creation_modal.is_some());
     assert_eq!(
-        app.quick_launcher.as_ref().unwrap().selected_template(),
-        Some("payments")
+        app.creation_modal.as_ref().unwrap().step,
+        CreationStep::SelectTemplate
     );
 
-    // 11. Switch to TabBar and switch to Attach tab
-    app.handle_launcher_key(make_key(KeyCode::BackTab, KeyModifiers::SHIFT)); // from Template -> TabBar
-    assert_eq!(
-        app.quick_launcher.as_ref().unwrap().focus,
-        LauncherFocus::TabBar
-    );
+    // In Step 1, Esc dismisses the modal
+    app.handle_creation_modal_key(key(KeyCode::Esc));
+    assert!(app.creation_modal.is_none());
 
-    app.handle_launcher_key(key(KeyCode::Right));
-    assert_eq!(
-        app.quick_launcher.as_ref().unwrap().tab,
-        LauncherTab::Attach
-    );
-
-    // 12. Move down into project list and attach "legacy-service"
-    app.handle_launcher_key(key(KeyCode::Down));
-    assert_eq!(
-        app.quick_launcher.as_ref().unwrap().focus,
-        LauncherFocus::ProjectList
-    );
-
-    app.handle_launcher_key(key(KeyCode::Enter));
-
-    // Modal closes, legacy-service is attached as session 2 and focused
-    assert!(app.quick_launcher.is_none());
-    assert_eq!(app.registry.len(), 2);
-    assert_eq!(
-        app.registry.active_session().unwrap().project_name(),
-        "legacy-service"
-    );
-    assert_eq!(app.registry.active_index(), Some(1));
-
-    // 13. Open launcher and attach "stripe-webhooks" (which is already active as session 0)
+    // Open again, advance to Step 2, Esc returns to Step 1, then Esc dismisses
     app.handle_raw_bytes(&[0x00]);
     app.handle_raw_bytes(b"c");
-    let mut launcher = app.quick_launcher.take().unwrap();
-    launcher.switch_tab(LauncherTab::Attach);
-    // Find index of stripe-webhooks in local_projects
-    if let Some(pos) = launcher
-        .local_projects
-        .iter()
-        .position(|p| p == "stripe-webhooks")
-    {
-        launcher.selected_project_idx = pos;
-    }
-    app.quick_launcher = Some(launcher);
-
-    app.handle_launcher_key(key(KeyCode::Enter));
-
-    // Modal closes and active session switches back to session 0 ("stripe-webhooks")
-    assert!(app.quick_launcher.is_none());
-    assert_eq!(app.registry.active_index(), Some(0));
+    assert!(app.creation_modal.is_some());
     assert_eq!(
-        app.registry.active_session().unwrap().project_name(),
-        "stripe-webhooks"
+        app.creation_modal.as_ref().unwrap().step,
+        CreationStep::SelectTemplate
     );
 
-    // 14. Open launcher and test Dismiss / Cancel via Esc
-    app.handle_raw_bytes(&[0x00]);
-    app.handle_raw_bytes(b"c");
-    assert!(app.quick_launcher.is_some());
-    app.handle_launcher_key(key(KeyCode::Esc));
-    assert!(app.quick_launcher.is_none());
-}
+    app.handle_creation_modal_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.creation_modal.as_ref().unwrap().step,
+        CreationStep::ConfigureDetails
+    );
 
-fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
-    KeyEvent::new(code, modifiers)
+    app.handle_creation_modal_key(key(KeyCode::Esc));
+    assert!(app.creation_modal.is_some());
+    assert_eq!(
+        app.creation_modal.as_ref().unwrap().step,
+        CreationStep::SelectTemplate
+    );
+
+    app.handle_creation_modal_key(key(KeyCode::Esc));
+    assert!(app.creation_modal.is_none());
 }
