@@ -66,7 +66,10 @@ struct TerminalCleanupGuard {
 }
 
 impl TerminalCleanupGuard {
-    pub fn emit_tmux_modify_other_keys<W: std::io::Write>(writer: &mut W, enable: bool) -> std::io::Result<()> {
+    pub fn emit_tmux_modify_other_keys<W: std::io::Write>(
+        writer: &mut W,
+        enable: bool,
+    ) -> std::io::Result<()> {
         if enable {
             writer.write_all(b"\x1b[>4;2m")?;
         } else {
@@ -246,7 +249,8 @@ impl TuiApp {
         let res = self.run_loop(&mut terminal);
 
         if in_tmux {
-            let _ = TerminalCleanupGuard::emit_tmux_modify_other_keys(terminal.backend_mut(), false);
+            let _ =
+                TerminalCleanupGuard::emit_tmux_modify_other_keys(terminal.backend_mut(), false);
         }
         disable_raw_mode()?;
         execute!(
@@ -1564,12 +1568,13 @@ repos = ["custom_repo"]
 "#;
         let config = Config::load_from_str(config_toml).unwrap();
         let registry = SessionRegistry::new();
-        let mut app = TuiApp::new(registry)
-            .with_config(config)
-            .with_cwd(cwd);
+        let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
 
         app.open_quick_launcher();
-        let launcher = app.quick_launcher.as_ref().expect("launcher must be opened");
+        let launcher = app
+            .quick_launcher
+            .as_ref()
+            .expect("launcher must be opened");
         let modal_config = &launcher.creation_modal.config;
 
         assert_eq!(modal_config.default_agent, "custom-agent");

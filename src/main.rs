@@ -301,7 +301,10 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
     for (k, v) in &agent.env {
         pty_config = pty_config.with_env(k, v);
     }
-    if let Some(tpl) = template_name.as_deref().and_then(|t| config.get_template(t)) {
+    if let Some(tpl) = template_name
+        .as_deref()
+        .and_then(|t| config.get_template(t))
+    {
         for (k, v) in &tpl.env {
             pty_config = pty_config.with_env(k, v);
         }

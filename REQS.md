@@ -152,6 +152,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Performs a best-effort `git fetch origin` for cached repositories to discover upstream default branch changes.
   - Branches worktrees off `origin/<default_branch>` when available, or falls back to local default branch if offline.
 - **Worktrees & Metadata Lifecycle**: For every repository defined in the template:
+  - Executes `git worktree prune` prior to creating new worktrees to automatically clear stale worktree metadata from manually deleted directories.
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
   - Checks out a new branch named `<project_name>`.
 - **Lifecycle Command Hooks Execution Model**:

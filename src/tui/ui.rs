@@ -230,4 +230,3 @@ mod tests {
         assert_eq!(out_of_bounds_cell.modifier, Modifier::empty());
     }
 }
-

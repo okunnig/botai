@@ -1003,7 +1003,12 @@ command = "claude"
 
         // Cycle agent
         state.handle_key(key(KeyCode::Right));
-        let selected_agent = state.creation_modal.as_ref().unwrap().selected_agent().to_string();
+        let selected_agent = state
+            .creation_modal
+            .as_ref()
+            .unwrap()
+            .selected_agent()
+            .to_string();
 
         let action = state.handle_key(key(KeyCode::Enter));
         assert_eq!(

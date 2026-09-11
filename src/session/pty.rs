@@ -718,7 +718,9 @@ mod tests {
 
         let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
         let session = PtySession::spawn(config).expect("Failed to spawn PTY session");
-        let pid = session.process_id().expect("Failed to get child process ID");
+        let pid = session
+            .process_id()
+            .expect("Failed to get child process ID");
         assert!(pid > 0);
 
         // Verify the process is initially running
@@ -790,7 +792,9 @@ mod tests {
 
         let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
         let mut session = PtySession::spawn(config).expect("Failed to spawn PTY session");
-        let pid = session.process_id().expect("Failed to get child process ID");
+        let pid = session
+            .process_id()
+            .expect("Failed to get child process ID");
         assert!(pid > 0);
 
         // Terminate and reap explicitly via kill()
@@ -816,7 +820,10 @@ mod tests {
                 }
                 thread::sleep(Duration::from_millis(20));
             }
-            assert!(!alive, "Process should be terminated and reaped after kill()");
+            assert!(
+                !alive,
+                "Process should be terminated and reaped after kill()"
+            );
         }
     }
 }

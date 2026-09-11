@@ -1406,7 +1406,8 @@ repos = []
 "#;
         let config = Config::load_from_str(config_toml).unwrap();
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let mut launcher = QuickLauncherState::from_config(&config, &cwd, vec![], Some("agy_template"));
+        let mut launcher =
+            QuickLauncherState::from_config(&config, &cwd, vec![], Some("agy_template"));
         launcher.focus = LauncherFocus::ProjectName;
         for c in "new-agy-proj".chars() {
             launcher.handle_key(key(KeyCode::Char(c)));

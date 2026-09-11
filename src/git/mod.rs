@@ -172,6 +172,12 @@ impl GitWorktreeManager {
     ) -> Result<(), GitError> {
         ensure_git_repo(repo_path)?;
 
+        // Prune stale worktree metadata in case directories were manually deleted
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(repo_path)
+            .output();
+
         if branch_name.trim().is_empty() {
             return Err(GitError::InvalidBranchName(branch_name.to_string()));
         }
@@ -1169,5 +1175,35 @@ mod tests {
 
         remove_worktree_auto(&worktree_path, false).expect("remove worktree again");
         assert!(!worktree_path.exists());
+    }
+
+    #[test]
+    fn test_create_worktree_prunes_stale_worktree_metadata() {
+        let (_dir, repo_path) = init_mock_repo("main");
+        let worktree_dir = TempDir::new().expect("Failed to create worktree tempdir");
+        let wt_path = worktree_dir.path().join("worktree_stale");
+
+        // Create initial worktree with branch1
+        create_worktree(&repo_path, &wt_path, "branch1")
+            .expect("initial create_worktree should succeed");
+        assert!(wt_path.exists());
+        assert_eq!(
+            get_current_branch(&wt_path).expect("current branch"),
+            "branch1"
+        );
+
+        // Manually delete the worktree directory without git worktree remove
+        fs::remove_dir_all(&wt_path).expect("Failed to remove worktree directory");
+        assert!(!wt_path.exists());
+
+        // Calling create_worktree at the same path with branch2 should succeed because
+        // it runs git worktree prune prior to creating the worktree
+        create_worktree(&repo_path, &wt_path, "branch2")
+            .expect("create_worktree should succeed after pruning stale metadata");
+        assert!(wt_path.exists());
+        assert_eq!(
+            get_current_branch(&wt_path).expect("current branch"),
+            "branch2"
+        );
     }
 }

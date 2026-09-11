@@ -2118,8 +2118,11 @@ mod tests {
 
         // Test with extension without leading dot
         let pathexts_no_dot = ["COM", "EXE", "BAT", "CMD"];
-        let resolved_npm_no_dot =
-            resolve_executable_in_paths("npm", vec![path1.clone(), path2.clone()], &pathexts_no_dot);
+        let resolved_npm_no_dot = resolve_executable_in_paths(
+            "npm",
+            vec![path1.clone(), path2.clone()],
+            &pathexts_no_dot,
+        );
         assert_eq!(resolved_npm_no_dot, path2.join("npm.cmd"));
 
         // Test PATH directory precedence: path1 comes before path2
@@ -2148,12 +2151,10 @@ mod tests {
 
         let pathexts = [".COM", ".EXE", ".BAT", ".CMD"];
 
-        let resolved_mvn =
-            resolve_executable_in_paths("mvn.cmd", vec![path1.clone()], &pathexts);
+        let resolved_mvn = resolve_executable_in_paths("mvn.cmd", vec![path1.clone()], &pathexts);
         assert_eq!(resolved_mvn, path1.join("mvn.cmd"));
 
-        let resolved_git =
-            resolve_executable_in_paths("git.exe", vec![path1.clone()], &pathexts);
+        let resolved_git = resolve_executable_in_paths("git.exe", vec![path1.clone()], &pathexts);
         assert_eq!(resolved_git, path1.join("git.exe"));
     }
 
@@ -2173,11 +2174,13 @@ mod tests {
         // Command with extension not in PATH falls back to original PathBuf
         let resolved_missing_ext =
             resolve_executable_in_paths("missing.exe", vec![path1.clone()], &pathexts);
-        assert_eq!(resolved_missing_ext, std::path::PathBuf::from("missing.exe"));
+        assert_eq!(
+            resolved_missing_ext,
+            std::path::PathBuf::from("missing.exe")
+        );
 
         // Empty paths list falls back immediately
-        let resolved_empty_paths =
-            resolve_executable_in_paths("echo", Vec::new(), &pathexts);
+        let resolved_empty_paths = resolve_executable_in_paths("echo", Vec::new(), &pathexts);
         assert_eq!(resolved_empty_paths, std::path::PathBuf::from("echo"));
     }
 
@@ -2188,31 +2191,22 @@ mod tests {
         // 1. Absolute path with existing file
         let abs_file = temp_dir.path().join("script.bat");
         fs::write(&abs_file, "@echo off").unwrap();
-        let resolved_abs = resolve_executable_in_paths(
-            abs_file.to_str().unwrap(),
-            vec![],
-            &[".BAT", ".CMD"],
-        );
+        let resolved_abs =
+            resolve_executable_in_paths(abs_file.to_str().unwrap(), vec![], &[".BAT", ".CMD"]);
         assert_eq!(resolved_abs, abs_file);
 
         // 2. Absolute path without extension resolving to .cmd
         let abs_tool = temp_dir.path().join("my_tool");
         let abs_tool_cmd = temp_dir.path().join("my_tool.cmd");
         fs::write(&abs_tool_cmd, "@echo off").unwrap();
-        let resolved_abs_tool = resolve_executable_in_paths(
-            abs_tool.to_str().unwrap(),
-            vec![],
-            &[".BAT", ".CMD"],
-        );
+        let resolved_abs_tool =
+            resolve_executable_in_paths(abs_tool.to_str().unwrap(), vec![], &[".BAT", ".CMD"]);
         assert_eq!(resolved_abs_tool, abs_tool_cmd);
 
         // 3. Absolute path nonexistent fallback
         let abs_missing = temp_dir.path().join("nonexistent_script");
-        let resolved_abs_missing = resolve_executable_in_paths(
-            abs_missing.to_str().unwrap(),
-            vec![],
-            &[".BAT", ".CMD"],
-        );
+        let resolved_abs_missing =
+            resolve_executable_in_paths(abs_missing.to_str().unwrap(), vec![], &[".BAT", ".CMD"]);
         assert_eq!(resolved_abs_missing, abs_missing);
 
         // 4. Relative path with '/' resolving extension
