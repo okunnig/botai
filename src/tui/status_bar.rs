@@ -210,9 +210,9 @@ impl<'a> StatusBar<'a> {
         let tpl = session.template_name().trim();
 
         if tpl.is_empty() {
-            format!("  ● {hotkey}: {proj}  ")
+            format!("  ● {hotkey} {proj}  ")
         } else {
-            format!("  ● {hotkey}: [{tpl}] {proj}  ")
+            format!("  ● {hotkey} [{tpl}] {proj}  ")
         }
     }
 
@@ -233,9 +233,9 @@ impl<'a> StatusBar<'a> {
         let dot_color = session.status().status_color(theme);
         let tpl = session.template_name().trim();
         let label = if tpl.is_empty() {
-            format!(" {hotkey}: {proj}  ")
+            format!(" {hotkey} {proj}  ")
         } else {
-            format!(" {hotkey}: [{tpl}] {proj}  ")
+            format!(" {hotkey} [{tpl}] {proj}  ")
         };
 
         if is_active {
@@ -471,16 +471,16 @@ mod tests {
         let entry = SessionEntry::new(ps, pty, vt);
 
         let active_tab = StatusBar::format_tab(0, &entry, true);
-        assert_eq!(active_tab, "  ● 1: [ws] my-feature  ");
+        assert_eq!(active_tab, "  ● 1 [ws] my-feature  ");
 
         let inactive_tab = StatusBar::format_tab(1, &entry, false);
-        assert_eq!(inactive_tab, "  ● 2: [ws] my-feature  ");
+        assert_eq!(inactive_tab, "  ● 2 [ws] my-feature  ");
 
         let overflow_active = StatusBar::format_tab(9, &entry, true);
-        assert_eq!(overflow_active, "  ● -: [ws] my-feature  ");
+        assert_eq!(overflow_active, "  ● - [ws] my-feature  ");
 
         let overflow_inactive = StatusBar::format_tab(9, &entry, false);
-        assert_eq!(overflow_inactive, "  ● -: [ws] my-feature  ");
+        assert_eq!(overflow_inactive, "  ● - [ws] my-feature  ");
     }
 
     #[test]
@@ -491,13 +491,13 @@ mod tests {
         let theme = Theme::tokyo_night();
 
         let active_tab = StatusBar::format_tab(0, &entry, true);
-        assert_eq!(active_tab, "  ● 1: my-feature  ");
+        assert_eq!(active_tab, "  ● 1 my-feature  ");
 
         let inactive_tab = StatusBar::format_tab(1, &entry, false);
-        assert_eq!(inactive_tab, "  ● 2: my-feature  ");
+        assert_eq!(inactive_tab, "  ● 2 my-feature  ");
 
         let spans = StatusBar::format_tab_spans(0, &entry, true, &theme);
-        assert_eq!(spans[2].content, " 1: my-feature  ");
+        assert_eq!(spans[2].content, " 1 my-feature  ");
 
         // Also test whitespace-only template fallback
         let (ps_blank, pty_blank, vt_blank) =
@@ -505,10 +505,10 @@ mod tests {
         let entry_blank = SessionEntry::new(ps_blank, pty_blank, vt_blank);
         assert_eq!(
             StatusBar::format_tab(0, &entry_blank, true),
-            "  ● 1: my-feature  "
+            "  ● 1 my-feature  "
         );
         let spans_blank = StatusBar::format_tab_spans(0, &entry_blank, true, &theme);
-        assert_eq!(spans_blank[2].content, " 1: my-feature  ");
+        assert_eq!(spans_blank[2].content, " 1 my-feature  ");
     }
 
     #[test]
@@ -539,7 +539,7 @@ mod tests {
             assert_eq!(active_spans[1].style.fg, Some(expected_color));
             assert_eq!(active_spans[1].style.bg, Some(theme.tab_active_bg));
 
-            assert_eq!(active_spans[2].content, " 1: [ws] test-proj  ");
+            assert_eq!(active_spans[2].content, " 1 [ws] test-proj  ");
             assert_eq!(active_spans[2].style.fg, Some(theme.tab_active_fg));
             assert_eq!(active_spans[2].style.bg, Some(theme.tab_active_bg));
 
@@ -554,7 +554,7 @@ mod tests {
             assert_eq!(inactive_spans[1].style.fg, Some(expected_color));
             assert_eq!(inactive_spans[1].style.bg, Some(theme.tab_inactive_bg));
 
-            assert_eq!(inactive_spans[2].content, " 2: [ws] test-proj  ");
+            assert_eq!(inactive_spans[2].content, " 2 [ws] test-proj  ");
             assert_eq!(inactive_spans[2].style.fg, Some(theme.tab_inactive_fg));
             assert_eq!(inactive_spans[2].style.bg, Some(theme.tab_inactive_bg));
         }
@@ -619,8 +619,8 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        assert!(rendered.contains("● 1: [ws] proj-backend"));
-        assert!(rendered.contains("● 2: [ws] proj-frontend"));
+        assert!(rendered.contains("● 1 [ws] proj-backend"));
+        assert!(rendered.contains("● 2 [ws] proj-frontend"));
         assert!(rendered.contains("Ctrl+Space: Actions"));
 
         // Verify status dot colors in buffer cells
@@ -631,9 +631,9 @@ mod tests {
         assert_eq!(dot_cell_1.bg, theme.tab_active_bg);
 
         // Session 2 (inactive, WaitingForInput):
-        // Tab 1 length: "  ● 1: [ws] proj-backend  ".chars().count() = 26, + 1 separator space = 27
-        // Tab 2 starts at x = 27: "  " (2 chars) -> dot at x = 29
-        let dot_cell_2 = buffer.cell((29, 0)).unwrap();
+        // Tab 1 length: "  ● 1 [ws] proj-backend  ".chars().count() = 25, + 1 separator space = 26
+        // Tab 2 starts at x = 26: "  " (2 chars) -> dot at x = 28
+        let dot_cell_2 = buffer.cell((28, 0)).unwrap();
         assert_eq!(dot_cell_2.symbol(), "●");
         assert_eq!(dot_cell_2.fg, theme.status_waiting);
         assert_eq!(dot_cell_2.bg, theme.tab_inactive_bg);
@@ -655,7 +655,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        assert!(rendered.contains("● 1: [ws] proj-backend"));
+        assert!(rendered.contains("● 1 [ws] proj-backend"));
         assert!(rendered.contains("[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]"));
     }
 
@@ -678,8 +678,8 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered_wide.contains("● 1: [ws] p1"));
-        assert!(rendered_wide.contains("● 2: [ws] p2"));
+        assert!(rendered_wide.contains("● 1 [ws] p1"));
+        assert!(rendered_wide.contains("● 2 [ws] p2"));
         assert!(rendered_wide.contains("Ctrl+Space: Actions"));
 
         // 2. Tight buffer (35 cols) -> Tabs visible, hint cleanly omitted
@@ -690,7 +690,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered_tight.contains("● 1: [ws] p1"));
+        assert!(rendered_tight.contains("● 1 [ws] p1"));
         assert!(!rendered_tight.contains("Ctrl+Space: Actions"));
     }
 
@@ -718,7 +718,7 @@ mod tests {
 
         // Active tab 8 MUST be rendered
         assert!(
-            rendered60.contains("● 8: [ws] service-long-name-8"),
+            rendered60.contains("● 8 [ws] service-long-name-8"),
             "Rendered output must contain active tab 8, got: {rendered60}"
         );
     }
@@ -746,7 +746,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered.contains("● 1: [ws] themed-proj"));
+        assert!(rendered.contains("● 1 [ws] themed-proj"));
 
         // Tab leading space cell at (1, 0) matches tab_active_fg and tab_active_bg
         let space_cell = buffer.cell((1, 0)).unwrap();
