@@ -480,7 +480,12 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     }
 }
 
-fn render_destroy_modal(modal: &DestroyModalState, area: Rect, buf: &mut Buffer, theme: &Theme) {
+pub fn render_destroy_modal(
+    modal: &DestroyModalState,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+) {
     let width = 76.min(area.width.saturating_sub(4));
     let height = 8.min(area.height.saturating_sub(2));
 

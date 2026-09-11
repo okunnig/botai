@@ -28,7 +28,9 @@ use crate::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
 };
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
-use crate::tui::dashboard::{render_dashboard, DashboardAction, DashboardState};
+use crate::tui::dashboard::{
+    render_dashboard, render_destroy_modal, DashboardAction, DashboardState, DestroyModalState,
+};
 use crate::tui::destroy_progress_modal::{
     render_destroy_progress_modal, DestroyProgressModalState,
 };
@@ -50,6 +52,7 @@ pub struct TuiApp {
     pub dashboard: Option<DashboardState>,
     pub creation_modal: Option<ProjectCreationModal>,
     pub setup_modal: Option<SetupModalState>,
+    pub destroy_modal: Option<DestroyModalState>,
     pub destroy_progress_modal: Option<DestroyProgressModalState>,
     pub config: Option<Config>,
     pub cwd: Option<PathBuf>,
@@ -155,6 +158,7 @@ impl TuiApp {
             dashboard: None,
             creation_modal: None,
             setup_modal: None,
+            destroy_modal: None,
             destroy_progress_modal: None,
             config: None,
             cwd: None,
@@ -188,6 +192,22 @@ impl TuiApp {
     pub fn with_setup_modal(mut self, setup_modal: SetupModalState) -> Self {
         self.setup_modal = Some(setup_modal);
         self
+    }
+
+    /// Sets the destroy modal state on `TuiApp`.
+    pub fn with_destroy_modal(mut self, modal: DestroyModalState) -> Self {
+        self.destroy_modal = Some(modal);
+        self
+    }
+
+    /// Opens the in-session destroy project confirmation modal.
+    pub fn open_destroy_modal(&mut self, project_name: impl Into<String>) {
+        self.destroy_modal = Some(DestroyModalState::new(project_name));
+    }
+
+    /// Alias for `handle_input_bytes`.
+    pub fn process_raw_input(&mut self, bytes: &[u8]) {
+        self.handle_input_bytes(bytes);
     }
 
     /// Sets the destroy progress modal state on `TuiApp`.
@@ -414,6 +434,10 @@ impl TuiApp {
                         render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
                     }
 
+                    if let Some(destroy_modal) = &self.destroy_modal {
+                        render_destroy_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
+                    }
+
                     if let Some(destroy_modal) = &self.destroy_progress_modal {
                         render_destroy_progress_modal(
                             destroy_modal,
@@ -460,6 +484,13 @@ impl TuiApp {
                     _ => {}
                 }
             }
+        } else if self.destroy_modal.is_some() {
+            let events = parse_raw_events(bytes);
+            for event in events {
+                if let Event::Key(key) = event {
+                    self.handle_destroy_modal_key(key);
+                }
+            }
         } else if self.setup_modal.is_some() {
             let events = parse_raw_events(bytes);
             for event in events {
@@ -504,6 +535,7 @@ impl TuiApp {
         let is_focused_mode = self.creation_modal.is_none()
             && self.setup_modal.is_none()
             && self.destroy_progress_modal.is_none()
+            && self.destroy_modal.is_none()
             && !self.is_showing_dashboard();
 
         for session in self.registry.list_mut() {
@@ -727,6 +759,24 @@ impl TuiApp {
         }
     }
 
+    /// Handles keyboard events when the in-session destroy confirmation modal is active.
+    pub fn handle_destroy_modal_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(mut modal) = self.destroy_modal.take() {
+            match modal.handle_key(key) {
+                Some(DashboardAction::Destroy(project_name)) => {
+                    self.destroy_modal = None;
+                    self.start_project_destruction(&project_name);
+                }
+                Some(DashboardAction::None) => {
+                    self.destroy_modal = None;
+                }
+                _ => {
+                    self.destroy_modal = Some(modal);
+                }
+            }
+        }
+    }
+
     /// Handles keyboard events when the destruction progress modal is active.
     /// Dismisses the modal and refreshes dashboard on completion/error.
     pub fn handle_destroy_progress_modal_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -734,6 +784,9 @@ impl TuiApp {
             if modal.handle_key(key) {
                 self.destroy_progress_modal = None;
                 self.refresh_dashboard();
+                if self.registry.is_empty() {
+                    self.showing_dashboard = true;
+                }
             }
         }
     }
@@ -940,31 +993,28 @@ impl TuiApp {
 
     /// Refreshes the local projects and templates list within the dashboard.
     pub fn refresh_dashboard(&mut self) {
-        if self.dashboard.is_some() {
-            let cwd = self
-                .cwd
-                .clone()
-                .or_else(|| env::current_dir().ok())
-                .unwrap_or_else(|| PathBuf::from("."));
-            let running = self.running_sessions_map();
-            let new_dashboard = if let Some(cfg) = &self.config {
-                DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
-            } else {
-                let default_cfg = Config::load_from_str(
-                    "default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n",
-                )
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    repos: HashMap::new(),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                });
-                DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
-            };
-            self.dashboard = Some(new_dashboard);
-        }
+        let cwd = self
+            .cwd
+            .clone()
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let running = self.running_sessions_map();
+        let new_dashboard = if let Some(cfg) = &self.config {
+            DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
+        } else {
+            let default_cfg =
+                Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                    .unwrap_or_else(|_| Config {
+                        default_agent: "claude".to_string(),
+                        theme: "tokyo-night".to_string(),
+                        repos_dir: PathBuf::from(".botai_repos"),
+                        repos: HashMap::new(),
+                        agents: HashMap::new(),
+                        templates: HashMap::new(),
+                    });
+            DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
+        };
+        self.dashboard = Some(new_dashboard);
     }
 
     /// Dispatches a decoded `RawAction` to the multiplexer or active PTY session.
@@ -1020,6 +1070,14 @@ impl TuiApp {
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
                     self.close_session(&id);
+                }
+            }
+            RawAction::DestroyProject => {
+                self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
+                if let Some(active) = self.registry.active_session() {
+                    let project_name = active.project_name().to_string();
+                    self.open_destroy_modal(project_name);
                 }
             }
             RawAction::Passthrough(bytes) => {
@@ -1940,8 +1998,8 @@ repos = []
         app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
 
-        // Detach key 'd'
-        app.handle_raw_bytes(b"d");
+        // Detach key 'x'
+        app.handle_raw_bytes(b"x");
 
         assert!(!app.leader_active);
         assert!(!app.should_quit);
@@ -2021,8 +2079,8 @@ repos = []
         app.handle_raw_bytes(&[0x00]);
         assert!(app.leader_active);
 
-        // Detach key 'd'
-        app.handle_raw_bytes(b"d");
+        // Detach key 'x'
+        app.handle_raw_bytes(b"x");
 
         assert!(!app.leader_active);
         assert!(app.should_quit);
@@ -2083,6 +2141,361 @@ repos = []
         assert!(app.destroy_progress_modal.is_none());
 
         // Directory must be removed
+        assert!(!proj_dir.exists());
+    }
+
+    #[test]
+    fn test_tui_app_in_session_destroy_opens_modal_and_renders() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let proj_dir = cwd.join("active-proj");
+        fs::create_dir(&proj_dir).unwrap();
+        fs::write(proj_dir.join("AGENTS.md"), "# Project").unwrap();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, &proj_dir).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("active-proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry).with_cwd(cwd);
+        assert!(app.destroy_modal.is_none());
+
+        // Press Ctrl+Space (leader) then 'd'
+        app.handle_raw_bytes(&[0x00]);
+        assert!(app.leader_active);
+
+        app.handle_raw_bytes(b"d");
+        assert!(!app.leader_active);
+        assert!(app.destroy_modal.is_some());
+        assert_eq!(
+            app.destroy_modal.as_ref().unwrap().project_name,
+            "active-proj"
+        );
+
+        // Render with TestBackend and verify confirmation dialog is drawn
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let theme = Theme::tokyo_night();
+                if let Some(modal) = &app.destroy_modal {
+                    render_destroy_modal(modal, f.area(), f.buffer_mut(), &theme);
+                }
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("Confirm Destroy Project"));
+        assert!(rendered.contains("active-proj"));
+    }
+
+    #[test]
+    fn test_tui_app_in_session_destroy_modal_cancel_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let proj_dir = cwd.join("active-proj");
+        fs::create_dir(&proj_dir).unwrap();
+        fs::write(proj_dir.join("AGENTS.md"), "# Project").unwrap();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, &proj_dir).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("active-proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry).with_cwd(cwd);
+
+        // 1. Cancel with 'n'
+        app.handle_raw_bytes(&[0x00]);
+        app.handle_raw_bytes(b"d");
+        assert!(app.destroy_modal.is_some());
+
+        app.handle_input_bytes(b"n");
+        assert!(app.destroy_modal.is_none());
+        assert!(app.destroy_progress_modal.is_none());
+        assert_eq!(app.registry.len(), 1);
+        assert!(proj_dir.exists());
+
+        // 2. Cancel with Esc (\x1b) after uppercase 'D'
+        app.handle_raw_bytes(&[0x00]);
+        app.handle_raw_bytes(b"D");
+        assert!(app.destroy_modal.is_some());
+
+        app.handle_input_bytes(b"\x1b");
+        assert!(app.destroy_modal.is_none());
+        assert!(app.destroy_progress_modal.is_none());
+        assert_eq!(app.registry.len(), 1);
+        assert!(proj_dir.exists());
+    }
+
+    #[test]
+    fn test_tui_app_in_session_destroy_modal_confirm_triggers_destruction() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let proj_dir = cwd.join("destroy-me");
+        fs::create_dir(&proj_dir).unwrap();
+        fs::write(proj_dir.join("AGENTS.md"), "# Destroy Me").unwrap();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, &proj_dir).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("destroy-me", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry).with_cwd(cwd);
+
+        // Trigger destroy modal via Ctrl+Space then 'd'
+        app.handle_raw_bytes(&[0x00]);
+        app.handle_raw_bytes(b"d");
+        assert!(app.destroy_modal.is_some());
+
+        // Confirm with 'y'
+        app.process_raw_input(b"y");
+        assert!(app.destroy_modal.is_none());
+        assert!(app.destroy_progress_modal.is_some());
+        assert_eq!(app.registry.len(), 0);
+
+        // Wait for async destruction
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            app.poll_destroy_progress();
+            if let Some(modal) = &app.destroy_progress_modal {
+                if modal.is_finished {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Dismiss modal with Enter
+        app.handle_destroy_progress_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.destroy_progress_modal.is_none());
+        assert!(!proj_dir.exists());
+    }
+
+    #[test]
+    fn test_tui_app_in_session_destroy_multi_session_transitions_to_remaining_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let dir1 = cwd.join("proj-1");
+        fs::create_dir(&dir1).unwrap();
+        fs::write(dir1.join("AGENTS.md"), "# Proj 1").unwrap();
+
+        let dir2 = cwd.join("proj-2");
+        fs::create_dir(&dir2).unwrap();
+        fs::write(dir2.join("AGENTS.md"), "# Proj 2").unwrap();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config1 = PtyConfig::new(cmd, &dir1).with_args(args.clone());
+        let pty1 = PtySession::spawn(config1).unwrap();
+        let vt1 = VtScreen::new(80, 24);
+        let ps1 = ProjectSession::new("proj-1", "ws", "mock");
+        registry.add(ps1, pty1, vt1).unwrap();
+
+        let config2 = PtyConfig::new(cmd, &dir2).with_args(args);
+        let pty2 = PtySession::spawn(config2).unwrap();
+        let vt2 = VtScreen::new(80, 24);
+        let ps2 = ProjectSession::new("proj-2", "ws", "mock");
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        let mut app = TuiApp::new(registry).with_cwd(cwd);
+        assert_eq!(app.registry.len(), 2);
+        assert_eq!(app.registry.active_index(), Some(0));
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "proj-1"
+        );
+
+        // Destroy proj-1 from within its session
+        app.handle_raw_bytes(&[0x00]);
+        app.handle_raw_bytes(b"d");
+        assert!(app.destroy_modal.is_some());
+
+        // Confirm with Enter
+        app.handle_input_bytes(b"\r");
+        assert!(app.destroy_modal.is_none());
+        assert!(app.destroy_progress_modal.is_some());
+
+        // Registry should immediately drop to 1 session, focusing proj-2
+        assert_eq!(app.registry.len(), 1);
+        assert_eq!(app.registry.active_index(), Some(0));
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "proj-2"
+        );
+
+        // Wait for async destruction
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            app.poll_destroy_progress();
+            if let Some(modal) = &app.destroy_progress_modal {
+                if modal.is_finished {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Dismiss progress modal
+        app.handle_destroy_progress_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.destroy_progress_modal.is_none());
+
+        // Still 1 session, proj-2 active, not on dashboard
+        assert_eq!(app.registry.len(), 1);
+        assert_eq!(
+            app.registry.active_session().unwrap().project_name(),
+            "proj-2"
+        );
+        assert!(!app.showing_dashboard);
+        assert!(!app.is_showing_dashboard());
+        assert!(!dir1.exists());
+        assert!(dir2.exists());
+    }
+
+    #[test]
+    fn test_tui_app_in_session_destroy_last_session_transitions_to_dashboard() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let proj_dir = cwd.join("lone-proj");
+        fs::create_dir(&proj_dir).unwrap();
+        fs::write(proj_dir.join("AGENTS.md"), "# Lone Project").unwrap();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, &proj_dir).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("lone-proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let dashboard = DashboardState::new(vec!["ws".to_string()], vec!["lone-proj".to_string()]);
+        let mut app = TuiApp::new(registry)
+            .with_dashboard(dashboard)
+            .with_cwd(cwd);
+
+        assert!(!app.showing_dashboard);
+        assert!(!app.is_showing_dashboard());
+
+        // In-session destroy
+        app.handle_raw_bytes(&[0x00]);
+        app.handle_raw_bytes(b"d");
+        assert!(app.destroy_modal.is_some());
+
+        app.handle_input_bytes(b"y");
+        assert!(app.destroy_modal.is_none());
+        assert!(app.destroy_progress_modal.is_some());
+
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            app.poll_destroy_progress();
+            if let Some(modal) = &app.destroy_progress_modal {
+                if modal.is_finished {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        app.handle_destroy_progress_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.destroy_progress_modal.is_none());
+
+        // Since registry is empty, transitions cleanly to overview dashboard
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.showing_dashboard);
+        assert!(app.is_showing_dashboard());
+        assert!(!proj_dir.exists());
+    }
+
+    #[test]
+    fn test_tui_app_in_session_destroy_last_session_without_dashboard_initializes_dashboard() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+
+        let proj_dir = cwd.join("standalone-proj");
+        fs::create_dir(&proj_dir).unwrap();
+        fs::write(proj_dir.join("AGENTS.md"), "# Standalone").unwrap();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, &proj_dir).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("standalone-proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        // Standalone mode without pre-initialized dashboard
+        let mut app = TuiApp::new(registry).with_cwd(cwd);
+        assert!(app.dashboard.is_none());
+
+        app.handle_raw_bytes(&[0x00]);
+        app.handle_raw_bytes(b"d");
+        assert!(app.destroy_modal.is_some());
+
+        app.handle_input_bytes(b"y");
+        assert!(app.destroy_modal.is_none());
+        assert!(app.destroy_progress_modal.is_some());
+
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            app.poll_destroy_progress();
+            if let Some(modal) = &app.destroy_progress_modal {
+                if modal.is_finished {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        app.handle_destroy_progress_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.destroy_progress_modal.is_none());
+
+        // Transitions to overview dashboard, automatically initialized
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.dashboard.is_some());
+        assert!(app.showing_dashboard);
+        assert!(app.is_showing_dashboard());
         assert!(!proj_dir.exists());
     }
 

@@ -16,9 +16,11 @@ pub enum RawAction {
     NextSession,
     /// Cycles to the previous active session (`p` / `P`).
     PrevSession,
-    /// Detaches from the active session (`d` / `D`).
+    /// Detaches from the active session (`x` / `X`).
     Detach,
-    /// Closes / terminates the active session (`w` / `W` or `x` / `X`).
+    /// Destroys the active project session workspace (`d` / `D`).
+    DestroyProject,
+    /// Closes / terminates the active session (`w` / `W`).
     CloseSession,
     /// Opens the in-session Quick Project Launcher modal (`c` / `C`).
     OpenLauncher,
@@ -143,11 +145,14 @@ impl RawLeaderDecoder {
                     b'p' | b'P' => {
                         actions.push(RawAction::PrevSession);
                     }
-                    b'w' | b'W' | b'x' | b'X' => {
+                    b'w' | b'W' => {
                         actions.push(RawAction::CloseSession);
                     }
-                    b'd' | b'D' => {
+                    b'x' | b'X' => {
                         actions.push(RawAction::Detach);
+                    }
+                    b'd' | b'D' => {
+                        actions.push(RawAction::DestroyProject);
                     }
                     b'q' | b'Q' => {
                         actions.push(RawAction::Quit);
@@ -960,21 +965,26 @@ mod tests {
         assert_eq!(decoder.decode(b"P"), vec![RawAction::PrevSession]);
         assert!(!decoder.is_leader_active());
 
-        // w / W / x / X -> CloseSession
-        for b in b"wWxX" {
+        // w / W -> CloseSession
+        for b in b"wW" {
             decoder.set_leader_active(true);
             assert_eq!(decoder.decode(&[*b]), vec![RawAction::CloseSession]);
             assert!(!decoder.is_leader_active());
         }
 
-        // d / D -> Detach
-        decoder.set_leader_active(true);
-        assert_eq!(decoder.decode(b"d"), vec![RawAction::Detach]);
-        assert!(!decoder.is_leader_active());
+        // x / X -> Detach
+        for b in b"xX" {
+            decoder.set_leader_active(true);
+            assert_eq!(decoder.decode(&[*b]), vec![RawAction::Detach]);
+            assert!(!decoder.is_leader_active());
+        }
 
-        decoder.set_leader_active(true);
-        assert_eq!(decoder.decode(b"D"), vec![RawAction::Detach]);
-        assert!(!decoder.is_leader_active());
+        // d / D -> DestroyProject
+        for b in b"dD" {
+            decoder.set_leader_active(true);
+            assert_eq!(decoder.decode(&[*b]), vec![RawAction::DestroyProject]);
+            assert!(!decoder.is_leader_active());
+        }
 
         // q / Q -> Quit
         decoder.set_leader_active(true);

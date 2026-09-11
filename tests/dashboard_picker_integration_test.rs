@@ -380,10 +380,10 @@ repos = []
     assert!(!app.showing_dashboard);
     assert!(!app.is_showing_dashboard());
 
-    // 3. Send leader Ctrl+Space then Detach ('d')
+    // 3. Send leader Ctrl+Space then Detach ('x')
     app.handle_raw_bytes(&[0x00]);
     assert!(app.leader_active);
-    app.handle_raw_bytes(b"d");
+    app.handle_raw_bytes(b"x");
 
     // Should return to dashboard without quitting, keeping session running
     assert!(!app.leader_active);
@@ -439,7 +439,7 @@ repos = []
 
     // 2. Detach back to dashboard
     app.handle_raw_bytes(&[0x00]);
-    app.handle_raw_bytes(b"d");
+    app.handle_raw_bytes(b"x");
 
     assert!(app.is_showing_dashboard());
 

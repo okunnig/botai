@@ -423,14 +423,28 @@ fn test_integration_raw_leader_decoder_and_pty_byte_forwarding() {
     assert_eq!(decoder.decode(b"c"), vec![RawAction::OpenLauncher]);
     assert!(!decoder.is_leader_active());
 
-    // 6. Double Ctrl+Space forwards literal 0x00
+    // 6. Subsequent detach hotkey 'x'
+    assert_eq!(decoder.decode(&[0x00]), vec![RawAction::EnterLeader]);
+    assert_eq!(decoder.decode(b"x"), vec![RawAction::Detach]);
+    assert!(!decoder.is_leader_active());
+
+    // 7. Subsequent destroy hotkey 'd' and 'D'
+    assert_eq!(decoder.decode(&[0x00]), vec![RawAction::EnterLeader]);
+    assert_eq!(decoder.decode(b"d"), vec![RawAction::DestroyProject]);
+    assert!(!decoder.is_leader_active());
+
+    assert_eq!(decoder.decode(&[0x00]), vec![RawAction::EnterLeader]);
+    assert_eq!(decoder.decode(b"D"), vec![RawAction::DestroyProject]);
+    assert!(!decoder.is_leader_active());
+
+    // 8. Double Ctrl+Space forwards literal 0x00
     assert_eq!(
         decoder.decode(&[0x00, 0x00]),
         vec![RawAction::EnterLeader, RawAction::Passthrough(vec![0x00])]
     );
     assert!(!decoder.is_leader_active());
 
-    // 7. End-to-end PTY raw forwarding in TuiApp
+    // 9. End-to-end PTY raw forwarding in TuiApp
     let mut registry = SessionRegistry::new();
     let (mut ps1, pty1, vt1) = create_mock_session("app1", "ws", "claude");
     ps1.set_status(SessionStatus::WaitingForInput);

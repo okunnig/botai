@@ -355,7 +355,8 @@ impl<'a> StatusBar<'a> {
 
         if registry.is_empty() {
             if leader_active {
-                let leader_msg = "[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]";
+                let leader_msg =
+                    "[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
                 let line = Line::from(Span::styled(
                     leader_msg,
                     Style::default()
@@ -391,7 +392,8 @@ impl<'a> StatusBar<'a> {
         let mut top_bar = TopBar::new(tabs_line).with_theme(theme);
 
         if leader_active {
-            let leader_msg = "[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]";
+            let leader_msg =
+                "[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
             let leader_len = leader_msg.chars().count() as u16;
             let leader_style = Style::default()
                 .fg(theme.leader_fg)
@@ -585,7 +587,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered_leader
-            .contains("[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]"));
+            .contains("[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]"));
     }
 
     #[test]
@@ -656,7 +658,8 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("● 1 [ws] proj-backend"));
-        assert!(rendered.contains("[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]"));
+        assert!(rendered
+            .contains("[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]"));
     }
 
     #[test]

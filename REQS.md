@@ -332,17 +332,18 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `PtySession::kill()` explicitly terminates running processes and invokes `child.wait()` to reap process entries from the OS process table.
   - `PtySession::process_id()` exposes the underlying OS child process identifier (`Option<u32>`) when available.
 - **Session Detachment & Background Persistence**:
-  - Detaching from an active session (`Ctrl + Space` then `d`):
+  - Detaching from an active session (`Ctrl + Space` then `x`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
     - When launched directly from CLI (`botai create --attach` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
-- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, and streamlined key hints. Each session tab displays its index hotkey, template name in brackets, and project name: `● <Hotkey> [<Template>] <Project>` (or `● <Hotkey> <Project>` if template name is empty). In normal state, it displays a concise right-aligned `'Ctrl+Space: Actions'` hint (omitted gracefully on narrow viewports). When the leader key is triggered (`leader_active`), it displays the focused actionable commands menu `'[1..9 Switch | c New | n/p Nav | w Close | d Detach | q Quit]'` in high-contrast leader styling. When no active sessions exist, it displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'`, transitioning to the active leader menu when `Ctrl+Space` is pressed.
+- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, and streamlined key hints. Each session tab displays its index hotkey, template name in brackets, and project name: `● <Hotkey> [<Template>] <Project>` (or `● <Hotkey> <Project>` if template name is empty). In normal state, it displays a concise right-aligned `'Ctrl+Space: Actions'` hint (omitted gracefully on narrow viewports). When the leader key is triggered (`leader_active`), it displays the focused actionable commands menu `'[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]'` in high-contrast leader styling. When no active sessions exist, it displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'`, transitioning to the active leader menu when `Ctrl+Space` is pressed.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
     - `Ctrl + Space` then `1` .. `9`: Directly switch to project session 1 to 9.
-    - `Ctrl + Space` then `c` (or `n`): Open the Quick Project Launcher & Creator modal.
+    - `Ctrl + Space` then `c`: Open the unified project creation modal (`ProjectCreationModal`).
     - `Ctrl + Space` then `n` / `p`: Switch to Next / Previous active project session.
-    - `Ctrl + Space` then `w` (or `x`): Close / terminate active project session.
-    - `Ctrl + Space` then `d`: Detach from active session (returns to dashboard when dashboard is present, or exits to host shell when running in standalone CLI mode).
+    - `Ctrl + Space` then `w`: Close / terminate active project session.
+    - `Ctrl + Space` then `x`: Detach from active session (returns to dashboard when dashboard is present, or exits to host shell when running in standalone CLI mode).
+    - `Ctrl + Space` then `d`: Destroy active project session workspace (prompts confirmation dialog and triggers clean worktree destruction and directory removal).
     - `Ctrl + Space` then `q`: Quit `botai`.
     - `Ctrl + Space` then `Ctrl + Space` (or `Space`): Forward a literal `Ctrl + Space` (`0x00`) to the active PTY.
     - `Ctrl + Space` then `Esc` (or any unrecognized key): Cancel leader mode without executing an action.
@@ -524,10 +525,15 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Opens the unified two-step `ProjectCreationModal` floating dialog directly (identical workflow and presentation as the overview dashboard):
     - **Step 1 (`CreationStep::SelectTemplate`)**: Searchable template list with real-time text input filter, matching count, and full template preview pane. Defaults to the global default template from `config.toml`. `Enter` advances to Step 2, `Esc` dismisses the modal and returns focus to the active session.
     - **Step 2 (`CreationStep::ConfigureDetails`)**: Editable project name with readline editing and real-time pre-validation badges, interactive Agent CLI selector, and multiline word-wrapped initial prompt box. `Enter` validates inputs, dismisses the modal, and transitions directly into the Asynchronous Live Setup Modal. `Esc` returns to Step 1.
+- **In-Session Project Destruction (`Ctrl + Space` then `d`)**:
+  - Can be invoked while inside an active terminal session to destroy the current project immediately without first having to detach or close it.
+  - Prompts the user with a confirmation dialog: `Confirm Destroy Project: <name>` (`[y] / [Enter] Confirm | [n] / [Esc] Cancel`).
+  - Upon confirmation (`y` / `Enter`), immediately terminates and reaps the active session's child PTY process, cleans up worktrees across backing central repositories using `remove_worktree_auto`, deletes the project workspace directory, and streams progress in `DestroyProgressModalState`.
+  - When destruction completes, dismissing the modal smoothly shifts focus to an adjacent active project session if other sessions exist, or transitions back to the dashboard if no active sessions remain.
 - **In-Session Project Navigation & Detachment**:
   - Direct session switching: `Ctrl + Space` followed by `1`..`9` jumps directly to session index 0..8.
   - Relative session switching: `Ctrl + Space` followed by `n` (next session) or `p` (previous session) cycles through active sessions.
-  - Overview detachment: `Ctrl + Space` followed by `d` detaches from the active session back to the interactive project dashboard (overview), allowing full-screen browsing and attaching of local existing projects.
+  - Overview detachment: `Ctrl + Space` followed by `x` detaches from the active session back to the interactive project dashboard (overview), allowing full-screen browsing and attaching of local existing projects.
 
 
 ---
