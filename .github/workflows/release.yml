@@ -119,7 +119,7 @@ jobs:
           Get-Content "dist/$ArchiveName.sha256"
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-artifacts-${{ matrix.target_os }}-${{ matrix.target_arch }}
           path: dist/
