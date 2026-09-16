@@ -21,6 +21,12 @@ vt100 = "0.16"
 notify-rust = "4.11"
 tokio = { version = "1.38", features = ["full"] }
 
+# Safe wrappers over the Windows console API. Already in the tree via crossterm;
+# declared directly so the TUI can turn on ENABLE_VIRTUAL_TERMINAL_INPUT without
+# `unsafe` (the crate is `#![forbid(unsafe_code)]`).
+[target.'cfg(windows)'.dependencies]
+crossterm_winapi = "0.9"
+
 [dev-dependencies]
 tempfile = "3.10"
 assert_cmd = "2.0"

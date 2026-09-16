@@ -136,6 +136,94 @@ fn pop_keyboard_enhancement<W: std::io::Write>(writer: &mut W) {
     }
 }
 
+/// `ENABLE_VIRTUAL_TERMINAL_INPUT`, from the Windows console API.
+///
+/// Not re-exported by `crossterm_winapi`, and `winapi`/`windows-sys` are not direct
+/// dependencies, so the value is spelled out here.
+#[cfg(windows)]
+const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+/// Records whether botai turned on `ENABLE_VIRTUAL_TERMINAL_INPUT` itself, so teardown clears
+/// the bit only when it was not already set by the host terminal.
+#[cfg(windows)]
+static VIRTUAL_TERMINAL_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Decides whether the `ENABLE_VIRTUAL_TERMINAL_INPUT` bit still needs setting.
+///
+/// Split out from the console call so the bit arithmetic is testable on every platform.
+#[cfg(windows)]
+fn needs_virtual_terminal_input(mode: u32) -> bool {
+    mode & ENABLE_VIRTUAL_TERMINAL_INPUT == 0
+}
+
+/// Turns on `ENABLE_VIRTUAL_TERMINAL_INPUT` so the console delivers key presses as VT escape
+/// sequences on stdin.
+///
+/// botai reads raw stdin bytes rather than `crossterm::event::read`, and crossterm never sets
+/// this flag — on Windows it reads structured `InputRecord`s through the console API instead.
+/// Without the flag, keys that carry no character (arrows, Home/End, Delete, PageUp/PageDown,
+/// the function keys) produce no bytes at all, so `parse_raw_events` never sees them and TUI
+/// navigation is dead. Printable characters and Ctrl+letter arrive either way, which is why
+/// typing works today but the arrow keys do not.
+///
+/// Must be called *after* `EnableMouseCapture`: crossterm's Windows implementation does an
+/// absolute `set_mode(ENABLE_MOUSE_MODE)` rather than a read-modify-write, so enabling this
+/// first would be silently wiped.
+///
+/// Best effort — a failure here costs arrow keys, not startup.
+#[cfg(windows)]
+fn enable_virtual_terminal_input() {
+    use crossterm_winapi::{ConsoleMode, Handle};
+
+    let Ok(handle) = Handle::current_in_handle() else {
+        return;
+    };
+    let console_mode = ConsoleMode::from(handle);
+    let Ok(mode) = console_mode.mode() else {
+        return;
+    };
+    if !needs_virtual_terminal_input(mode) {
+        // Already on: leave it alone so teardown does not clear something botai did not set.
+        return;
+    }
+    if console_mode
+        .set_mode(mode | ENABLE_VIRTUAL_TERMINAL_INPUT)
+        .is_ok()
+    {
+        VIRTUAL_TERMINAL_INPUT_ENABLED.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Clears `ENABLE_VIRTUAL_TERMINAL_INPUT` again, but only if botai set it.
+///
+/// Clears just that one bit instead of restoring a saved mode, so it cannot fight with
+/// `enable_raw_mode`/`disable_raw_mode` or `DisableMouseCapture`, which each own other bits of
+/// the same value.
+#[cfg(windows)]
+fn disable_virtual_terminal_input() {
+    use crossterm_winapi::{ConsoleMode, Handle};
+
+    if !VIRTUAL_TERMINAL_INPUT_ENABLED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let Ok(handle) = Handle::current_in_handle() else {
+        return;
+    };
+    let console_mode = ConsoleMode::from(handle);
+    let Ok(mode) = console_mode.mode() else {
+        return;
+    };
+    let _ = console_mode.set_mode(mode & !ENABLE_VIRTUAL_TERMINAL_INPUT);
+}
+
+/// No-op: unix terminals already deliver key presses as escape sequences on stdin.
+#[cfg(not(windows))]
+fn enable_virtual_terminal_input() {}
+
+/// No-op counterpart to [`enable_virtual_terminal_input`].
+#[cfg(not(windows))]
+fn disable_virtual_terminal_input() {}
+
 struct TerminalCleanupGuard {
     in_tmux: bool,
 }
@@ -164,6 +252,7 @@ impl Drop for TerminalCleanupGuard {
         // Pop first so the flag stack unwinds LIFO, but in its own `execute!` so a failure
         // cannot short-circuit the restores below.
         pop_keyboard_enhancement(&mut out);
+        disable_virtual_terminal_input();
         let _ = execute!(
             out,
             DisableMouseCapture,
@@ -189,6 +278,7 @@ pub fn install_panic_hook() {
         // Separate, and only if botai actually pushed: `execute!` short-circuits on the first
         // failing command, and on Windows the pop always fails.
         pop_keyboard_enhancement(&mut stdout);
+        disable_virtual_terminal_input();
         let _ = crossterm::execute!(
             stdout,
             crossterm::event::DisableMouseCapture,
@@ -344,6 +434,9 @@ impl TuiApp {
         // `execute!` above it would abort startup entirely. Probed here, before `run_loop`
         // spawns the stdin reader thread the unix query would otherwise race.
         push_keyboard_enhancement(stdout);
+        // After `EnableMouseCapture` above, whose Windows path overwrites the whole console
+        // input mode. Without this the arrow keys never reach `parse_raw_events`.
+        enable_virtual_terminal_input();
 
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
@@ -358,6 +451,7 @@ impl TuiApp {
         // would discard the event loop's real result.
         let _ = disable_raw_mode();
         pop_keyboard_enhancement(terminal.backend_mut());
+        disable_virtual_terminal_input();
         let _ = execute!(
             terminal.backend_mut(),
             DisableMouseCapture,
@@ -3666,6 +3760,32 @@ repos = []
         // exit; only the first may pop, or botai would unwind a level of a parent
         // application's kitty flag stack.
         assert!(!take_pending_keyboard_enhancement_pop(&state));
+    }
+
+    /// Windows-only: the constant and the helper are both `#[cfg(windows)]`, since unix
+    /// terminals already deliver key presses as escape sequences on stdin.
+    #[test]
+    #[cfg(windows)]
+    fn test_needs_virtual_terminal_input_only_when_bit_is_clear() {
+        // Raw mode leaves ENABLE_LINE_INPUT/ECHO/PROCESSED cleared, and crossterm's
+        // EnableMouseCapture then sets exactly ENABLE_MOUSE_INPUT | EXTENDED_FLAGS |
+        // WINDOW_INPUT (0x0098). That is the mode botai actually finds at startup, and it
+        // carries no VT input bit — which is why the arrow keys produce no stdin bytes.
+        assert!(needs_virtual_terminal_input(0x0098));
+        assert!(needs_virtual_terminal_input(0));
+
+        // A host terminal that already enabled it: leave the bit alone, so teardown does not
+        // clear something botai did not set.
+        assert!(!needs_virtual_terminal_input(ENABLE_VIRTUAL_TERMINAL_INPUT));
+        assert!(!needs_virtual_terminal_input(
+            0x0098 | ENABLE_VIRTUAL_TERMINAL_INPUT
+        ));
+
+        // Setting the bit must preserve every other flag, and clearing it must restore the
+        // exact original value.
+        let enabled = 0x0098 | ENABLE_VIRTUAL_TERMINAL_INPUT;
+        assert_eq!(enabled, 0x0298);
+        assert_eq!(enabled & !ENABLE_VIRTUAL_TERMINAL_INPUT, 0x0098);
     }
 
     /// Pins the root cause so a crossterm upgrade cannot silently change it.
