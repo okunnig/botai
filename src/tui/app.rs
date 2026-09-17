@@ -63,6 +63,7 @@ pub struct TuiApp {
     pub pending_raw_input: Vec<u8>,
     pub config_path: Option<PathBuf>,
     pub config_last_modified: Option<std::time::SystemTime>,
+    pub config_file_len: Option<u64>,
 }
 
 struct TerminalCleanupGuard {
@@ -171,6 +172,7 @@ impl TuiApp {
             pending_raw_input: Vec::new(),
             config_path: None,
             config_last_modified: None,
+            config_file_len: None,
         }
     }
 
@@ -185,9 +187,11 @@ impl TuiApp {
         if dashboard.config_path.is_none() {
             dashboard.config_path = self.config_path.clone();
             dashboard.config_last_modified = self.config_last_modified;
+            dashboard.config_file_len = self.config_file_len;
         } else if self.config_path.is_none() {
             self.config_path = dashboard.config_path.clone();
             self.config_last_modified = dashboard.config_last_modified;
+            self.config_file_len = dashboard.config_file_len;
         }
         self.dashboard = Some(dashboard);
         self
@@ -236,13 +240,17 @@ impl TuiApp {
     /// Sets the configuration file path used for reloading.
     pub fn with_config_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
         let p = path.into();
-        let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+        let meta = std::fs::metadata(&p).ok();
+        let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+        let flen = meta.map(|m| m.len());
         if let Some(dashboard) = &mut self.dashboard {
             dashboard.config_path = Some(p.clone());
             dashboard.config_last_modified = mtime;
+            dashboard.config_file_len = flen;
         }
         self.config_path = Some(p);
         self.config_last_modified = mtime;
+        self.config_file_len = flen;
         self
     }
 
@@ -257,16 +265,21 @@ impl TuiApp {
         if let Some(path) = path_opt {
             if path.exists() {
                 let meta = std::fs::metadata(&path)?;
+                let curr_len = meta.len();
                 let last = self
                     .config_last_modified
                     .or_else(|| self.dashboard.as_ref().and_then(|d| d.config_last_modified));
+                let last_len = self
+                    .config_file_len
+                    .or_else(|| self.dashboard.as_ref().and_then(|d| d.config_file_len));
                 if let (Some(last), Ok(curr)) = (last, meta.modified()) {
-                    if curr == last {
+                    if curr == last && last_len == Some(curr_len) {
                         return Ok(false);
                     }
                 }
                 let curr_mtime = meta.modified().ok();
                 self.config_last_modified = curr_mtime;
+                self.config_file_len = Some(curr_len);
                 let new_config = Config::load_from_file(&path)?;
                 if let Some(dashboard) = &mut self.dashboard {
                     dashboard.config = new_config.clone();
@@ -275,6 +288,7 @@ impl TuiApp {
                     dashboard.templates = templates;
                     dashboard.config_path = Some(path.clone());
                     dashboard.config_last_modified = curr_mtime;
+                    dashboard.config_file_len = Some(curr_len);
                 }
                 self.config = Some(new_config);
                 if self.config_path.is_none() {
@@ -735,6 +749,7 @@ impl TuiApp {
                     self.config_path = dashboard.config_path.clone();
                 }
                 self.config_last_modified = dashboard.config_last_modified;
+                self.config_file_len = dashboard.config_file_len;
             }
             self.dashboard = Some(dashboard);
             self.handle_dashboard_action(action);
@@ -751,6 +766,7 @@ impl TuiApp {
                     self.config_path = dashboard.config_path.clone();
                 }
                 self.config_last_modified = dashboard.config_last_modified;
+                self.config_file_len = dashboard.config_file_len;
             }
             self.dashboard = Some(dashboard);
             self.handle_dashboard_action(action);
@@ -3657,6 +3673,7 @@ repos = []
 [templates.t2]
 repos = []
 "#;
+        std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&config_file, toml_v2).unwrap();
 
         // In-session open_creation_modal should reload config and include t2
@@ -3702,6 +3719,7 @@ repos = []
 [templates.added_template]
 repos = []
 "#;
+        std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&config_file, toml_v2).unwrap();
 
         // Simulate pressing 'n' on dashboard

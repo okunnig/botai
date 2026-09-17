@@ -73,6 +73,7 @@ pub struct DashboardState {
     pub cwd: PathBuf,
     pub config_path: Option<PathBuf>,
     pub config_last_modified: Option<std::time::SystemTime>,
+    pub config_file_len: Option<u64>,
 }
 
 impl DashboardState {
@@ -117,6 +118,7 @@ impl DashboardState {
             cwd,
             config_path: None,
             config_last_modified: None,
+            config_file_len: None,
         }
     }
 
@@ -135,7 +137,9 @@ impl DashboardState {
     /// Sets the configuration file path used for reloading.
     pub fn with_config_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
         let p = path.into();
-        self.config_last_modified = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+        let meta = std::fs::metadata(&p).ok();
+        self.config_last_modified = meta.as_ref().and_then(|m| m.modified().ok());
+        self.config_file_len = meta.map(|m| m.len());
         self.config_path = Some(p);
         self
     }
@@ -180,12 +184,14 @@ impl DashboardState {
         if let Some(ref path) = self.config_path {
             if path.exists() {
                 let meta = std::fs::metadata(path)?;
+                let curr_len = meta.len();
                 if let (Some(last), Ok(curr)) = (self.config_last_modified, meta.modified()) {
-                    if curr == last {
+                    if curr == last && self.config_file_len == Some(curr_len) {
                         return Ok(false);
                     }
                 }
                 self.config_last_modified = meta.modified().ok();
+                self.config_file_len = Some(curr_len);
                 self.config = Config::load_from_file(path)?;
                 let mut templates: Vec<String> = self.config.templates.keys().cloned().collect();
                 templates.sort();
@@ -1382,6 +1388,7 @@ repos = ["repo1"]
 [templates.new_tpl]
 repos = ["repo2"]
 "#;
+        std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&config_file, toml_v2).unwrap();
 
         // Opening creation modal reloads config and updates template list
@@ -1419,6 +1426,7 @@ repos = ["repo1"]
             DashboardState::from_env(&config, dir.path()).with_config_path(&config_file);
 
         // Write broken TOML
+        std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&config_file, "invalid = [unterminated").unwrap();
 
         // reload_config returns error but keeps previous config
