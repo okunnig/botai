@@ -44,7 +44,9 @@
     - `pre_destroy`: (Optional) List of commands executed at the project root before destroying worktrees.
 - **Agent Definitions**: Configurable agent launch commands, arguments, and environment variables.
 - **Dynamic Configuration & Template Reloading**:
-  - When initiating project creation (opening the project creation modal via `n`/`c` on the dashboard, via the in-session launcher shortcut, or submitting creation), `botai` automatically reloads potentially updated configuration from disk if a configuration file path is known.
+  - `Config` is designed as a pure, lightweight data structure containing parsed configuration without filesystem path tracking or self-reloading responsibilities.
+  - Runtime application state containers (`TuiApp` and `DashboardState`) track the configuration file path (`config_path`) and the last known filesystem modification time (`config_last_modified` / `mtime`).
+  - When initiating project creation (opening the project creation modal via `n`/`c` on the dashboard, via the in-session launcher shortcut, or submitting creation), `botai` checks the file's current `mtime` against `config_last_modified`. If `mtime` is unchanged, disk reloading is skipped (returning `Ok(false)`), avoiding redundant I/O and deserialization. When the file has been modified, configuration is reloaded from disk (returning `Ok(true)`), immediately updating active templates and settings.
   - Enables users to add, update, or remove templates and agent tools in `config.toml` (e.g. via `botai edit` in another terminal or an external editor) and immediately select and instantiate them without restarting `botai`.
   - **Graceful Error Handling**: If the configuration file on disk contains invalid TOML syntax or cannot be read while being edited, `botai` gracefully retains the last valid active configuration without crashing or interrupting running sessions.
 - **Configuration Template Generation (`botai init`)**:
@@ -437,7 +439,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Unified Interactive Project Creation Modal (Two-Step Flow)**:
   - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session creation.
   - **Dynamic Configuration & Template Reloading on Modal Activation**:
-    - Opening the creation modal (via `n`/`c` on the dashboard or `RawAction::OpenLauncher` within an active session) reloads configuration from disk, ensuring any newly configured templates or modified repository references immediately appear in Step 1 template selection.
+    - Opening the creation modal (via `n`/`c` on the dashboard or `RawAction::OpenLauncher` within an active session) triggers configuration reloading from disk using filesystem modification time (`mtime`) caching.
+    - While `Config` remains a pure data structure, `TuiApp` and `DashboardState` track `config_path` and `config_last_modified` (`mtime`), skipping unnecessary reloads when `mtime` is unchanged and immediately reflecting newly configured templates or modified repository references in Step 1 template selection when the file has been modified.
   - **Asynchronous Non-Blocking Pre-Validation**:
     - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
     - Git branch collisions are checked asynchronously in background worker threads with generation counters to prevent stale results and UI freezing.

@@ -44,11 +44,12 @@ repos = []
     fs::write(&config_file, initial_toml).expect("write initial config");
 
     let config = Config::load_from_file(&config_file).expect("load config");
-    let dashboard = DashboardState::from_env(&config, &cwd);
+    let dashboard = DashboardState::from_env(&config, &cwd).with_config_path(&config_file);
     let registry = SessionRegistry::new();
     let mut app = TuiApp::new(registry)
         .with_dashboard(dashboard)
         .with_config(config)
+        .with_config_path(&config_file)
         .with_cwd(cwd.clone());
 
     // Verify initial state: 1 template
@@ -57,7 +58,11 @@ repos = []
         vec!["initial_service".to_string()]
     );
 
+    // Initially calling reload_config() when file has NOT been modified returns Ok(false)
+    assert!(matches!(app.reload_config(), Ok(false)));
+
     // 2. User modifies config.toml on disk while botai is running to add a new template
+    std::thread::sleep(Duration::from_millis(20));
     let updated_toml = format!(
         r#"
 default_agent = "mock_agent"
@@ -79,6 +84,11 @@ repos = []
         shell_cmd
     );
     fs::write(&config_file, updated_toml).expect("write updated config");
+
+    // Verify that modifying the file causes reload_config() to return Ok(true)
+    assert!(matches!(app.reload_config(), Ok(true)));
+    // Verify that calling reload_config() when file has NOT been modified returns Ok(false)
+    assert!(matches!(app.reload_config(), Ok(false)));
 
     // 3. User presses 'n' to open creation modal from dashboard
     app.handle_dashboard_key(key(KeyCode::Char('n')));
@@ -219,9 +229,14 @@ repos = []
 
     let mut app = TuiApp::new(registry)
         .with_config(config)
+        .with_config_path(&config_file)
         .with_cwd(cwd.clone());
 
+    // Initially unmodified returns Ok(false)
+    assert!(matches!(app.reload_config(), Ok(false)));
+
     // Update config on disk while inside the session
+    std::thread::sleep(Duration::from_millis(20));
     let updated_toml = format!(
         r#"
 default_agent = "mock_agent"
@@ -242,7 +257,7 @@ repos = []
     );
     fs::write(&config_file, updated_toml).unwrap();
 
-    // Trigger in-session launcher
+    // Trigger in-session launcher (internally calls reload_config)
     app.open_creation_modal();
 
     let modal = app.creation_modal.as_ref().expect("modal should be opened");
@@ -250,6 +265,9 @@ repos = []
         modal.templates,
         vec!["base_tpl".to_string(), "session_added_tpl".to_string()]
     );
+
+    // Calling reload_config() again without disk modification returns Ok(false)
+    assert!(matches!(app.reload_config(), Ok(false)));
 }
 
 #[test]
@@ -268,12 +286,15 @@ repos = []
     fs::write(&config_file, valid_toml).unwrap();
 
     let config = Config::load_from_file(&config_file).unwrap();
-    let dashboard = DashboardState::from_env(&config, &cwd);
+    let dashboard = DashboardState::from_env(&config, &cwd).with_config_path(&config_file);
     let registry = SessionRegistry::new();
     let mut app = TuiApp::new(registry)
         .with_dashboard(dashboard)
         .with_config(config)
+        .with_config_path(&config_file)
         .with_cwd(cwd);
+
+    assert!(matches!(app.reload_config(), Ok(false)));
 
     // Corrupt config file
     fs::write(&config_file, "default_agent = [unclosed syntax").unwrap();
@@ -309,7 +330,7 @@ repos = []
     fs::write(&config_file, v1_toml).unwrap();
 
     let config = Config::load_from_file(&config_file).unwrap();
-    let mut dashboard = DashboardState::from_env(&config, &cwd);
+    let mut dashboard = DashboardState::from_env(&config, &cwd).with_config_path(&config_file);
 
     assert_eq!(
         dashboard
@@ -321,7 +342,11 @@ repos = []
         Some("Version 1")
     );
 
+    // Initial check: calling reload_config when file has NOT been modified returns Ok(false)
+    assert!(matches!(dashboard.reload_config(), Ok(false)));
+
     // Modify existing template description on disk
+    std::thread::sleep(Duration::from_millis(20));
     let v2_toml = r#"
 default_agent = "claude"
 repos_dir = "/tmp/repos"
@@ -331,6 +356,11 @@ description = "Version 2 Updated"
 repos = []
 "#;
     fs::write(&config_file, v2_toml).unwrap();
+
+    // Verify modifying file causes reload_config() to return Ok(true)
+    assert!(matches!(dashboard.reload_config(), Ok(true)));
+    // Verify calling reload_config() without modification returns Ok(false)
+    assert!(matches!(dashboard.reload_config(), Ok(false)));
 
     // Open creation modal
     dashboard.open_creation_modal();
@@ -345,4 +375,60 @@ repos = []
             .as_deref(),
         Some("Version 2 Updated")
     );
+}
+
+#[test]
+fn test_integration_reload_config_mtime_skips_when_unchanged_and_reloads_when_modified() {
+    let tmp = tempdir().expect("tempdir");
+    let cwd = tmp.path().to_path_buf();
+    let config_file = tmp.path().join("config.toml");
+
+    let toml_v1 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.t1]
+repos = []
+"#;
+    fs::write(&config_file, toml_v1).unwrap();
+
+    let config = Config::load_from_file(&config_file).unwrap();
+    let mut dashboard = DashboardState::from_env(&config, &cwd).with_config_path(&config_file);
+    let mut app = TuiApp::new(SessionRegistry::new())
+        .with_config(config)
+        .with_config_path(&config_file)
+        .with_cwd(cwd);
+
+    // 1. Initially unmodified - both return Ok(false)
+    assert!(matches!(dashboard.reload_config(), Ok(false)));
+    assert!(matches!(app.reload_config(), Ok(false)));
+
+    // 2. Modify config file
+    std::thread::sleep(Duration::from_millis(20));
+    let toml_v2 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.t1]
+repos = []
+
+[templates.t2]
+repos = []
+"#;
+    fs::write(&config_file, toml_v2).unwrap();
+
+    // 3. Reload config on dashboard - returns Ok(true)
+    assert!(matches!(dashboard.reload_config(), Ok(true)));
+    assert_eq!(
+        dashboard.templates,
+        vec!["t1".to_string(), "t2".to_string()]
+    );
+    // Calling reload again without disk modification returns Ok(false)
+    assert!(matches!(dashboard.reload_config(), Ok(false)));
+
+    // 4. Reload config on app - returns Ok(true)
+    assert!(matches!(app.reload_config(), Ok(true)));
+    assert!(app.config.as_ref().unwrap().templates.contains_key("t2"));
+    // Calling reload again without disk modification returns Ok(false)
+    assert!(matches!(app.reload_config(), Ok(false)));
 }

@@ -62,6 +62,7 @@ pub struct TuiApp {
     pub raw_decoder: RawLeaderDecoder,
     pub pending_raw_input: Vec<u8>,
     pub config_path: Option<PathBuf>,
+    pub config_last_modified: Option<std::time::SystemTime>,
 }
 
 struct TerminalCleanupGuard {
@@ -169,6 +170,7 @@ impl TuiApp {
             raw_decoder: RawLeaderDecoder::new(),
             pending_raw_input: Vec::new(),
             config_path: None,
+            config_last_modified: None,
         }
     }
 
@@ -181,12 +183,11 @@ impl TuiApp {
     pub fn with_dashboard(mut self, mut dashboard: DashboardState) -> Self {
         dashboard.set_running_sessions(self.running_sessions_map());
         if dashboard.config_path.is_none() {
-            dashboard.config_path = self
-                .config_path
-                .clone()
-                .or_else(|| self.config.as_ref().and_then(|c| c.config_path.clone()));
+            dashboard.config_path = self.config_path.clone();
+            dashboard.config_last_modified = self.config_last_modified;
         } else if self.config_path.is_none() {
             self.config_path = dashboard.config_path.clone();
+            self.config_last_modified = dashboard.config_last_modified;
         }
         self.dashboard = Some(dashboard);
         self
@@ -228,7 +229,6 @@ impl TuiApp {
 
     /// Sets the configuration on `TuiApp`.
     pub fn with_config(mut self, config: Config) -> Self {
-        self.config_path = config.config_path.clone().or(self.config_path);
         self.config = Some(config);
         self
     }
@@ -236,14 +236,13 @@ impl TuiApp {
     /// Sets the configuration file path used for reloading.
     pub fn with_config_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
         let p = path.into();
-        if let Some(cfg) = &mut self.config {
-            cfg.config_path = Some(p.clone());
-        }
+        let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
         if let Some(dashboard) = &mut self.dashboard {
             dashboard.config_path = Some(p.clone());
-            dashboard.config.config_path = Some(p.clone());
+            dashboard.config_last_modified = mtime;
         }
         self.config_path = Some(p);
+        self.config_last_modified = mtime;
         self
     }
 
@@ -253,20 +252,29 @@ impl TuiApp {
         let path_opt = self
             .config_path
             .clone()
-            .or_else(|| self.config.as_ref().and_then(|c| c.config_path.clone()))
             .or_else(|| self.dashboard.as_ref().and_then(|d| d.config_path.clone()));
 
         if let Some(path) = path_opt {
             if path.exists() {
+                let meta = std::fs::metadata(&path)?;
+                let last = self
+                    .config_last_modified
+                    .or_else(|| self.dashboard.as_ref().and_then(|d| d.config_last_modified));
+                if let (Some(last), Ok(curr)) = (last, meta.modified()) {
+                    if curr == last {
+                        return Ok(false);
+                    }
+                }
+                let curr_mtime = meta.modified().ok();
+                self.config_last_modified = curr_mtime;
                 let new_config = Config::load_from_file(&path)?;
                 if let Some(dashboard) = &mut self.dashboard {
                     dashboard.config = new_config.clone();
                     let mut templates: Vec<String> = new_config.templates.keys().cloned().collect();
                     templates.sort();
                     dashboard.templates = templates;
-                    if dashboard.config_path.is_none() {
-                        dashboard.config_path = Some(path.clone());
-                    }
+                    dashboard.config_path = Some(path.clone());
+                    dashboard.config_last_modified = curr_mtime;
                 }
                 self.config = Some(new_config);
                 if self.config_path.is_none() {
@@ -676,7 +684,6 @@ impl TuiApp {
                         repos: HashMap::new(),
                         agents: HashMap::new(),
                         templates: HashMap::new(),
-                        config_path: None,
                     });
             ProjectCreationModal::new(&fallback_cfg, &cwd, None)
         };
@@ -727,6 +734,7 @@ impl TuiApp {
                 if self.config_path.is_none() && dashboard.config_path.is_some() {
                     self.config_path = dashboard.config_path.clone();
                 }
+                self.config_last_modified = dashboard.config_last_modified;
             }
             self.dashboard = Some(dashboard);
             self.handle_dashboard_action(action);
@@ -742,6 +750,7 @@ impl TuiApp {
                 if self.config_path.is_none() && dashboard.config_path.is_some() {
                     self.config_path = dashboard.config_path.clone();
                 }
+                self.config_last_modified = dashboard.config_last_modified;
             }
             self.dashboard = Some(dashboard);
             self.handle_dashboard_action(action);
@@ -1030,7 +1039,6 @@ impl TuiApp {
                     repos: HashMap::new(),
                     agents: HashMap::new(),
                     templates: HashMap::new(),
-                    config_path: None,
                 })
         });
         let cwd = self
@@ -1086,7 +1094,6 @@ impl TuiApp {
                         repos: HashMap::new(),
                         agents: HashMap::new(),
                         templates: HashMap::new(),
-                        config_path: None,
                     });
             DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
         };
@@ -3636,6 +3643,7 @@ repos = []
         let registry = SessionRegistry::new();
         let mut app = TuiApp::new(registry)
             .with_config(config)
+            .with_config_path(&config_file)
             .with_cwd(dir.path().to_path_buf());
 
         // Update config on disk while app is running
@@ -3674,11 +3682,13 @@ repos = []
         std::fs::write(&config_file, toml_v1).unwrap();
 
         let config = Config::load_from_file(&config_file).unwrap();
-        let dashboard = DashboardState::from_env(&config, dir.path());
+        let dashboard =
+            DashboardState::from_env(&config, dir.path()).with_config_path(&config_file);
         let registry = SessionRegistry::new();
         let mut app = TuiApp::new(registry)
             .with_dashboard(dashboard)
             .with_config(config)
+            .with_config_path(&config_file)
             .with_cwd(dir.path().to_path_buf());
 
         // Add a new template to config file

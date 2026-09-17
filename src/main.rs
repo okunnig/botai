@@ -37,11 +37,10 @@ fn main() -> Result<()> {
     } else {
         Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
             .context("Failed to load fallback configuration")?
-            .with_config_path(&config_path)
     };
 
     match cli.command {
-        None => run_default_dashboard(&config),
+        None => run_default_dashboard(&config, &config_path),
         Some(Commands::Init { .. }) | Some(Commands::Edit { .. }) => unreachable!(),
         Some(Commands::Create {
             template,
@@ -170,13 +169,14 @@ fn cmd_sync(config: &Config, template_filter: Option<&str>) -> Result<()> {
 }
 
 /// Default action: launches interactive TUI dashboard / multiplexer.
-fn run_default_dashboard(config: &Config) -> Result<()> {
+fn run_default_dashboard(config: &Config, config_path: &Path) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current working directory")?;
-    let dashboard = DashboardState::from_env(config, &cwd);
+    let dashboard = DashboardState::from_env(config, &cwd).with_config_path(config_path);
     let registry = SessionRegistry::new();
     let mut app = TuiApp::new(registry)
         .with_dashboard(dashboard)
         .with_config(config.clone())
+        .with_config_path(config_path)
         .with_cwd(cwd);
     let mut stdout = io::stdout();
     app.run(&mut stdout)?;

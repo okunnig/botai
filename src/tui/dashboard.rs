@@ -72,6 +72,7 @@ pub struct DashboardState {
     pub config: Config,
     pub cwd: PathBuf,
     pub config_path: Option<PathBuf>,
+    pub config_last_modified: Option<std::time::SystemTime>,
 }
 
 impl DashboardState {
@@ -86,7 +87,6 @@ impl DashboardState {
                     repos: HashMap::new(),
                     agents: HashMap::new(),
                     templates: HashMap::new(),
-                    config_path: None,
                 });
 
         for tpl in &templates {
@@ -116,6 +116,7 @@ impl DashboardState {
             config,
             cwd,
             config_path: None,
+            config_last_modified: None,
         }
     }
 
@@ -127,7 +128,6 @@ impl DashboardState {
 
     /// Sets the configuration used by the dashboard.
     pub fn with_config(mut self, config: Config) -> Self {
-        self.config_path = config.config_path.clone().or(self.config_path);
         self.config = config;
         self
     }
@@ -135,7 +135,7 @@ impl DashboardState {
     /// Sets the configuration file path used for reloading.
     pub fn with_config_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
         let p = path.into();
-        self.config.config_path = Some(p.clone());
+        self.config_last_modified = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
         self.config_path = Some(p);
         self
     }
@@ -169,33 +169,27 @@ impl DashboardState {
         let mut templates: Vec<String> = config.templates.keys().cloned().collect();
         templates.sort();
 
-        let mut state = Self::new(templates, local_projects)
+        Self::new(templates, local_projects)
             .with_config(config.clone())
-            .with_cwd(cwd.to_path_buf());
-        if let Some(ref path) = config.config_path {
-            state.config_path = Some(path.clone());
-        }
-        state
+            .with_cwd(cwd.to_path_buf())
     }
 
     /// Reloads configuration from disk if a configuration file path is known and valid.
     /// Updates `self.config` and `self.templates` to reflect newly added or modified templates.
     pub fn reload_config(&mut self) -> Result<bool, ConfigError> {
-        let path_opt = self
-            .config_path
-            .clone()
-            .or_else(|| self.config.config_path.clone());
-
-        if let Some(path) = path_opt {
+        if let Some(ref path) = self.config_path {
             if path.exists() {
-                let new_config = Config::load_from_file(&path)?;
-                self.config = new_config;
+                let meta = std::fs::metadata(path)?;
+                if let (Some(last), Ok(curr)) = (self.config_last_modified, meta.modified()) {
+                    if curr == last {
+                        return Ok(false);
+                    }
+                }
+                self.config_last_modified = meta.modified().ok();
+                self.config = Config::load_from_file(path)?;
                 let mut templates: Vec<String> = self.config.templates.keys().cloned().collect();
                 templates.sort();
                 self.templates = templates;
-                if self.config_path.is_none() {
-                    self.config_path = Some(path);
-                }
                 return Ok(true);
             }
         }
@@ -1373,7 +1367,8 @@ repos = ["repo1"]
         std::fs::write(&config_file, toml_v1).unwrap();
 
         let config = Config::load_from_file(&config_file).unwrap();
-        let mut state = DashboardState::from_env(&config, dir.path());
+        let mut state =
+            DashboardState::from_env(&config, dir.path()).with_config_path(&config_file);
         assert_eq!(state.templates, vec!["base_tpl".to_string()]);
 
         // Add a new template while dashboard is running
@@ -1420,7 +1415,8 @@ repos = ["repo1"]
         std::fs::write(&config_file, toml_v1).unwrap();
 
         let config = Config::load_from_file(&config_file).unwrap();
-        let mut state = DashboardState::from_env(&config, dir.path());
+        let mut state =
+            DashboardState::from_env(&config, dir.path()).with_config_path(&config_file);
 
         // Write broken TOML
         std::fs::write(&config_file, "invalid = [unterminated").unwrap();
