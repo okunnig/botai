@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 use botai::session::{
@@ -11,6 +11,18 @@ use botai::tui::ui::TerminalView;
 use botai::tui::TuiApp;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+
+fn wait_for(app: &mut TuiApp, predicate: impl Fn(&TuiApp) -> bool) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(3) {
+        app.process_pty_streams();
+        if predicate(app) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    app.process_pty_streams();
+}
 
 fn create_process_session(
     name: &str,
@@ -58,10 +70,7 @@ fn test_integration_session_exit_normal_multi_session_focus_transition() {
     assert_eq!(app.registry.active_index(), Some(0));
 
     // Wait for session 1 to terminate
-    std::thread::sleep(Duration::from_millis(150));
-
-    // Process streams
-    app.process_pty_streams();
+    wait_for(&mut app, |a| a.registry.len() == 1);
 
     // Session 1 is closed automatically, leaving Session 2 active
     assert_eq!(app.registry.len(), 1);
@@ -82,8 +91,7 @@ fn test_integration_session_exit_normal_last_session_returns_to_dashboard() {
     let dashboard = DashboardState::new(vec!["workspace1".to_string()], vec![]);
     let mut app = TuiApp::new(registry).with_dashboard(dashboard);
 
-    std::thread::sleep(Duration::from_millis(150));
-    app.process_pty_streams();
+    wait_for(&mut app, |a| a.registry.is_empty());
 
     assert_eq!(app.registry.len(), 0);
     assert!(app.dashboard.is_some());
@@ -100,8 +108,7 @@ fn test_integration_session_exit_normal_last_session_cli_mode_exits_shell() {
     let mut app = TuiApp::new(registry);
     assert!(app.dashboard.is_none());
 
-    std::thread::sleep(Duration::from_millis(150));
-    app.process_pty_streams();
+    wait_for(&mut app, |a| a.registry.is_empty());
 
     assert_eq!(app.registry.len(), 0);
     assert!(app.should_quit);
@@ -121,8 +128,11 @@ fn test_integration_session_exit_error_retention_and_banner_dismissal() {
     let mut app = TuiApp::new(registry);
 
     // Wait for command output and exit
-    std::thread::sleep(Duration::from_millis(200));
-    app.process_pty_streams();
+    wait_for(&mut app, |a| {
+        a.registry
+            .active_session()
+            .is_some_and(|s| s.status() == SessionStatus::Error)
+    });
 
     // Session must remain in registry with status Error and exit code 1
     assert_eq!(app.registry.len(), 1);

@@ -1892,6 +1892,18 @@ repos = []
         assert!(cell.modifier.contains(Modifier::BOLD));
     }
 
+    fn wait_for(app: &mut TuiApp, predicate: impl Fn(&TuiApp) -> bool) {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            app.process_pty_streams();
+            if predicate(app) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        app.process_pty_streams();
+    }
+
     #[test]
     fn test_session_exit_normal_multi_session_closes_tab_and_switches_focus() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1924,9 +1936,7 @@ repos = []
         assert_eq!(app.registry.active_index(), Some(0));
 
         // Wait for session 1 to exit 0
-        std::thread::sleep(Duration::from_millis(150));
-
-        app.process_pty_streams();
+        wait_for(&mut app, |a| a.registry.len() == 1);
 
         // Session 1 should be removed, leaving only session 2
         assert_eq!(app.registry.len(), 1);
@@ -1958,9 +1968,7 @@ repos = []
         let mut app = TuiApp::new(registry).with_dashboard(dashboard);
 
         // Wait for process to exit 0
-        std::thread::sleep(Duration::from_millis(150));
-
-        app.process_pty_streams();
+        wait_for(&mut app, |a| a.registry.is_empty());
 
         // Registry is empty, dashboard is active, should_quit is false
         assert_eq!(app.registry.len(), 0);
@@ -1988,9 +1996,7 @@ repos = []
         assert!(app.dashboard.is_none());
 
         // Wait for process to exit 0
-        std::thread::sleep(Duration::from_millis(150));
-
-        app.process_pty_streams();
+        wait_for(&mut app, |a| a.registry.is_empty());
 
         // Registry is empty, should_quit is true
         assert_eq!(app.registry.len(), 0);
@@ -2016,9 +2022,11 @@ repos = []
         let mut app = TuiApp::new(registry);
 
         // Wait for process to exit 42
-        std::thread::sleep(Duration::from_millis(150));
-
-        app.process_pty_streams();
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
 
         // Errored session remains in registry with status Error and exit code 42
         assert_eq!(app.registry.len(), 1);
@@ -2057,8 +2065,11 @@ repos = []
 
         let dashboard = DashboardState::new(vec!["ws".to_string()], vec![]);
         let mut app1 = TuiApp::new(registry1).with_dashboard(dashboard);
-        std::thread::sleep(Duration::from_millis(150));
-        app1.process_pty_streams();
+        wait_for(&mut app1, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
         assert_eq!(app1.registry.len(), 1);
 
         app1.handle_raw_bytes(b" ");
@@ -2075,8 +2086,11 @@ repos = []
         registry2.add(ps2, pty2, vt2).unwrap();
 
         let mut app2 = TuiApp::new(registry2);
-        std::thread::sleep(Duration::from_millis(150));
-        app2.process_pty_streams();
+        wait_for(&mut app2, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
         assert_eq!(app2.registry.len(), 1);
 
         app2.handle_raw_bytes(&[0x00]);
@@ -3308,8 +3322,11 @@ repos = []
         registry.add(ps, pty, vt).unwrap();
 
         let mut app = TuiApp::new(registry);
-        std::thread::sleep(Duration::from_millis(150));
-        app.process_pty_streams();
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
         assert_eq!(app.registry.len(), 1);
         assert_eq!(
             app.registry.active_session().unwrap().status(),

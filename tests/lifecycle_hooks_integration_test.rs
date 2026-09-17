@@ -72,7 +72,7 @@ fn test_parallel_per_repo_setup_hooks_and_post_create_lifecycle() {
         ]
         env = {{ TEMPLATE_SHARED = "shared_template_val" }}
         "#,
-        repos_dir.display()
+        repos_dir.to_string_lossy().replace('\\', "/")
     );
 
     let config = Config::load_from_str(&toml_str).expect("Valid config");
@@ -154,7 +154,7 @@ fn test_setup_hooks_warn_and_continue_policy() {
             ["non_existent_post_create_tool"]
         ]
         "#,
-        repos_dir.display()
+        repos_dir.to_string_lossy().replace('\\', "/")
     );
 
     let config = Config::load_from_str(&toml_str).expect("Valid config");
@@ -220,8 +220,8 @@ fn test_pre_destroy_hook_lifecycle_on_destroy() {
             ["sh", "-c", "echo pre_destroy_ok > {}"]
         ]
         "#,
-        repos_dir.display(),
-        pre_destroy_marker.display()
+        repos_dir.to_string_lossy().replace('\\', "/"),
+        pre_destroy_marker.to_string_lossy().replace('\\', "/")
     );
 
     let config = Config::load_from_str(&toml_str).expect("Valid config");

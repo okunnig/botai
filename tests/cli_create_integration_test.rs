@@ -68,9 +68,9 @@ fn test_cli_create_without_attach_e2e() {
         description = "Fullstack application stack"
         repos = ["{}", "{}"]
         "#,
-        repos_dir.display(),
-        backend_dir.display(),
-        frontend_dir.display()
+        repos_dir.to_string_lossy().replace('\\', "/"),
+        backend_dir.to_string_lossy().replace('\\', "/"),
+        frontend_dir.to_string_lossy().replace('\\', "/")
     );
     fs::write(&config_path, config_content).expect("write config");
 
@@ -191,8 +191,8 @@ fn test_cli_create_with_agent_flag_without_attach() {
         description = "Microservice stack"
         repos = ["{}"]
         "#,
-        repos_dir.display(),
-        service_dir.display()
+        repos_dir.to_string_lossy().replace('\\', "/"),
+        service_dir.to_string_lossy().replace('\\', "/")
     );
     fs::write(&config_path, config_content).expect("write config");
 
@@ -242,8 +242,8 @@ fn test_project_builder_create_and_attach_lifecycle() {
         description = "App template"
         repos = ["{}"]
         "#,
-        repos_dir.display(),
-        backend_dir.display()
+        repos_dir.to_string_lossy().replace('\\', "/"),
+        backend_dir.to_string_lossy().replace('\\', "/")
     );
     let config = botai::config::Config::load_from_str(&config_content).expect("load config");
 

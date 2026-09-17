@@ -1014,36 +1014,15 @@ pub(crate) fn resolve_executable_in_paths(
             return prog_path.to_path_buf();
         }
         for ext in pathexts {
-            let ext_clean = ext.trim_start_matches('.');
-            let ext_lower = ext_clean.to_lowercase();
-            let ext_upper = ext_clean.to_uppercase();
-
-            let cand = std::path::PathBuf::from(format!("{prog}.{ext_clean}"));
-            if cand.is_file() {
-                return cand;
-            }
-            let cand = prog_path.with_extension(ext_clean);
-            if cand.is_file() {
-                return cand;
-            }
-
-            if ext_clean != ext_lower {
-                let cand = std::path::PathBuf::from(format!("{prog}.{ext_lower}"));
+            let clean = ext.trim_start_matches('.');
+            let lower = clean.to_lowercase();
+            let upper = clean.to_uppercase();
+            for e in [&lower, clean, &upper] {
+                let cand = prog_path.with_extension(e);
                 if cand.is_file() {
                     return cand;
                 }
-                let cand = prog_path.with_extension(&ext_lower);
-                if cand.is_file() {
-                    return cand;
-                }
-            }
-
-            if ext_clean != ext_upper {
-                let cand = std::path::PathBuf::from(format!("{prog}.{ext_upper}"));
-                if cand.is_file() {
-                    return cand;
-                }
-                let cand = prog_path.with_extension(&ext_upper);
+                let cand = std::path::PathBuf::from(format!("{prog}.{e}"));
                 if cand.is_file() {
                     return cand;
                 }
@@ -1070,22 +1049,11 @@ pub(crate) fn resolve_executable_in_paths(
             }
         }
         for ext in pathexts {
-            let ext_clean = ext.trim_start_matches('.');
-            let ext_lower = ext_clean.to_lowercase();
-            let ext_upper = ext_clean.to_uppercase();
-
-            let candidate = dir.join(format!("{prog}.{ext_clean}"));
-            if candidate.is_file() {
-                return candidate;
-            }
-            if ext_clean != ext_lower {
-                let candidate = dir.join(format!("{prog}.{ext_lower}"));
-                if candidate.is_file() {
-                    return candidate;
-                }
-            }
-            if ext_clean != ext_upper {
-                let candidate = dir.join(format!("{prog}.{ext_upper}"));
+            let clean = ext.trim_start_matches('.');
+            let lower = clean.to_lowercase();
+            let upper = clean.to_uppercase();
+            for e in [&lower, clean, &upper] {
+                let candidate = dir.join(format!("{prog}.{e}"));
                 if candidate.is_file() {
                     return candidate;
                 }
@@ -1161,6 +1129,10 @@ mod tests {
             .status();
     }
 
+    fn toml_path(p: &std::path::Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
     #[test]
     fn test_project_builder_validation_empty_name() {
         let config =
@@ -1220,8 +1192,8 @@ mod tests {
             [templates.service_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let builder = ProjectBuilder::new(config, "service_tpl", "collision-branch")
@@ -1265,8 +1237,8 @@ mod tests {
             [templates.service_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let builder = ProjectBuilder::new(config, "service_tpl", "collision-branch")
@@ -1294,8 +1266,8 @@ mod tests {
             description = "Web App Services"
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let project_cwd = temp_dir.path().join("workspaces");
@@ -1367,8 +1339,8 @@ mod tests {
             [templates.failing_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let project_cwd = temp_dir.path().join("workspaces");
@@ -1414,8 +1386,8 @@ mod tests {
             description = "Web App Services"
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let project_cwd = temp_dir.path().join("workspaces");
@@ -1482,8 +1454,8 @@ mod tests {
             [templates.failing_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let project_cwd = temp_dir.path().join("workspaces");
@@ -1755,7 +1727,7 @@ mod tests {
             ]
             env = {{ TEMPLATE_ENV = "tpl_val" }}
             "#,
-            repos_dir.display()
+            toml_path(&repos_dir)
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -1841,7 +1813,7 @@ mod tests {
                 ["non_existent_post_create_cmd"]
             ]
             "#,
-            repos_dir.display()
+            toml_path(&repos_dir)
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -1904,8 +1876,8 @@ mod tests {
                 ["sh", "-c", "echo 'cleanup-ok' > {}"]
             ]
             "#,
-            repos_dir.display(),
-            cleanup_marker.display()
+            toml_path(&repos_dir),
+            toml_path(&cleanup_marker)
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -1956,8 +1928,8 @@ mod tests {
                 ["sh", "-c", "echo 'stream-cleanup' > {}"]
             ]
             "#,
-            repos_dir.display(),
-            cleanup_marker.display()
+            toml_path(&repos_dir),
+            toml_path(&cleanup_marker)
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -2051,7 +2023,7 @@ mod tests {
             [templates.safety_tpl]
             repos = ["backend"]
             "#,
-            repos_dir.display(),
+            toml_path(&repos_dir),
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -2291,9 +2263,9 @@ mod tests {
             [templates.tpl]
             repos = ['{}', '{}']
             "#,
-            temp_dir.path().display(),
-            good_repo.display(),
-            bad_repo.display()
+            toml_path(temp_dir.path()),
+            toml_path(&good_repo),
+            toml_path(&bad_repo)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
 
