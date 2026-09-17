@@ -43,6 +43,10 @@
     - `post_create`: (Optional) List of commands executed at the project root after worktrees and setup hooks finish.
     - `pre_destroy`: (Optional) List of commands executed at the project root before destroying worktrees.
 - **Agent Definitions**: Configurable agent launch commands, arguments, and environment variables.
+- **Dynamic Configuration & Template Reloading**:
+  - When initiating project creation (opening the project creation modal via `n`/`c` on the dashboard, via the in-session launcher shortcut, or submitting creation), `botai` automatically reloads potentially updated configuration from disk if a configuration file path is known.
+  - Enables users to add, update, or remove templates and agent tools in `config.toml` (e.g. via `botai edit` in another terminal or an external editor) and immediately select and instantiate them without restarting `botai`.
+  - **Graceful Error Handling**: If the configuration file on disk contains invalid TOML syntax or cannot be read while being edited, `botai` gracefully retains the last valid active configuration without crashing or interrupting running sessions.
 - **Configuration Template Generation (`botai init`)**:
   - Built-in generator for a fully documented, self-describing configuration file with extensive explanatory comments.
   - Serves as an interactive starting template and inline documentation for all supported agents, project templates, repos, and environment variable configurations.
@@ -431,6 +435,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Atomic Rollback**: On any core initialization error (e.g. branch collision, clone failure, worktree creation failure, agent spawn failure), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory. (Note: Non-zero exit codes from user setup/post-create hooks log warnings and do not trigger destructive rollback).
 - **Unified Interactive Project Creation Modal (Two-Step Flow)**:
   - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session creation.
+  - **Dynamic Configuration & Template Reloading on Modal Activation**:
+    - Opening the creation modal (via `n`/`c` on the dashboard or `RawAction::OpenLauncher` within an active session) reloads configuration from disk, ensuring any newly configured templates or modified repository references immediately appear in Step 1 template selection.
   - **Asynchronous Non-Blocking Pre-Validation**:
     - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
     - Git branch collisions are checked asynchronously in background worker threads with generation counters to prevent stale results and UI freezing.
