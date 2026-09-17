@@ -21,7 +21,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::config::Config;
+use crate::config::{Config, ConfigError};
 use crate::notify::NotificationService;
 use crate::project::ProjectBuilder;
 use crate::session::{
@@ -61,6 +61,7 @@ pub struct TuiApp {
     pub showing_dashboard: bool,
     pub raw_decoder: RawLeaderDecoder,
     pub pending_raw_input: Vec<u8>,
+    pub config_path: Option<PathBuf>,
 }
 
 struct TerminalCleanupGuard {
@@ -167,6 +168,7 @@ impl TuiApp {
             showing_dashboard: false,
             raw_decoder: RawLeaderDecoder::new(),
             pending_raw_input: Vec::new(),
+            config_path: None,
         }
     }
 
@@ -178,6 +180,14 @@ impl TuiApp {
     /// Sets the dashboard state on `TuiApp`.
     pub fn with_dashboard(mut self, mut dashboard: DashboardState) -> Self {
         dashboard.set_running_sessions(self.running_sessions_map());
+        if dashboard.config_path.is_none() {
+            dashboard.config_path = self
+                .config_path
+                .clone()
+                .or_else(|| self.config.as_ref().and_then(|c| c.config_path.clone()));
+        } else if self.config_path.is_none() {
+            self.config_path = dashboard.config_path.clone();
+        }
         self.dashboard = Some(dashboard);
         self
     }
@@ -218,8 +228,54 @@ impl TuiApp {
 
     /// Sets the configuration on `TuiApp`.
     pub fn with_config(mut self, config: Config) -> Self {
+        self.config_path = config.config_path.clone().or(self.config_path);
         self.config = Some(config);
         self
+    }
+
+    /// Sets the configuration file path used for reloading.
+    pub fn with_config_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        let p = path.into();
+        if let Some(cfg) = &mut self.config {
+            cfg.config_path = Some(p.clone());
+        }
+        if let Some(dashboard) = &mut self.dashboard {
+            dashboard.config_path = Some(p.clone());
+            dashboard.config.config_path = Some(p.clone());
+        }
+        self.config_path = Some(p);
+        self
+    }
+
+    /// Reloads configuration from disk if a configuration file path is known and valid.
+    /// Updates `self.config` and the dashboard's configuration/templates if active.
+    pub fn reload_config(&mut self) -> Result<bool, ConfigError> {
+        let path_opt = self
+            .config_path
+            .clone()
+            .or_else(|| self.config.as_ref().and_then(|c| c.config_path.clone()))
+            .or_else(|| self.dashboard.as_ref().and_then(|d| d.config_path.clone()));
+
+        if let Some(path) = path_opt {
+            if path.exists() {
+                let new_config = Config::load_from_file(&path)?;
+                if let Some(dashboard) = &mut self.dashboard {
+                    dashboard.config = new_config.clone();
+                    let mut templates: Vec<String> = new_config.templates.keys().cloned().collect();
+                    templates.sort();
+                    dashboard.templates = templates;
+                    if dashboard.config_path.is_none() {
+                        dashboard.config_path = Some(path.clone());
+                    }
+                }
+                self.config = Some(new_config);
+                if self.config_path.is_none() {
+                    self.config_path = Some(path);
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Sets the working directory on `TuiApp`.
@@ -598,8 +654,10 @@ impl TuiApp {
         }
     }
 
-    /// Opens the in-session project creation modal.
+    /// Opens the in-session project creation modal, reloading potentially updated configuration first.
     pub fn open_creation_modal(&mut self) {
+        let _ = self.reload_config();
+
         let cwd = self
             .cwd
             .clone()
@@ -618,6 +676,7 @@ impl TuiApp {
                         repos: HashMap::new(),
                         agents: HashMap::new(),
                         templates: HashMap::new(),
+                        config_path: None,
                     });
             ProjectCreationModal::new(&fallback_cfg, &cwd, None)
         };
@@ -663,6 +722,12 @@ impl TuiApp {
     pub fn handle_dashboard_key(&mut self, key: crossterm::event::KeyEvent) {
         if let Some(mut dashboard) = self.dashboard.take() {
             let action = dashboard.handle_key(key);
+            if self.config.as_ref() != Some(&dashboard.config) {
+                self.config = Some(dashboard.config.clone());
+                if self.config_path.is_none() && dashboard.config_path.is_some() {
+                    self.config_path = dashboard.config_path.clone();
+                }
+            }
             self.dashboard = Some(dashboard);
             self.handle_dashboard_action(action);
         }
@@ -672,6 +737,12 @@ impl TuiApp {
     pub fn handle_dashboard_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         if let Some(mut dashboard) = self.dashboard.take() {
             let action = dashboard.handle_mouse(mouse);
+            if self.config.as_ref() != Some(&dashboard.config) {
+                self.config = Some(dashboard.config.clone());
+                if self.config_path.is_none() && dashboard.config_path.is_some() {
+                    self.config_path = dashboard.config_path.clone();
+                }
+            }
             self.dashboard = Some(dashboard);
             self.handle_dashboard_action(action);
         }
@@ -834,6 +905,7 @@ impl TuiApp {
         agent_override: Option<&str>,
         prompt: Option<&str>,
     ) {
+        let _ = self.reload_config();
         let (tx, rx) = std::sync::mpsc::channel();
         let modal = SetupModalState::new(project_name, template_name, prompt.map(String::from), rx);
         self.setup_modal = Some(modal);
@@ -948,6 +1020,7 @@ impl TuiApp {
         project_name: &str,
         prompt: Option<&str>,
     ) -> anyhow::Result<()> {
+        let _ = self.reload_config();
         let config = self.config.clone().unwrap_or_else(|| {
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
                 .unwrap_or_else(|_| Config {
@@ -957,6 +1030,7 @@ impl TuiApp {
                     repos: HashMap::new(),
                     agents: HashMap::new(),
                     templates: HashMap::new(),
+                    config_path: None,
                 })
         });
         let cwd = self
@@ -993,13 +1067,14 @@ impl TuiApp {
 
     /// Refreshes the local projects and templates list within the dashboard.
     pub fn refresh_dashboard(&mut self) {
+        let _ = self.reload_config();
         let cwd = self
             .cwd
             .clone()
             .or_else(|| env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let running = self.running_sessions_map();
-        let new_dashboard = if let Some(cfg) = &self.config {
+        let mut new_dashboard = if let Some(cfg) = &self.config {
             DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
         } else {
             let default_cfg =
@@ -1011,9 +1086,13 @@ impl TuiApp {
                         repos: HashMap::new(),
                         agents: HashMap::new(),
                         templates: HashMap::new(),
+                        config_path: None,
                     });
             DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
         };
+        if let Some(ref path) = self.config_path {
+            new_dashboard = new_dashboard.with_config_path(path.clone());
+        }
         self.dashboard = Some(new_dashboard);
     }
 
@@ -3538,5 +3617,94 @@ repos = []
 
         // Restore original hook
         std::panic::set_hook(prev);
+    }
+
+    #[test]
+    fn test_tui_app_in_session_open_creation_modal_reloads_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_file = dir.path().join("config.toml");
+        let toml_v1 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.t1]
+repos = []
+"#;
+        std::fs::write(&config_file, toml_v1).unwrap();
+
+        let config = Config::load_from_file(&config_file).unwrap();
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_config(config)
+            .with_cwd(dir.path().to_path_buf());
+
+        // Update config on disk while app is running
+        let toml_v2 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.t1]
+repos = []
+
+[templates.t2]
+repos = []
+"#;
+        std::fs::write(&config_file, toml_v2).unwrap();
+
+        // In-session open_creation_modal should reload config and include t2
+        app.open_creation_modal();
+        let modal = app
+            .creation_modal
+            .as_ref()
+            .expect("creation modal must be open");
+        assert_eq!(modal.templates, vec!["t1".to_string(), "t2".to_string()]);
+    }
+
+    #[test]
+    fn test_tui_app_handle_dashboard_key_syncs_reloaded_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_file = dir.path().join("config.toml");
+        let toml_v1 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.initial_template]
+repos = []
+"#;
+        std::fs::write(&config_file, toml_v1).unwrap();
+
+        let config = Config::load_from_file(&config_file).unwrap();
+        let dashboard = DashboardState::from_env(&config, dir.path());
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_dashboard(dashboard)
+            .with_config(config)
+            .with_cwd(dir.path().to_path_buf());
+
+        // Add a new template to config file
+        let toml_v2 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.initial_template]
+repos = []
+
+[templates.added_template]
+repos = []
+"#;
+        std::fs::write(&config_file, toml_v2).unwrap();
+
+        // Simulate pressing 'n' on dashboard
+        app.handle_dashboard_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        // Both dashboard and app.config must have the new template
+        let dashboard = app.dashboard.as_ref().expect("dashboard must exist");
+        assert_eq!(
+            dashboard.templates,
+            vec!["added_template".to_string(), "initial_template".to_string()]
+        );
+        let app_cfg = app.config.as_ref().expect("app config must exist");
+        assert!(app_cfg.templates.contains_key("added_template"));
+        assert!(app_cfg.templates.contains_key("initial_template"));
     }
 }

@@ -201,6 +201,7 @@ pub fn run_setup_worker(
                 repos: HashMap::new(),
                 agents: HashMap::new(),
                 templates: HashMap::new(),
+                config_path: None,
             })
     });
 

@@ -415,7 +415,7 @@ fn default_theme() -> String {
 }
 
 /// Root configuration for botai.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Global fallback default agent name.
     pub default_agent: String,
@@ -433,7 +433,23 @@ pub struct Config {
     /// Defined project templates.
     #[serde(default, alias = "workspaces")]
     pub templates: HashMap<String, TemplateConfig>,
+    /// Optional filesystem path from which this configuration was loaded or should be reloaded.
+    #[serde(skip)]
+    pub config_path: Option<PathBuf>,
 }
+
+impl PartialEq for Config {
+    fn eq(&self, other: &Self) -> bool {
+        self.default_agent == other.default_agent
+            && self.theme == other.theme
+            && self.repos_dir == other.repos_dir
+            && self.repos == other.repos
+            && self.agents == other.agents
+            && self.templates == other.templates
+    }
+}
+
+impl Eq for Config {}
 
 impl Config {
     /// Backward compatibility accessor for `templates`.
@@ -479,8 +495,26 @@ impl Config {
 
     /// Loads configuration from a file path.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        let content = std::fs::read_to_string(path)?;
-        Self::load_from_str(&content)
+        let content = std::fs::read_to_string(&path)?;
+        let mut config = Self::load_from_str(&content)?;
+        config.config_path = Some(path.as_ref().to_path_buf());
+        Ok(config)
+    }
+
+    /// Sets or overrides the configuration file path.
+    pub fn with_config_path<P: AsRef<Path>>(mut self, path: P) -> Self {
+        self.config_path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Reloads configuration from disk if `config_path` is set.
+    /// If `config_path` is None, returns a clone of `self`.
+    pub fn reload(&self) -> Result<Self, ConfigError> {
+        if let Some(ref path) = self.config_path {
+            Self::load_from_file(path)
+        } else {
+            Ok(self.clone())
+        }
     }
 
     /// Resolves the default configuration file path based on platform standards:
@@ -1864,5 +1898,79 @@ repos = [
         assert_eq!(r5.clone_url, None);
         assert_eq!(r5.local_path, PathBuf::from("/absolute/unregistered"));
         assert!(r5.setup_hooks.is_empty());
+    }
+
+    #[test]
+    fn test_config_reload_updates_templates_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_file = dir.path().join("config.toml");
+
+        let initial_toml = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.tpl_one]
+repos = ["repo1"]
+"#;
+        std::fs::write(&config_file, initial_toml).unwrap();
+
+        let config = Config::load_from_file(&config_file).unwrap();
+        assert_eq!(config.config_path, Some(config_file.clone()));
+        assert_eq!(config.templates.len(), 1);
+        assert!(config.templates.contains_key("tpl_one"));
+
+        let updated_toml = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.tpl_one]
+repos = ["repo1"]
+
+[templates.tpl_two]
+repos = ["repo2"]
+"#;
+        std::fs::write(&config_file, updated_toml).unwrap();
+
+        let reloaded = config.reload().expect("reload should succeed");
+        assert_eq!(reloaded.config_path, Some(config_file));
+        assert_eq!(reloaded.templates.len(), 2);
+        assert!(reloaded.templates.contains_key("tpl_one"));
+        assert!(reloaded.templates.contains_key("tpl_two"));
+    }
+
+    #[test]
+    fn test_config_reload_without_path_is_noop() {
+        let toml = "default_agent = \"claude\"\nrepos_dir = \"/tmp\"\n";
+        let config = Config::load_from_str(toml).unwrap();
+        assert_eq!(config.config_path, None);
+        let reloaded = config.reload().expect("reload without path is Ok");
+        assert_eq!(reloaded, config);
+    }
+
+    #[test]
+    fn test_config_reload_invalid_syntax_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_file = dir.path().join("config.toml");
+        std::fs::write(
+            &config_file,
+            "default_agent = \"claude\"\nrepos_dir = \"/tmp\"\n",
+        )
+        .unwrap();
+
+        let config = Config::load_from_file(&config_file).unwrap();
+        std::fs::write(&config_file, "invalid_toml = [unclosed").unwrap();
+
+        let err = config.reload().expect_err("should return syntax error");
+        assert!(matches!(err, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn test_config_equality_ignores_config_path() {
+        let toml = "default_agent = \"claude\"\nrepos_dir = \"/tmp\"\n";
+        let cfg1 = Config::load_from_str(toml).unwrap();
+        let cfg2 = Config::load_from_str(toml)
+            .unwrap()
+            .with_config_path(PathBuf::from("/some/path.toml"));
+        assert_eq!(cfg1, cfg2);
     }
 }
