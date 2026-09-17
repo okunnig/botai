@@ -251,8 +251,7 @@ impl PtySession {
     /// Spawns a new process in a pseudo-terminal according to the provided `PtyConfig`.
     pub fn spawn(config: PtyConfig) -> Result<Self, SessionError> {
         let canonical_working_dir = if is_path_absolute(&config.working_dir) {
-            dunce::canonicalize(&config.working_dir)
-                .unwrap_or_else(|_| config.working_dir.clone())
+            dunce::canonicalize(&config.working_dir).unwrap_or_else(|_| config.working_dir.clone())
         } else {
             let abs_dir = std::env::current_dir()
                 .map(|c| c.join(&config.working_dir))
@@ -637,7 +636,7 @@ mod tests {
 
         // Wait a brief moment for child to execute and output
         thread::sleep(Duration::from_millis(150));
-        
+
         let mut output = String::new();
         for _ in 0..10 {
             if let Ok(bytes) = session.read_nonblocking() {
@@ -694,7 +693,7 @@ mod tests {
         let mut session = PtySession::spawn(config).expect("Failed to spawn PTY session");
 
         thread::sleep(Duration::from_millis(150));
-        
+
         let mut output = String::new();
         for _ in 0..10 {
             if let Ok(bytes) = session.read_nonblocking() {

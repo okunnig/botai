@@ -2316,5 +2316,4 @@ mod tests {
             "rollback must remove the project directory"
         );
     }
-
 }

@@ -371,8 +371,8 @@ impl GitWorktreeManager {
 
         // 3. Fallback: check if worktree_path itself is a git repository
         if ensure_git_repo(worktree_path).is_ok() {
-            let canon = dunce::canonicalize(worktree_path)
-                .unwrap_or_else(|_| worktree_path.to_path_buf());
+            let canon =
+                dunce::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
             return Ok(canon);
         }
 

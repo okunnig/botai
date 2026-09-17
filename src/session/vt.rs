@@ -5,9 +5,9 @@ use vt100::Parser;
 /// The cursor reports claim the home position: ConPTY only needs *an* answer to unblock, and
 /// the child's own cursor is not tracked here.
 const DSR_QUERIES: [(&[u8], &[u8]); 3] = [
-    (b"\x1b[6n", b"\x1b[1;1R"),      // CPR
-    (b"\x1b[?6n", b"\x1b[?1;1;1R"),  // DECXCPR
-    (b"\x1b[5n", b"\x1b[0n"),        // status: no malfunction
+    (b"\x1b[6n", b"\x1b[1;1R"),     // CPR
+    (b"\x1b[?6n", b"\x1b[?1;1;1R"), // DECXCPR
+    (b"\x1b[5n", b"\x1b[0n"),       // status: no malfunction
 ];
 
 /// Answers Device Status Report queries from a child process.
