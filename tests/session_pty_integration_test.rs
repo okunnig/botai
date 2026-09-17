@@ -9,7 +9,7 @@ use tempfile::tempdir;
 #[test]
 fn test_pty_config_and_session_state_creation() {
     let tmp = tempdir().expect("Failed to create tempdir");
-    let working_dir = tmp.path().to_path_buf();
+    let working_dir = dunce::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
 
     let mut env = HashMap::new();
     env.insert("BOTAI_TEST_VAR".to_string(), "active".to_string());
@@ -188,7 +188,7 @@ fn test_integration_pty_spawn_invalid_command() {
 #[test]
 fn test_cross_platform_command_builder_helper() {
     let tmp = tempdir().expect("Failed to create tempdir");
-    let base_dir = tmp.path().to_path_buf();
+    let base_dir = dunce::canonicalize(tmp.path()).unwrap_or_else(|_| tmp.path().to_path_buf());
 
     #[cfg(windows)]
     let config = PtyConfig::new("cmd.exe", &base_dir)
