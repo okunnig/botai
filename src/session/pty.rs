@@ -1,4 +1,4 @@
-use super::SessionError;
+use super::{DsrResponder, SessionError};
 use portable_pty::{
     native_pty_system, Child, CommandBuilder, MasterPty, PtySize as PortablePtySize,
 };
@@ -244,6 +244,7 @@ pub struct PtySession {
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     rx: Receiver<Vec<u8>>,
     cached_exit_status: Arc<Mutex<Option<ExitStatus>>>,
+    dsr: DsrResponder,
 }
 
 impl PtySession {
@@ -333,6 +334,7 @@ impl PtySession {
             child: Arc::new(Mutex::new(child)),
             rx,
             cached_exit_status: Arc::new(Mutex::new(None)),
+            dsr: DsrResponder::new(),
         })
     }
 
@@ -344,10 +346,17 @@ impl PtySession {
     }
 
     /// Reads available non-blocking output bytes from the PTY master.
+    ///
+    /// Answers any Device Status Report query in the chunk: ConPTY writes `ESC[6n` on startup
+    /// and blocks until it is replied to, so an unanswered session never produces output.
     pub fn read_nonblocking(&mut self) -> Result<Vec<u8>, SessionError> {
         let mut data = Vec::new();
         while let Ok(chunk) = self.rx.try_recv() {
             data.extend_from_slice(&chunk);
+        }
+        let reply = self.dsr.responses(&data);
+        if !reply.is_empty() {
+            let _ = self.write_all(&reply);
         }
         Ok(data)
     }
@@ -628,19 +637,11 @@ mod tests {
 
         // Wait a brief moment for child to execute and output
         thread::sleep(Duration::from_millis(150));
-
-        // ConPTY writes ESC[6n on startup and blocks until it is answered, so a reader that
-        // never replies sees nothing at all. `TuiApp` answers via `DsrResponder`; a test
-        // driving `PtySession` directly has to do the same.
-        let mut dsr = crate::session::DsrResponder::new();
+        
         let mut output = String::new();
         for _ in 0..10 {
             if let Ok(bytes) = session.read_nonblocking() {
                 if !bytes.is_empty() {
-                    let reply = dsr.responses(&bytes, (0, 0));
-                    if !reply.is_empty() {
-                        let _ = session.write_all(&reply);
-                    }
                     output.push_str(&String::from_utf8_lossy(&bytes));
                 }
             }
@@ -693,18 +694,11 @@ mod tests {
         let mut session = PtySession::spawn(config).expect("Failed to spawn PTY session");
 
         thread::sleep(Duration::from_millis(150));
-
-        // See the note in test_pty_session_spawn_and_read_output: ConPTY blocks until its
-        // ESC[6n is answered.
-        let mut dsr = crate::session::DsrResponder::new();
+        
         let mut output = String::new();
         for _ in 0..10 {
             if let Ok(bytes) = session.read_nonblocking() {
                 if !bytes.is_empty() {
-                    let reply = dsr.responses(&bytes, (0, 0));
-                    if !reply.is_empty() {
-                        let _ = session.write_all(&reply);
-                    }
                     output.push_str(&String::from_utf8_lossy(&bytes));
                 }
             }

@@ -1,20 +1,22 @@
 use vt100::Parser;
 
-/// Longest Device Status Report query this module recognises (`ESC [ ? 6 n`).
-const MAX_DSR_QUERY_LEN: usize = 5;
+/// Device Status Report queries and their replies.
+///
+/// The cursor reports claim the home position: ConPTY only needs *an* answer to unblock, and
+/// the child's own cursor is not tracked here.
+const DSR_QUERIES: [(&[u8], &[u8]); 3] = [
+    (b"\x1b[6n", b"\x1b[1;1R"),      // CPR
+    (b"\x1b[?6n", b"\x1b[?1;1;1R"),  // DECXCPR
+    (b"\x1b[5n", b"\x1b[0n"),        // status: no malfunction
+];
 
-/// Builds replies to Device Status Report queries a child process writes to its terminal.
+/// Answers Device Status Report queries from a child process.
 ///
-/// This is not optional on Windows. ConPTY emits `ESC[6n` as soon as a session starts and
-/// **blocks until it is answered** — measured here, a child produced its first byte of real
-/// output 101 ms after the reply and nothing at all (4 bytes, just the query) after 8 s
-/// without one. Every PTY session hung at startup until botai learned to answer.
-///
-/// A query can be split across two reads, so the trailing bytes of each chunk are carried
-/// over into the next scan.
+/// ConPTY writes `ESC[6n` on startup and blocks until it is answered, so an unanswered
+/// session never produces output at all.
 #[derive(Debug, Default)]
 pub struct DsrResponder {
-    /// Tail of the previous chunk that could be the start of a split query.
+    /// Trailing bytes of the last chunk that may be a query split across reads.
     pending: Vec<u8>,
 }
 
@@ -23,17 +25,19 @@ impl DsrResponder {
         Self::default()
     }
 
-    /// Scans one chunk of child output and returns the bytes to write back to the PTY.
-    ///
-    /// `cursor` is `(col, row)`, 0-indexed, as returned by [`VtScreen::cursor_position`];
-    /// terminal reports are 1-based, so both are incremented.
-    pub fn responses(&mut self, bytes: &[u8], cursor: (u16, u16)) -> Vec<u8> {
-        let mut scan = std::mem::take(&mut self.pending);
-        scan.extend_from_slice(bytes);
+    /// Returns the bytes to write back for any query in `bytes`.
+    pub fn responses(&mut self, bytes: &[u8]) -> Vec<u8> {
+        // Avoid copying the chunk in the overwhelmingly common case of no carried-over tail.
+        if self.pending.is_empty() {
+            self.scan(bytes)
+        } else {
+            let mut scan = std::mem::take(&mut self.pending);
+            scan.extend_from_slice(bytes);
+            self.scan(&scan)
+        }
+    }
 
-        let (col, row) = cursor;
-        let (row1, col1) = (row.saturating_add(1), col.saturating_add(1));
-
+    fn scan(&mut self, scan: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         let mut i = 0;
         while i < scan.len() {
@@ -42,36 +46,21 @@ impl DsrResponder {
                 continue;
             }
             let rest = &scan[i..];
-            if rest.starts_with(b"\x1b[6n") {
-                // CPR: cursor position report.
-                out.extend_from_slice(format!("\x1b[{row1};{col1}R").as_bytes());
-                i += 4;
-            } else if rest.starts_with(b"\x1b[?6n") {
-                // DECXCPR: extended cursor position report, with page number.
-                out.extend_from_slice(format!("\x1b[?{row1};{col1};1R").as_bytes());
-                i += 5;
-            } else if rest.starts_with(b"\x1b[5n") {
-                // DSR: report terminal status. 0 means "ready, no malfunction".
-                out.extend_from_slice(b"\x1b[0n");
-                i += 4;
-            } else if rest.len() < MAX_DSR_QUERY_LEN && Self::is_query_prefix(rest) {
-                // Truncated query at the end of the chunk: hold it for the next read
-                // rather than scanning past it. Only the unconsumed tail is carried,
-                // so a query already answered above is never replayed.
-                self.pending = rest.to_vec();
-                return out;
-            } else {
-                i += 1;
+            match DSR_QUERIES.iter().find(|(q, _)| rest.starts_with(q)) {
+                Some((query, reply)) => {
+                    out.extend_from_slice(reply);
+                    i += query.len();
+                }
+                // A truncated query at the very end is held for the next read. Only the
+                // unconsumed tail is carried, so an answered query is never replayed.
+                None if DSR_QUERIES.iter().any(|(q, _)| q.starts_with(rest)) => {
+                    self.pending = rest.to_vec();
+                    return out;
+                }
+                None => i += 1,
             }
         }
-
         out
-    }
-
-    /// Whether `bytes` could still grow into one of the queries above.
-    fn is_query_prefix(bytes: &[u8]) -> bool {
-        const QUERIES: [&[u8]; 3] = [b"\x1b[6n", b"\x1b[?6n", b"\x1b[5n"];
-        QUERIES.iter().any(|q| q.starts_with(bytes))
     }
 }
 
@@ -387,46 +376,35 @@ mod tests {
     }
 
     #[test]
-    fn test_dsr_responder_answers_cursor_position_request() {
+    fn test_dsr_responder_answers_each_known_query() {
         let mut dsr = DsrResponder::new();
-        // cursor_position() is (col, row) 0-indexed; the report is 1-based row;col.
-        assert_eq!(dsr.responses(b"\x1b[6n", (9, 4)), b"\x1b[5;10R".to_vec());
-
-        // The query ConPTY actually emits at startup, at the home position.
-        let mut dsr = DsrResponder::new();
-        assert_eq!(dsr.responses(b"\x1b[6n", (0, 0)), b"\x1b[1;1R".to_vec());
+        // The query ConPTY emits at startup, and the two other status requests.
+        assert_eq!(dsr.responses(b"\x1b[6n"), b"\x1b[1;1R".to_vec());
+        assert_eq!(dsr.responses(b"\x1b[?6n"), b"\x1b[?1;1;1R".to_vec());
+        assert_eq!(dsr.responses(b"\x1b[5n"), b"\x1b[0n".to_vec());
     }
 
     #[test]
-    fn test_dsr_responder_handles_other_queries_and_ignores_plain_output() {
+    fn test_dsr_responder_ignores_plain_output_and_other_escapes() {
+        // Writing stray bytes back would corrupt the child's input.
         let mut dsr = DsrResponder::new();
-        assert_eq!(dsr.responses(b"\x1b[5n", (0, 0)), b"\x1b[0n".to_vec());
-        assert_eq!(
-            dsr.responses(b"\x1b[?6n", (2, 1)),
-            b"\x1b[?2;3;1R".to_vec()
-        );
-
-        // Ordinary output, and escape sequences that are not status requests, must not
-        // produce a reply - writing stray bytes back would corrupt the child's input.
-        assert!(dsr.responses(b"hello world\r\n", (0, 0)).is_empty());
-        assert!(dsr.responses(b"\x1b[1;31mred\x1b[0m", (0, 0)).is_empty());
-        assert!(dsr.responses(b"\x1b[?1000h", (0, 0)).is_empty());
+        assert!(dsr.responses(b"hello world\r\n").is_empty());
+        assert!(dsr.responses(b"\x1b[1;31mred\x1b[0m").is_empty());
+        assert!(dsr.responses(b"\x1b[?1000h").is_empty());
     }
 
     #[test]
     fn test_dsr_responder_reassembles_query_split_across_reads() {
         let mut dsr = DsrResponder::new();
-        // A read can end mid-sequence; the tail has to carry over.
-        assert!(dsr.responses(b"some output\x1b[", (0, 0)).is_empty());
-        assert_eq!(dsr.responses(b"6n", (0, 0)), b"\x1b[1;1R".to_vec());
+        assert!(dsr.responses(b"some output\x1b[").is_empty());
+        assert_eq!(dsr.responses(b"6n"), b"\x1b[1;1R".to_vec());
     }
 
     #[test]
     fn test_dsr_responder_does_not_replay_an_answered_query() {
         let mut dsr = DsrResponder::new();
-        // A chunk ending exactly on a complete query must consume it, not carry it over -
-        // otherwise the next read would answer the same query a second time.
-        assert_eq!(dsr.responses(b"out\x1b[6n", (0, 0)), b"\x1b[1;1R".to_vec());
-        assert!(dsr.responses(b"more output", (0, 0)).is_empty());
+        // A chunk ending exactly on a complete query must consume it, not carry it over.
+        assert_eq!(dsr.responses(b"out\x1b[6n"), b"\x1b[1;1R".to_vec());
+        assert!(dsr.responses(b"more output").is_empty());
     }
 }

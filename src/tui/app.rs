@@ -67,48 +67,19 @@ pub struct TuiApp {
     pub pending_raw_input: Vec<u8>,
 }
 
-/// Records whether botai successfully pushed kitty progressive keyboard enhancement flags
-/// onto the host terminal's stack, so that exactly one matching pop is emitted.
+/// Whether botai pushed kitty keyboard flags, so exactly one matching pop is emitted.
 ///
-/// Process-global rather than a field on [`TerminalCleanupGuard`] because the panic hook
-/// installed by [`install_panic_hook`] is registered in `main` before any `TuiApp` exists and
-/// has no access to a guard instance. There is exactly one host terminal per process, so
-/// process scope matches the resource being tracked.
+/// Process-global because the panic hook is installed before any `TuiApp` exists and cannot
+/// reach a guard instance.
 static KEYBOARD_ENHANCEMENT_PUSHED: AtomicBool = AtomicBool::new(false);
 
-/// Decides whether botai should push kitty progressive keyboard enhancement flags, given what
-/// [`supports_keyboard_enhancement`] reported.
+/// Pushes kitty keyboard flags if the terminal supports the protocol.
 ///
-/// On Windows crossterm returns `Ok(false)` unconditionally, and both
-/// `PushKeyboardEnhancementFlags` and `PopKeyboardEnhancementFlags` fail with
-/// `io::ErrorKind::Unsupported` in *every* terminal, so the flags must never be sent there. A
-/// unix terminal without the protocol reports `Ok(false)` and degrades the same way. An `Err`
-/// (probe failed, or timed out after crossterm's 2 s budget) is treated as unsupported:
-/// pushing flags botai may be unable to pop is worse than not pushing them.
-fn should_push_keyboard_enhancement(support: io::Result<bool>) -> bool {
-    matches!(support, Ok(true))
-}
-
-/// Returns whether a `PopKeyboardEnhancementFlags` is still owed, clearing the marker.
-///
-/// Consuming rather than merely reading keeps push and pop symmetric: `TuiApp::run` teardown,
-/// `TerminalCleanupGuard::drop` and the panic hook can all run during the same process exit,
-/// and only the first of them may pop. Popping a level botai never pushed would corrupt the
-/// flag stack of a parent kitty-protocol application.
-fn take_pending_keyboard_enhancement_pop(state: &AtomicBool) -> bool {
-    state.swap(false, Ordering::SeqCst)
-}
-
-/// Pushes kitty keyboard enhancement flags if the host terminal supports the protocol.
-///
-/// Best effort: never returns an error, because an unsupported terminal (always, on Windows)
-/// must not stop botai from starting.
-///
-/// Must be called before `run_loop` spawns the background stdin reader. On unix the support
-/// query writes `ESC[?u ESC[c` and polls `STDIN_FILENO` for up to two seconds — the very
-/// descriptor that reader thread consumes — so probing later would race it.
+/// Best effort: on Windows the push always fails, and that must not stop botai starting.
+/// Must run before `run_loop` spawns the stdin reader — on unix the support query polls
+/// `STDIN_FILENO`, the same descriptor that thread consumes.
 fn push_keyboard_enhancement<W: std::io::Write>(writer: &mut W) {
-    if !should_push_keyboard_enhancement(supports_keyboard_enhancement()) {
+    if !matches!(supports_keyboard_enhancement(), Ok(true)) {
         return;
     }
     if execute!(
@@ -121,56 +92,32 @@ fn push_keyboard_enhancement<W: std::io::Write>(writer: &mut W) {
     }
 }
 
-/// Pops kitty keyboard enhancement flags, but only if botai pushed them.
+/// Pops the flags, once, and only if botai pushed them.
 ///
-/// Deliberately does not re-query the terminal: by teardown time the background stdin reader
-/// thread owns stdin, and a second probe would race with it.
-///
-/// Kept in its own `execute!` by every caller. `execute!` is a left-folded `and_then` chain, so
-/// the first failing command short-circuits every later one — batching a pop that always fails
-/// on Windows ahead of `DisableMouseCapture` / `LeaveAlternateScreen` would strand the user in
-/// the alternate screen with mouse capture still on.
+/// Consuming the flag keeps push and pop symmetric across the three teardown paths; popping a
+/// level botai never pushed would corrupt a parent kitty-protocol application's stack.
 fn pop_keyboard_enhancement<W: std::io::Write>(writer: &mut W) {
-    if take_pending_keyboard_enhancement_pop(&KEYBOARD_ENHANCEMENT_PUSHED) {
+    if KEYBOARD_ENHANCEMENT_PUSHED.swap(false, Ordering::SeqCst) {
         let _ = execute!(writer, PopKeyboardEnhancementFlags);
     }
 }
 
-/// `ENABLE_VIRTUAL_TERMINAL_INPUT`, from the Windows console API.
-///
-/// Not re-exported by `crossterm_winapi`, and `winapi`/`windows-sys` are not direct
-/// dependencies, so the value is spelled out here.
+/// Windows console flag; not re-exported by `crossterm_winapi`.
 #[cfg(windows)]
 const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
 
-/// Records whether botai turned on `ENABLE_VIRTUAL_TERMINAL_INPUT` itself, so teardown clears
-/// the bit only when it was not already set by the host terminal.
+/// Whether botai set the bit itself, so teardown only clears what it set.
 #[cfg(windows)]
 static VIRTUAL_TERMINAL_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Decides whether the `ENABLE_VIRTUAL_TERMINAL_INPUT` bit still needs setting.
-///
-/// Split out from the console call so the bit arithmetic is testable on every platform.
-#[cfg(windows)]
-fn needs_virtual_terminal_input(mode: u32) -> bool {
-    mode & ENABLE_VIRTUAL_TERMINAL_INPUT == 0
-}
-
-/// Turns on `ENABLE_VIRTUAL_TERMINAL_INPUT` so the console delivers key presses as VT escape
-/// sequences on stdin.
+/// Makes the console deliver key presses as VT escape sequences on stdin.
 ///
 /// botai reads raw stdin bytes rather than `crossterm::event::read`, and crossterm never sets
-/// this flag — on Windows it reads structured `InputRecord`s through the console API instead.
-/// Without the flag, keys that carry no character (arrows, Home/End, Delete, PageUp/PageDown,
-/// the function keys) produce no bytes at all, so `parse_raw_events` never sees them and TUI
-/// navigation is dead. Printable characters and Ctrl+letter arrive either way, which is why
-/// typing works today but the arrow keys do not.
+/// this flag — on Windows it reads `InputRecord`s through the console API instead. Without it,
+/// keys carrying no character (arrows, Home/End, Delete, PageUp/PageDown) produce no bytes at
+/// all and `parse_raw_events` never sees them.
 ///
-/// Must be called *after* `EnableMouseCapture`: crossterm's Windows implementation does an
-/// absolute `set_mode(ENABLE_MOUSE_MODE)` rather than a read-modify-write, so enabling this
-/// first would be silently wiped.
-///
-/// Best effort — a failure here costs arrow keys, not startup.
+/// Must run *after* `EnableMouseCapture`, whose Windows path overwrites the whole console mode.
 #[cfg(windows)]
 fn enable_virtual_terminal_input() {
     use crossterm_winapi::{ConsoleMode, Handle};
@@ -182,8 +129,7 @@ fn enable_virtual_terminal_input() {
     let Ok(mode) = console_mode.mode() else {
         return;
     };
-    if !needs_virtual_terminal_input(mode) {
-        // Already on: leave it alone so teardown does not clear something botai did not set.
+    if mode & ENABLE_VIRTUAL_TERMINAL_INPUT != 0 {
         return;
     }
     if console_mode
@@ -194,11 +140,10 @@ fn enable_virtual_terminal_input() {
     }
 }
 
-/// Clears `ENABLE_VIRTUAL_TERMINAL_INPUT` again, but only if botai set it.
+/// Clears the bit, but only if botai set it.
 ///
-/// Clears just that one bit instead of restoring a saved mode, so it cannot fight with
-/// `enable_raw_mode`/`disable_raw_mode` or `DisableMouseCapture`, which each own other bits of
-/// the same value.
+/// Clears just that bit rather than restoring a saved mode, so it cannot fight with raw mode
+/// or `DisableMouseCapture`, which own other bits of the same value.
 #[cfg(windows)]
 fn disable_virtual_terminal_input() {
     use crossterm_winapi::{ConsoleMode, Handle};
@@ -244,13 +189,11 @@ impl TerminalCleanupGuard {
 
 impl Drop for TerminalCleanupGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
         let mut out = io::stdout();
         if self.in_tmux {
             let _ = Self::emit_tmux_modify_other_keys(&mut out, false);
         }
-        // Pop first so the flag stack unwinds LIFO, but in its own `execute!` so a failure
-        // cannot short-circuit the restores below.
+        // Own `execute!`, so a failing pop cannot short-circuit the restores below.
         pop_keyboard_enhancement(&mut out);
         disable_virtual_terminal_input();
         let _ = execute!(
@@ -259,6 +202,9 @@ impl Drop for TerminalCleanupGuard {
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );
+        // Last: crossterm's Windows DisableMouseCapture restores the console mode saved
+        // during EnableMouseCapture, which was captured after raw mode was enabled.
+        let _ = disable_raw_mode();
     }
 }
 
@@ -270,13 +216,10 @@ pub fn install_panic_hook() {
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let in_tmux = std::env::var_os("TMUX").is_some();
-        let _ = crossterm::terminal::disable_raw_mode();
         let mut stdout = std::io::stdout();
         if in_tmux {
             let _ = TerminalCleanupGuard::emit_tmux_modify_other_keys(&mut stdout, false);
         }
-        // Separate, and only if botai actually pushed: `execute!` short-circuits on the first
-        // failing command, and on Windows the pop always fails.
         pop_keyboard_enhancement(&mut stdout);
         disable_virtual_terminal_input();
         let _ = crossterm::execute!(
@@ -285,6 +228,8 @@ pub fn install_panic_hook() {
             crossterm::terminal::LeaveAlternateScreen,
             crossterm::cursor::Show
         );
+        // Last: see TerminalCleanupGuard::drop.
+        let _ = crossterm::terminal::disable_raw_mode();
         previous_hook(panic_info);
     }));
 }
@@ -447,18 +392,8 @@ impl TuiApp {
             let _ =
                 TerminalCleanupGuard::emit_tmux_modify_other_keys(terminal.backend_mut(), false);
         }
-        // Teardown is best effort and `_guard` repeats it on drop; propagating an error here
-        // would discard the event loop's real result.
-        let _ = disable_raw_mode();
-        pop_keyboard_enhancement(terminal.backend_mut());
-        disable_virtual_terminal_input();
-        let _ = execute!(
-            terminal.backend_mut(),
-            DisableMouseCapture,
-            LeaveAlternateScreen,
-            crossterm::cursor::Show
-        );
-        let _ = terminal.show_cursor();
+        // Teardown itself is left to `_guard`, which runs on drop immediately after
+        // `terminal` and does the same sequence.
 
         res
     }
@@ -726,17 +661,6 @@ impl TuiApp {
             if let Ok(bytes) = session.pty_mut().read_nonblocking() {
                 if !bytes.is_empty() {
                     session.vt_mut().process(&bytes);
-
-                    // Answer Device Status Report queries after feeding the parser, so the
-                    // reported cursor position reflects this chunk. ConPTY sends ESC[6n at
-                    // startup and blocks until it is answered, which froze every session on
-                    // Windows before the child produced a single byte.
-                    let cursor = session.vt.cursor_position();
-                    let reply = session.dsr.responses(&bytes, cursor);
-                    if !reply.is_empty() {
-                        let _ = session.pty.write_all(&reply);
-                    }
-
                     let notifs = session.tracker.process_bytes(&bytes);
                     session.project_session.set_status(session.tracker.status());
 
@@ -3729,90 +3653,5 @@ repos = []
 
         // Restore original hook
         std::panic::set_hook(prev);
-    }
-
-    #[test]
-    fn test_should_push_keyboard_enhancement_only_when_terminal_reports_support() {
-        // A terminal that answers the kitty query affirmatively: push (unix today).
-        assert!(should_push_keyboard_enhancement(Ok(true)));
-
-        // What crossterm returns unconditionally on Windows, and what a unix terminal without
-        // the protocol returns. Pushing here makes `PushKeyboardEnhancementFlags` fail with
-        // ErrorKind::Unsupported and, before this fix, aborted TUI startup entirely.
-        assert!(!should_push_keyboard_enhancement(Ok(false)));
-
-        // Probe failure or crossterm's 2 s query timeout: never push flags we might not be
-        // able to pop.
-        assert!(!should_push_keyboard_enhancement(Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Keyboard progressive enhancement not implemented for the legacy Windows API.",
-        ))));
-        assert!(!should_push_keyboard_enhancement(Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "The keyboard enhancement status could not be read within a normal duration",
-        ))));
-    }
-
-    #[test]
-    fn test_keyboard_enhancement_pop_is_owed_at_most_once_per_push() {
-        // Local state, not the process-global static: keeps this test independent of every
-        // other test in the binary under cargo's parallel runner.
-        let state = AtomicBool::new(false);
-
-        // Nothing pushed (the Windows case): no pop must ever be emitted, so the cleanup paths
-        // never issue the failing command at all.
-        assert!(!take_pending_keyboard_enhancement_pop(&state));
-
-        // One successful push owes exactly one pop.
-        state.store(true, Ordering::SeqCst);
-        assert!(take_pending_keyboard_enhancement_pop(&state));
-
-        // `TuiApp::run` teardown, the guard drop and the panic hook can all run during one
-        // exit; only the first may pop, or botai would unwind a level of a parent
-        // application's kitty flag stack.
-        assert!(!take_pending_keyboard_enhancement_pop(&state));
-    }
-
-    /// Windows-only: the constant and the helper are both `#[cfg(windows)]`, since unix
-    /// terminals already deliver key presses as escape sequences on stdin.
-    #[test]
-    #[cfg(windows)]
-    fn test_needs_virtual_terminal_input_only_when_bit_is_clear() {
-        // Raw mode leaves ENABLE_LINE_INPUT/ECHO/PROCESSED cleared, and crossterm's
-        // EnableMouseCapture then sets exactly ENABLE_MOUSE_INPUT | EXTENDED_FLAGS |
-        // WINDOW_INPUT (0x0098). That is the mode botai actually finds at startup, and it
-        // carries no VT input bit — which is why the arrow keys produce no stdin bytes.
-        assert!(needs_virtual_terminal_input(0x0098));
-        assert!(needs_virtual_terminal_input(0));
-
-        // A host terminal that already enabled it: leave the bit alone, so teardown does not
-        // clear something botai did not set.
-        assert!(!needs_virtual_terminal_input(ENABLE_VIRTUAL_TERMINAL_INPUT));
-        assert!(!needs_virtual_terminal_input(
-            0x0098 | ENABLE_VIRTUAL_TERMINAL_INPUT
-        ));
-
-        // Setting the bit must preserve every other flag, and clearing it must restore the
-        // exact original value.
-        let enabled = 0x0098 | ENABLE_VIRTUAL_TERMINAL_INPUT;
-        assert_eq!(enabled, 0x0298);
-        assert_eq!(enabled & !ENABLE_VIRTUAL_TERMINAL_INPUT, 0x0098);
-    }
-
-    /// Pins the root cause so a crossterm upgrade cannot silently change it.
-    ///
-    /// Windows-only on purpose: on unix `supports_keyboard_enhancement()` writes `ESC[?u
-    /// ESC[c` to the tty and blocks reading `STDIN_FILENO` for up to two seconds, which would
-    /// be both slow and flaky in CI. On Windows the function is a pure `Ok(false)` with no I/O.
-    #[test]
-    #[cfg(windows)]
-    fn test_windows_never_pushes_keyboard_enhancement_flags() {
-        assert!(
-            matches!(supports_keyboard_enhancement(), Ok(false)),
-            "crossterm is expected to report no keyboard enhancement support on Windows"
-        );
-        assert!(!should_push_keyboard_enhancement(
-            supports_keyboard_enhancement()
-        ));
     }
 }

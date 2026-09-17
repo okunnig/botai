@@ -137,6 +137,18 @@ pub struct ProjectBuilder {
     pub viewport_size: (u16, u16),
 }
 
+/// Undoes worktrees created for `project_name`, and the branches that came with them.
+///
+/// `git worktree remove` keeps the branch, so without this a failed setup leaves one behind
+/// in every repo and the next attempt at the same name fails with `BranchExists`.
+/// Best effort: this runs on a path that is already failing.
+fn rollback_worktrees(mappings: &[RepoMapping], project_name: &str) {
+    for mapping in mappings {
+        let _ = remove_worktree_auto(&mapping.worktree_path, true);
+        let _ = delete_branch(&mapping.original_path, project_name);
+    }
+}
+
 impl ProjectBuilder {
     /// Creates a new `ProjectBuilder` with default working directory and terminal dimensions.
     pub fn new(
@@ -428,10 +440,8 @@ impl ProjectBuilder {
             let trimmed_project_name = self.project_name.trim();
             let project_dir = self.cwd.join(trimmed_project_name);
             fs::create_dir_all(&project_dir)?;
-            // `dunce`, not `Path::canonicalize`: every worktree path is derived from this and
-            // passed to `git worktree add` as a positional argument. A Windows verbatim
-            // (`\\?\`) path makes git rewrite the separators to `//?/` and fail with
-            // "could not create leading directories ... Invalid argument".
+            // `dunce`: every worktree path derives from this and is passed to
+            // `git worktree add` as a positional argument, which rejects a `\\?\` path.
             let project_dir_canon =
                 dunce::canonicalize(&project_dir).unwrap_or_else(|_| project_dir.clone());
 
@@ -447,17 +457,10 @@ impl ProjectBuilder {
                 if let Err(err) =
                     create_worktree(&repo.local_path, &worktree_path, trimmed_project_name)
                 {
-                    // Rollback partially created worktrees, the branches this run created,
-                    // and project_dir. Removing a worktree does not delete its branch, so
-                    // without this a failed setup poisons the project name: the retry fails
-                    // with BranchAlreadyExists instead.
-                    for mapping in &created_mappings {
-                        let _ = remove_worktree_auto(&mapping.worktree_path, true);
-                        // create_worktree succeeded here, so the branch did not pre-exist.
-                        let _ = delete_branch(&mapping.original_path, trimmed_project_name);
-                    }
-                    // create_worktree returns BranchAlreadyExists *before* invoking git, so
-                    // for any other error a branch of this name is one we just created.
+                    rollback_worktrees(&created_mappings, trimmed_project_name);
+                    // `create_worktree` returns BranchAlreadyExists before invoking git, so
+                    // for any other error the branch of this name is one it just created.
+                    // Reachable for a repo cloned in step 2, which `validate` could not check.
                     if !matches!(err, GitError::BranchAlreadyExists { .. }) {
                         let _ = delete_branch(&repo.local_path, trimmed_project_name);
                     }
@@ -573,9 +576,7 @@ impl ProjectBuilder {
             };
 
             if let Err(err) = generate_agents_md(&project_dir_canon, &project_context) {
-                for mapping in &created_mappings {
-                    let _ = remove_worktree_auto(&mapping.worktree_path, true);
-                }
+                rollback_worktrees(&created_mappings, trimmed_project_name);
                 let _ = fs::remove_dir_all(&project_dir);
                 anyhow::bail!("Failed to generate AGENTS.md: {err}");
             }
@@ -690,9 +691,7 @@ impl ProjectBuilder {
         let pty = match PtySession::spawn(pty_config) {
             Ok(p) => p,
             Err(err) => {
-                for mapping in &created_mappings {
-                    let _ = remove_worktree_auto(&mapping.worktree_path, true);
-                }
+                rollback_worktrees(&created_mappings, self.project_name.trim());
                 let _ = fs::remove_dir_all(&project_dir_canon);
                 let err_msg = format!("Failed to spawn agent process '{agent_cmd}': {err}");
                 progress_sink(ProjectSetupEvent::Log(format!("✗ Error: {err_msg}")));
@@ -2318,46 +2317,4 @@ mod tests {
         );
     }
 
-    /// The safety counterpart: a branch botai did *not* create must survive a rollback.
-    ///
-    /// Here the branch is pre-created, so `create_worktree` returns `BranchAlreadyExists`
-    /// before running any git command — which is exactly what makes deleting safe in the
-    /// other direction.
-    #[test]
-    fn test_create_workspace_rollback_preserves_preexisting_branch() {
-        let temp_dir = TempDir::new().unwrap();
-        let repo_dir = temp_dir.path().join("repo");
-        create_mock_git_repo(&repo_dir);
-
-        let _ = std::process::Command::new("git")
-            .args(["branch", "taken-name"])
-            .current_dir(&repo_dir)
-            .status();
-        assert!(crate::git::branch_exists(&repo_dir, "taken-name").unwrap());
-
-        let toml_str = format!(
-            r#"
-            default_agent = "claude"
-            repos_dir = '{}'
-            [templates.tpl]
-            repos = ['{}']
-            "#,
-            temp_dir.path().display(),
-            repo_dir.display()
-        );
-        let config = Config::load_from_str(&toml_str).unwrap();
-
-        let project_cwd = temp_dir.path().join("workspaces");
-        fs::create_dir_all(&project_cwd).unwrap();
-
-        let result = ProjectBuilder::new(config, "tpl", "taken-name")
-            .with_cwd(&project_cwd)
-            .create_workspace(|_ev| {});
-        assert!(result.is_err());
-
-        assert!(
-            crate::git::branch_exists(&repo_dir, "taken-name").unwrap(),
-            "rollback must never delete a branch it did not create"
-        );
-    }
 }

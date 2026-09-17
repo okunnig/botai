@@ -20,15 +20,10 @@ ratatui = "0.30"
 vt100 = "0.16"
 notify-rust = "4.11"
 tokio = { version = "1.38", features = ["full"] }
-# Canonicalization that does not hand back a `\\?\` verbatim path on Windows.
-# git cannot use those as positional path arguments: it rewrites the separators to
-# `//?/`, which the Win32 API then rejects. Falls back to the verbatim form only when
-# the path genuinely needs it (> MAX_PATH).
+# Canonicalize without a `\\?\` prefix: git rejects those as positional path arguments.
 dunce = "1.0"
 
-# Safe wrappers over the Windows console API. Already in the tree via crossterm;
-# declared directly so the TUI can turn on ENABLE_VIRTUAL_TERMINAL_INPUT without
-# `unsafe` (the crate is `#![forbid(unsafe_code)]`).
+# Safe console-mode wrappers; the crate is `#![forbid(unsafe_code)]`.
 [target.'cfg(windows)'.dependencies]
 crossterm_winapi = "0.9"
 

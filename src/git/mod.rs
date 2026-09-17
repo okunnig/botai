@@ -76,6 +76,9 @@ pub trait WorktreeManager {
     /// Checks if a branch exists in the repository.
     fn branch_exists(&self, repo_path: &Path, branch_name: &str) -> Result<bool, GitError>;
 
+    /// Force-deletes a branch from the repository.
+    fn delete_branch(&self, repo_path: &Path, branch_name: &str) -> Result<(), GitError>;
+
     /// Gets the currently checked out branch name of a repo or worktree.
     fn get_current_branch(&self, path: &Path) -> Result<String, GitError>;
 }
@@ -251,9 +254,7 @@ impl GitWorktreeManager {
                 .map(|cwd| cwd.join(worktree_path))
                 .unwrap_or_else(|_| worktree_path.to_path_buf())
         };
-        // `dunce`, not `Path::canonicalize`: this is a positional argument to git, and a
-        // Windows verbatim (`\\?\`) path makes it fail with "could not create leading
-        // directories ... Invalid argument".
+        // `dunce`: a positional git argument, which rejects a `\\?\` path.
         let wt_arg = dunce::canonicalize(&abs_worktree_path).unwrap_or(abs_worktree_path);
 
         let mut cmd = Command::new("git");
@@ -502,13 +503,9 @@ impl GitWorktreeManager {
 
     /// Force-deletes `branch_name` from `repo_path`.
     ///
-    /// Used to roll back branches that [`Self::create_worktree`] created earlier in a failed
-    /// project setup. Force (`-D`) rather than `-d` because a setup hook may already have
-    /// committed to the branch, and the caller has established the branch is its own.
-    ///
-    /// Deleting a branch is destructive, so callers must only pass a branch they created:
-    /// [`Self::create_worktree`] returns [`GitError::BranchAlreadyExists`] *before* running any
-    /// git command, so a later failure proves the branch did not exist beforehand.
+    /// Destructive, so callers must only pass a branch they created: `create_worktree`
+    /// returns `BranchAlreadyExists` before running git, so a later failure proves the branch
+    /// did not exist beforehand. `-D` because a setup hook may already have committed to it.
     pub fn delete_branch(repo_path: &Path, branch_name: &str) -> Result<(), GitError> {
         ensure_git_repo(repo_path)?;
         let output = Command::new("git")
@@ -583,6 +580,10 @@ impl WorktreeManager for GitWorktreeManager {
 
     fn branch_exists(&self, repo_path: &Path, branch_name: &str) -> Result<bool, GitError> {
         Self::branch_exists(repo_path, branch_name)
+    }
+
+    fn delete_branch(&self, repo_path: &Path, branch_name: &str) -> Result<(), GitError> {
+        Self::delete_branch(repo_path, branch_name)
     }
 
     fn get_current_branch(&self, path: &Path) -> Result<String, GitError> {
