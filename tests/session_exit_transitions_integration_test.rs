@@ -129,9 +129,10 @@ fn test_integration_session_exit_error_retention_and_banner_dismissal() {
 
     // Wait for command output and exit
     wait_for(&mut app, |a| {
-        a.registry
-            .active_session()
-            .is_some_and(|s| s.status() == SessionStatus::Error)
+        a.registry.active_session().is_some_and(|s| {
+            s.status() == SessionStatus::Error
+                && s.vt().contents().contains("Fatal Error: failed to compile")
+        })
     });
 
     // Session must remain in registry with status Error and exit code 1
