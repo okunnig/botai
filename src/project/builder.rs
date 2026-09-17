@@ -6,7 +6,8 @@ use thiserror::Error;
 use crate::config::{Config, ConfigError, ResolvedRepo};
 use crate::context::{generate_agents_md, ContextError, ProjectContext, RepoMapping};
 use crate::git::{
-    create_worktree, remove_worktree_auto, GitError, GitWorktreeManager, WorktreeManager,
+    create_worktree, delete_branch, remove_worktree_auto, GitError, GitWorktreeManager,
+    WorktreeManager,
 };
 use crate::session::{ProjectSession, PtyConfig, PtySession, SessionError, VtScreen};
 
@@ -134,6 +135,18 @@ pub struct ProjectBuilder {
     pub prompt: Option<String>,
     pub cwd: PathBuf,
     pub viewport_size: (u16, u16),
+}
+
+/// Undoes worktrees created for `project_name`, and the branches that came with them.
+///
+/// `git worktree remove` keeps the branch, so without this a failed setup leaves one behind
+/// in every repo and the next attempt at the same name fails with `BranchExists`.
+/// Best effort: this runs on a path that is already failing.
+fn rollback_worktrees(mappings: &[RepoMapping], project_name: &str) {
+    for mapping in mappings {
+        let _ = remove_worktree_auto(&mapping.worktree_path, true);
+        let _ = delete_branch(&mapping.original_path, project_name);
+    }
 }
 
 impl ProjectBuilder {
@@ -427,9 +440,10 @@ impl ProjectBuilder {
             let trimmed_project_name = self.project_name.trim();
             let project_dir = self.cwd.join(trimmed_project_name);
             fs::create_dir_all(&project_dir)?;
-            let project_dir_canon = project_dir
-                .canonicalize()
-                .unwrap_or_else(|_| project_dir.clone());
+            // `dunce`: every worktree path derives from this and is passed to
+            // `git worktree add` as a positional argument, which rejects a `\\?\` path.
+            let project_dir_canon =
+                dunce::canonicalize(&project_dir).unwrap_or_else(|_| project_dir.clone());
 
             let mut created_mappings: Vec<RepoMapping> = Vec::new();
             for repo in &resolved_repos {
@@ -443,9 +457,12 @@ impl ProjectBuilder {
                 if let Err(err) =
                     create_worktree(&repo.local_path, &worktree_path, trimmed_project_name)
                 {
-                    // Rollback partially created worktrees & project_dir
-                    for mapping in &created_mappings {
-                        let _ = remove_worktree_auto(&mapping.worktree_path, true);
+                    rollback_worktrees(&created_mappings, trimmed_project_name);
+                    // `create_worktree` returns BranchAlreadyExists before invoking git, so
+                    // for any other error the branch of this name is one it just created.
+                    // Reachable for a repo cloned in step 2, which `validate` could not check.
+                    if !matches!(err, GitError::BranchAlreadyExists { .. }) {
+                        let _ = delete_branch(&repo.local_path, trimmed_project_name);
                     }
                     let _ = fs::remove_dir_all(&project_dir);
                     anyhow::bail!("Failed to create worktree for '{}': {}", repo.name, err);
@@ -559,9 +576,7 @@ impl ProjectBuilder {
             };
 
             if let Err(err) = generate_agents_md(&project_dir_canon, &project_context) {
-                for mapping in &created_mappings {
-                    let _ = remove_worktree_auto(&mapping.worktree_path, true);
-                }
+                rollback_worktrees(&created_mappings, trimmed_project_name);
                 let _ = fs::remove_dir_all(&project_dir);
                 anyhow::bail!("Failed to generate AGENTS.md: {err}");
             }
@@ -676,9 +691,7 @@ impl ProjectBuilder {
         let pty = match PtySession::spawn(pty_config) {
             Ok(p) => p,
             Err(err) => {
-                for mapping in &created_mappings {
-                    let _ = remove_worktree_auto(&mapping.worktree_path, true);
-                }
+                rollback_worktrees(&created_mappings, self.project_name.trim());
                 let _ = fs::remove_dir_all(&project_dir_canon);
                 let err_msg = format!("Failed to spawn agent process '{agent_cmd}': {err}");
                 progress_sink(ProjectSetupEvent::Log(format!("✗ Error: {err_msg}")));
@@ -1001,36 +1014,15 @@ pub(crate) fn resolve_executable_in_paths(
             return prog_path.to_path_buf();
         }
         for ext in pathexts {
-            let ext_clean = ext.trim_start_matches('.');
-            let ext_lower = ext_clean.to_lowercase();
-            let ext_upper = ext_clean.to_uppercase();
-
-            let cand = std::path::PathBuf::from(format!("{prog}.{ext_clean}"));
-            if cand.is_file() {
-                return cand;
-            }
-            let cand = prog_path.with_extension(ext_clean);
-            if cand.is_file() {
-                return cand;
-            }
-
-            if ext_clean != ext_lower {
-                let cand = std::path::PathBuf::from(format!("{prog}.{ext_lower}"));
+            let clean = ext.trim_start_matches('.');
+            let lower = clean.to_lowercase();
+            let upper = clean.to_uppercase();
+            for e in [&lower, clean, &upper] {
+                let cand = prog_path.with_extension(e);
                 if cand.is_file() {
                     return cand;
                 }
-                let cand = prog_path.with_extension(&ext_lower);
-                if cand.is_file() {
-                    return cand;
-                }
-            }
-
-            if ext_clean != ext_upper {
-                let cand = std::path::PathBuf::from(format!("{prog}.{ext_upper}"));
-                if cand.is_file() {
-                    return cand;
-                }
-                let cand = prog_path.with_extension(&ext_upper);
+                let cand = std::path::PathBuf::from(format!("{prog}.{e}"));
                 if cand.is_file() {
                     return cand;
                 }
@@ -1057,22 +1049,11 @@ pub(crate) fn resolve_executable_in_paths(
             }
         }
         for ext in pathexts {
-            let ext_clean = ext.trim_start_matches('.');
-            let ext_lower = ext_clean.to_lowercase();
-            let ext_upper = ext_clean.to_uppercase();
-
-            let candidate = dir.join(format!("{prog}.{ext_clean}"));
-            if candidate.is_file() {
-                return candidate;
-            }
-            if ext_clean != ext_lower {
-                let candidate = dir.join(format!("{prog}.{ext_lower}"));
-                if candidate.is_file() {
-                    return candidate;
-                }
-            }
-            if ext_clean != ext_upper {
-                let candidate = dir.join(format!("{prog}.{ext_upper}"));
+            let clean = ext.trim_start_matches('.');
+            let lower = clean.to_lowercase();
+            let upper = clean.to_uppercase();
+            for e in [&lower, clean, &upper] {
+                let candidate = dir.join(format!("{prog}.{e}"));
                 if candidate.is_file() {
                     return candidate;
                 }
@@ -1148,6 +1129,10 @@ mod tests {
             .status();
     }
 
+    fn toml_path(p: &std::path::Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
     #[test]
     fn test_project_builder_validation_empty_name() {
         let config =
@@ -1207,8 +1192,8 @@ mod tests {
             [templates.service_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let builder = ProjectBuilder::new(config, "service_tpl", "collision-branch")
@@ -1252,8 +1237,8 @@ mod tests {
             [templates.service_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let builder = ProjectBuilder::new(config, "service_tpl", "collision-branch")
@@ -1281,8 +1266,8 @@ mod tests {
             description = "Web App Services"
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let project_cwd = temp_dir.path().join("workspaces");
@@ -1305,7 +1290,7 @@ mod tests {
             res.err()
         );
         let (project_dir_canon, mappings) = res.unwrap();
-        let expected_project_dir = project_cwd.join("checkout-feat").canonicalize().unwrap();
+        let expected_project_dir = dunce::canonicalize(project_cwd.join("checkout-feat")).unwrap();
         assert_eq!(project_dir_canon, expected_project_dir);
         assert_eq!(mappings.len(), 1);
         assert_eq!(mappings[0].name, "backend");
@@ -1354,8 +1339,8 @@ mod tests {
             [templates.failing_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let project_cwd = temp_dir.path().join("workspaces");
@@ -1401,8 +1386,8 @@ mod tests {
             description = "Web App Services"
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let project_cwd = temp_dir.path().join("workspaces");
@@ -1469,8 +1454,8 @@ mod tests {
             [templates.failing_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let project_cwd = temp_dir.path().join("workspaces");
@@ -1742,7 +1727,7 @@ mod tests {
             ]
             env = {{ TEMPLATE_ENV = "tpl_val" }}
             "#,
-            repos_dir.display()
+            toml_path(&repos_dir)
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -1828,7 +1813,7 @@ mod tests {
                 ["non_existent_post_create_cmd"]
             ]
             "#,
-            repos_dir.display()
+            toml_path(&repos_dir)
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -1891,8 +1876,8 @@ mod tests {
                 ["sh", "-c", "echo 'cleanup-ok' > {}"]
             ]
             "#,
-            repos_dir.display(),
-            cleanup_marker.display()
+            toml_path(&repos_dir),
+            toml_path(&cleanup_marker)
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -1943,8 +1928,8 @@ mod tests {
                 ["sh", "-c", "echo 'stream-cleanup' > {}"]
             ]
             "#,
-            repos_dir.display(),
-            cleanup_marker.display()
+            toml_path(&repos_dir),
+            toml_path(&cleanup_marker)
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -2038,7 +2023,7 @@ mod tests {
             [templates.safety_tpl]
             repos = ["backend"]
             "#,
-            repos_dir.display(),
+            toml_path(&repos_dir),
         );
 
         let config = Config::load_from_str(&toml_str).unwrap();
@@ -2252,5 +2237,55 @@ mod tests {
 
         let cmd_args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
         assert_eq!(cmd_args, vec!["arg1", "arg2"]);
+    }
+
+    /// A failed setup must not leave behind the branches it created.
+    ///
+    /// `create_worktree` makes the branch as part of `git worktree add -b`, and removing a
+    /// worktree does not delete its branch — so without explicit cleanup the first repo's
+    /// branch survived a rollback and the retry failed with `BranchAlreadyExists` instead.
+    ///
+    /// Note the TOML is built with *literal* (single-quoted) strings. Windows paths contain
+    /// backslashes, and in a TOML basic string `\U` is a unicode escape.
+    #[test]
+    fn test_create_workspace_rollback_deletes_branches_it_created() {
+        let temp_dir = TempDir::new().unwrap();
+        let good_repo = temp_dir.path().join("good_repo");
+        create_mock_git_repo(&good_repo);
+        // Exists, but is not a git repository, so create_worktree fails for it.
+        let bad_repo = temp_dir.path().join("not_a_repo");
+        fs::create_dir_all(&bad_repo).unwrap();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = '{}'
+            [templates.tpl]
+            repos = ['{}', '{}']
+            "#,
+            toml_path(temp_dir.path()),
+            toml_path(&good_repo),
+            toml_path(&bad_repo)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let result = ProjectBuilder::new(config, "tpl", "rollback-proj")
+            .with_cwd(&project_cwd)
+            .create_workspace(|_ev| {});
+        assert!(result.is_err(), "setup should fail on the second repo");
+
+        // The branch created for the repo that succeeded must be gone, so the same project
+        // name can be retried.
+        assert!(
+            !crate::git::branch_exists(&good_repo, "rollback-proj").unwrap(),
+            "rollback must delete the branch it created in the first repo"
+        );
+        assert!(
+            !project_cwd.join("rollback-proj").exists(),
+            "rollback must remove the project directory"
+        );
     }
 }

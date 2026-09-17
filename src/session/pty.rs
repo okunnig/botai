@@ -1,4 +1,4 @@
-use super::SessionError;
+use super::{DsrResponder, SessionError};
 use portable_pty::{
     native_pty_system, Child, CommandBuilder, MasterPty, PtySize as PortablePtySize,
 };
@@ -178,12 +178,12 @@ impl PtyConfig {
     pub fn new(command: impl Into<String>, working_dir: impl Into<PathBuf>) -> Self {
         let raw_dir = working_dir.into();
         let canonical_dir = if is_path_absolute(&raw_dir) {
-            raw_dir.canonicalize().unwrap_or(raw_dir)
+            dunce::canonicalize(&raw_dir).unwrap_or(raw_dir)
         } else {
             let abs_dir = std::env::current_dir()
                 .map(|c| c.join(&raw_dir))
                 .unwrap_or(raw_dir);
-            abs_dir.canonicalize().unwrap_or(abs_dir)
+            dunce::canonicalize(&abs_dir).unwrap_or(abs_dir)
         };
 
         Self {
@@ -244,21 +244,19 @@ pub struct PtySession {
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     rx: Receiver<Vec<u8>>,
     cached_exit_status: Arc<Mutex<Option<ExitStatus>>>,
+    dsr: DsrResponder,
 }
 
 impl PtySession {
     /// Spawns a new process in a pseudo-terminal according to the provided `PtyConfig`.
     pub fn spawn(config: PtyConfig) -> Result<Self, SessionError> {
         let canonical_working_dir = if is_path_absolute(&config.working_dir) {
-            config
-                .working_dir
-                .canonicalize()
-                .unwrap_or_else(|_| config.working_dir.clone())
+            dunce::canonicalize(&config.working_dir).unwrap_or_else(|_| config.working_dir.clone())
         } else {
             let abs_dir = std::env::current_dir()
                 .map(|c| c.join(&config.working_dir))
                 .unwrap_or_else(|_| config.working_dir.clone());
-            abs_dir.canonicalize().unwrap_or(abs_dir)
+            dunce::canonicalize(&abs_dir).unwrap_or(abs_dir)
         };
 
         if !canonical_working_dir.exists() {
@@ -335,6 +333,7 @@ impl PtySession {
             child: Arc::new(Mutex::new(child)),
             rx,
             cached_exit_status: Arc::new(Mutex::new(None)),
+            dsr: DsrResponder::new(),
         })
     }
 
@@ -346,10 +345,17 @@ impl PtySession {
     }
 
     /// Reads available non-blocking output bytes from the PTY master.
+    ///
+    /// Answers any Device Status Report query in the chunk: ConPTY writes `ESC[6n` on startup
+    /// and blocks until it is replied to, so an unanswered session never produces output.
     pub fn read_nonblocking(&mut self) -> Result<Vec<u8>, SessionError> {
         let mut data = Vec::new();
         while let Ok(chunk) = self.rx.try_recv() {
             data.extend_from_slice(&chunk);
+        }
+        let reply = self.dsr.responses(&data);
+        if !reply.is_empty() {
+            let _ = self.write_all(&reply);
         }
         Ok(data)
     }
@@ -674,7 +680,7 @@ mod tests {
     #[test]
     fn test_pty_session_spawns_strictly_in_canonical_working_directory() {
         let tmp = tempdir().expect("Failed to create tempdir");
-        let canonical_tmp = tmp.path().canonicalize().expect("canonicalize tmp path");
+        let canonical_tmp = dunce::canonicalize(tmp.path()).expect("canonicalize tmp path");
 
         #[cfg(windows)]
         let (cmd, args) = ("cmd.exe", vec!["/c", "cd"]);
@@ -695,7 +701,12 @@ mod tests {
                     output.push_str(&String::from_utf8_lossy(&bytes));
                 }
             }
-            if !output.trim().is_empty() {
+            // Wait for the directory itself, not merely for any output: the first chunk is
+            // ConPTY's ESC[6n, and breaking on that would abandon the loop before the reply
+            // above has let the child run.
+            if output.contains(&*canonical_tmp.to_string_lossy())
+                || output.contains(tmp.path().to_str().unwrap())
+            {
                 break;
             }
             thread::sleep(Duration::from_millis(50));

@@ -6,7 +6,7 @@ pub mod vt;
 pub use pty::{ExitStatus, PtyConfig, PtySession, PtySize};
 pub use registry::{SessionEntry, SessionRegistry};
 pub use state::{ProjectSession, SessionState, SessionStatus};
-pub use vt::{VtCell, VtScreen};
+pub use vt::{DsrResponder, VtCell, VtScreen};
 
 use std::path::PathBuf;
 use thiserror::Error;

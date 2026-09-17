@@ -20,6 +20,12 @@ ratatui = "0.30"
 vt100 = "0.16"
 notify-rust = "4.11"
 tokio = { version = "1.38", features = ["full"] }
+# Canonicalize without a `\\?\` prefix: git rejects those as positional path arguments.
+dunce = "1.0"
+
+# Safe console-mode wrappers; the crate is `#![forbid(unsafe_code)]`.
+[target.'cfg(windows)'.dependencies]
+crossterm_winapi = "0.9"
 
 [dev-dependencies]
 tempfile = "3.10"

@@ -251,9 +251,9 @@ pub fn run_setup_worker(
             });
         }
         Err(err) => {
-            let err_msg = err.to_string();
-            let _ = tx.send(SetupProgressEvent::Log(format!("✗ Error: {err_msg}")));
-            let _ = tx.send(SetupProgressEvent::Error(err_msg));
+            // No Log event here: `create_workspace` already emitted the identical
+            // "✗ Error: ..." line, and both land in the same rendered log pane.
+            let _ = tx.send(SetupProgressEvent::Error(err.to_string()));
         }
     }
 }

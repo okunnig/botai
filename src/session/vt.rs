@@ -1,5 +1,69 @@
 use vt100::Parser;
 
+/// Device Status Report queries and their replies.
+///
+/// The cursor reports claim the home position: ConPTY only needs *an* answer to unblock, and
+/// the child's own cursor is not tracked here.
+const DSR_QUERIES: [(&[u8], &[u8]); 3] = [
+    (b"\x1b[6n", b"\x1b[1;1R"),     // CPR
+    (b"\x1b[?6n", b"\x1b[?1;1;1R"), // DECXCPR
+    (b"\x1b[5n", b"\x1b[0n"),       // status: no malfunction
+];
+
+/// Answers Device Status Report queries from a child process.
+///
+/// ConPTY writes `ESC[6n` on startup and blocks until it is answered, so an unanswered
+/// session never produces output at all.
+#[derive(Debug, Default)]
+pub struct DsrResponder {
+    /// Trailing bytes of the last chunk that may be a query split across reads.
+    pending: Vec<u8>,
+}
+
+impl DsrResponder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the bytes to write back for any query in `bytes`.
+    pub fn responses(&mut self, bytes: &[u8]) -> Vec<u8> {
+        // Avoid copying the chunk in the overwhelmingly common case of no carried-over tail.
+        if self.pending.is_empty() {
+            self.scan(bytes)
+        } else {
+            let mut scan = std::mem::take(&mut self.pending);
+            scan.extend_from_slice(bytes);
+            self.scan(&scan)
+        }
+    }
+
+    fn scan(&mut self, scan: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < scan.len() {
+            if scan[i] != 0x1b {
+                i += 1;
+                continue;
+            }
+            let rest = &scan[i..];
+            match DSR_QUERIES.iter().find(|(q, _)| rest.starts_with(q)) {
+                Some((query, reply)) => {
+                    out.extend_from_slice(reply);
+                    i += query.len();
+                }
+                // A truncated query at the very end is held for the next read. Only the
+                // unconsumed tail is carried, so an answered query is never replayed.
+                None if DSR_QUERIES.iter().any(|(q, _)| q.starts_with(rest)) => {
+                    self.pending = rest.to_vec();
+                    return out;
+                }
+                None => i += 1,
+            }
+        }
+        out
+    }
+}
+
 /// Information about a single character cell in the virtual terminal grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VtCell {
@@ -309,5 +373,38 @@ mod tests {
         // Disable mouse tracking: \x1b[?1000l
         screen.process(b"\x1b[?1000l");
         assert!(!screen.is_mouse_mode_enabled());
+    }
+
+    #[test]
+    fn test_dsr_responder_answers_each_known_query() {
+        let mut dsr = DsrResponder::new();
+        // The query ConPTY emits at startup, and the two other status requests.
+        assert_eq!(dsr.responses(b"\x1b[6n"), b"\x1b[1;1R".to_vec());
+        assert_eq!(dsr.responses(b"\x1b[?6n"), b"\x1b[?1;1;1R".to_vec());
+        assert_eq!(dsr.responses(b"\x1b[5n"), b"\x1b[0n".to_vec());
+    }
+
+    #[test]
+    fn test_dsr_responder_ignores_plain_output_and_other_escapes() {
+        // Writing stray bytes back would corrupt the child's input.
+        let mut dsr = DsrResponder::new();
+        assert!(dsr.responses(b"hello world\r\n").is_empty());
+        assert!(dsr.responses(b"\x1b[1;31mred\x1b[0m").is_empty());
+        assert!(dsr.responses(b"\x1b[?1000h").is_empty());
+    }
+
+    #[test]
+    fn test_dsr_responder_reassembles_query_split_across_reads() {
+        let mut dsr = DsrResponder::new();
+        assert!(dsr.responses(b"some output\x1b[").is_empty());
+        assert_eq!(dsr.responses(b"6n"), b"\x1b[1;1R".to_vec());
+    }
+
+    #[test]
+    fn test_dsr_responder_does_not_replay_an_answered_query() {
+        let mut dsr = DsrResponder::new();
+        // A chunk ending exactly on a complete query must consume it, not carry it over.
+        assert_eq!(dsr.responses(b"out\x1b[6n"), b"\x1b[1;1R".to_vec());
+        assert!(dsr.responses(b"more output").is_empty());
     }
 }

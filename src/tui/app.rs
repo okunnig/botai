@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -10,7 +11,10 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -63,6 +67,108 @@ pub struct TuiApp {
     pub pending_raw_input: Vec<u8>,
 }
 
+/// Whether botai pushed kitty keyboard flags, so exactly one matching pop is emitted.
+///
+/// Process-global because the panic hook is installed before any `TuiApp` exists and cannot
+/// reach a guard instance.
+static KEYBOARD_ENHANCEMENT_PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// Pushes kitty keyboard flags if the terminal supports the protocol.
+///
+/// Best effort: on Windows the push always fails, and that must not stop botai starting.
+/// Must run before `run_loop` spawns the stdin reader — on unix the support query polls
+/// `STDIN_FILENO`, the same descriptor that thread consumes.
+fn push_keyboard_enhancement<W: std::io::Write>(writer: &mut W) {
+    if !matches!(supports_keyboard_enhancement(), Ok(true)) {
+        return;
+    }
+    if execute!(
+        writer,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+    .is_ok()
+    {
+        KEYBOARD_ENHANCEMENT_PUSHED.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Pops the flags, once, and only if botai pushed them.
+///
+/// Consuming the flag keeps push and pop symmetric across the three teardown paths; popping a
+/// level botai never pushed would corrupt a parent kitty-protocol application's stack.
+fn pop_keyboard_enhancement<W: std::io::Write>(writer: &mut W) {
+    if KEYBOARD_ENHANCEMENT_PUSHED.swap(false, Ordering::SeqCst) {
+        let _ = execute!(writer, PopKeyboardEnhancementFlags);
+    }
+}
+
+/// Windows console flag; not re-exported by `crossterm_winapi`.
+#[cfg(windows)]
+const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+/// Whether botai set the bit itself, so teardown only clears what it set.
+#[cfg(windows)]
+static VIRTUAL_TERMINAL_INPUT_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Makes the console deliver key presses as VT escape sequences on stdin.
+///
+/// botai reads raw stdin bytes rather than `crossterm::event::read`, and crossterm never sets
+/// this flag — on Windows it reads `InputRecord`s through the console API instead. Without it,
+/// keys carrying no character (arrows, Home/End, Delete, PageUp/PageDown) produce no bytes at
+/// all and `parse_raw_events` never sees them.
+///
+/// Must run *after* `EnableMouseCapture`, whose Windows path overwrites the whole console mode.
+#[cfg(windows)]
+fn enable_virtual_terminal_input() {
+    use crossterm_winapi::{ConsoleMode, Handle};
+
+    let Ok(handle) = Handle::current_in_handle() else {
+        return;
+    };
+    let console_mode = ConsoleMode::from(handle);
+    let Ok(mode) = console_mode.mode() else {
+        return;
+    };
+    if mode & ENABLE_VIRTUAL_TERMINAL_INPUT != 0 {
+        return;
+    }
+    if console_mode
+        .set_mode(mode | ENABLE_VIRTUAL_TERMINAL_INPUT)
+        .is_ok()
+    {
+        VIRTUAL_TERMINAL_INPUT_ENABLED.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Clears the bit, but only if botai set it.
+///
+/// Clears just that bit rather than restoring a saved mode, so it cannot fight with raw mode
+/// or `DisableMouseCapture`, which own other bits of the same value.
+#[cfg(windows)]
+fn disable_virtual_terminal_input() {
+    use crossterm_winapi::{ConsoleMode, Handle};
+
+    if !VIRTUAL_TERMINAL_INPUT_ENABLED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let Ok(handle) = Handle::current_in_handle() else {
+        return;
+    };
+    let console_mode = ConsoleMode::from(handle);
+    let Ok(mode) = console_mode.mode() else {
+        return;
+    };
+    let _ = console_mode.set_mode(mode & !ENABLE_VIRTUAL_TERMINAL_INPUT);
+}
+
+/// No-op: unix terminals already deliver key presses as escape sequences on stdin.
+#[cfg(not(windows))]
+fn enable_virtual_terminal_input() {}
+
+/// No-op counterpart to [`enable_virtual_terminal_input`].
+#[cfg(not(windows))]
+fn disable_virtual_terminal_input() {}
+
 struct TerminalCleanupGuard {
     in_tmux: bool,
 }
@@ -83,18 +189,22 @@ impl TerminalCleanupGuard {
 
 impl Drop for TerminalCleanupGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
         let mut out = io::stdout();
         if self.in_tmux {
             let _ = Self::emit_tmux_modify_other_keys(&mut out, false);
         }
+        // Own `execute!`, so a failing pop cannot short-circuit the restores below.
+        pop_keyboard_enhancement(&mut out);
+        disable_virtual_terminal_input();
         let _ = execute!(
             out,
-            PopKeyboardEnhancementFlags,
             DisableMouseCapture,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );
+        // Last: crossterm's Windows DisableMouseCapture restores the console mode saved
+        // during EnableMouseCapture, which was captured after raw mode was enabled.
+        let _ = disable_raw_mode();
     }
 }
 
@@ -106,18 +216,20 @@ pub fn install_panic_hook() {
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let in_tmux = std::env::var_os("TMUX").is_some();
-        let _ = crossterm::terminal::disable_raw_mode();
         let mut stdout = std::io::stdout();
         if in_tmux {
             let _ = TerminalCleanupGuard::emit_tmux_modify_other_keys(&mut stdout, false);
         }
+        pop_keyboard_enhancement(&mut stdout);
+        disable_virtual_terminal_input();
         let _ = crossterm::execute!(
             stdout,
-            crossterm::event::PopKeyboardEnhancementFlags,
             crossterm::event::DisableMouseCapture,
             crossterm::terminal::LeaveAlternateScreen,
             crossterm::cursor::Show
         );
+        // Last: see TerminalCleanupGuard::drop.
+        let _ = crossterm::terminal::disable_raw_mode();
         previous_hook(panic_info);
     }));
 }
@@ -250,6 +362,10 @@ impl TuiApp {
     pub fn run(&mut self, stdout: &mut Stdout) -> io::Result<()> {
         enable_raw_mode()?;
         let in_tmux = std::env::var_os("TMUX").is_some();
+        // Install the cleanup guard before any further terminal mutation: every fallible step
+        // below leaves the terminal altered, so an early return has to restore it. This also
+        // brings `enable_raw_mode` above under the guard.
+        let _guard = TerminalCleanupGuard { in_tmux };
         if in_tmux {
             let _ = TerminalCleanupGuard::emit_tmux_modify_other_keys(stdout, true);
         }
@@ -257,10 +373,16 @@ impl TuiApp {
             stdout,
             EnterAlternateScreen,
             EnableMouseCapture,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
             crossterm::cursor::Show
         )?;
-        let _guard = TerminalCleanupGuard { in_tmux };
+        // Separate and best effort: on Windows this command always fails, and inside the
+        // `execute!` above it would abort startup entirely. Probed here, before `run_loop`
+        // spawns the stdin reader thread the unix query would otherwise race.
+        push_keyboard_enhancement(stdout);
+        // After `EnableMouseCapture` above, whose Windows path overwrites the whole console
+        // input mode. Without this the arrow keys never reach `parse_raw_events`.
+        enable_virtual_terminal_input();
+
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
@@ -270,15 +392,8 @@ impl TuiApp {
             let _ =
                 TerminalCleanupGuard::emit_tmux_modify_other_keys(terminal.backend_mut(), false);
         }
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            PopKeyboardEnhancementFlags,
-            DisableMouseCapture,
-            LeaveAlternateScreen,
-            crossterm::cursor::Show
-        )?;
-        terminal.show_cursor()?;
+        // Teardown itself is left to `_guard`, which runs on drop immediately after
+        // `terminal` and does the same sequence.
 
         res
     }
@@ -896,7 +1011,7 @@ impl TuiApp {
         if !project_dir.exists() {
             anyhow::bail!("Project directory '{project_name}' does not exist in CWD");
         }
-        let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
+        let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
 
         let default_config =
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
@@ -1481,7 +1596,7 @@ repos = []
         assert!(active.pty().config().working_dir.is_absolute());
         assert_eq!(
             active.pty().config().working_dir,
-            cwd.join("billing-service").canonicalize().unwrap()
+            dunce::canonicalize(cwd.join("billing-service")).unwrap()
         );
         assert!(cwd.join("billing-service").join("AGENTS.md").is_file());
     }
@@ -1777,6 +1892,18 @@ repos = []
         assert!(cell.modifier.contains(Modifier::BOLD));
     }
 
+    fn wait_for(app: &mut TuiApp, predicate: impl Fn(&TuiApp) -> bool) {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            app.process_pty_streams();
+            if predicate(app) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        app.process_pty_streams();
+    }
+
     #[test]
     fn test_session_exit_normal_multi_session_closes_tab_and_switches_focus() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1809,9 +1936,7 @@ repos = []
         assert_eq!(app.registry.active_index(), Some(0));
 
         // Wait for session 1 to exit 0
-        std::thread::sleep(Duration::from_millis(150));
-
-        app.process_pty_streams();
+        wait_for(&mut app, |a| a.registry.len() == 1);
 
         // Session 1 should be removed, leaving only session 2
         assert_eq!(app.registry.len(), 1);
@@ -1843,9 +1968,7 @@ repos = []
         let mut app = TuiApp::new(registry).with_dashboard(dashboard);
 
         // Wait for process to exit 0
-        std::thread::sleep(Duration::from_millis(150));
-
-        app.process_pty_streams();
+        wait_for(&mut app, |a| a.registry.is_empty());
 
         // Registry is empty, dashboard is active, should_quit is false
         assert_eq!(app.registry.len(), 0);
@@ -1873,9 +1996,7 @@ repos = []
         assert!(app.dashboard.is_none());
 
         // Wait for process to exit 0
-        std::thread::sleep(Duration::from_millis(150));
-
-        app.process_pty_streams();
+        wait_for(&mut app, |a| a.registry.is_empty());
 
         // Registry is empty, should_quit is true
         assert_eq!(app.registry.len(), 0);
@@ -1901,9 +2022,11 @@ repos = []
         let mut app = TuiApp::new(registry);
 
         // Wait for process to exit 42
-        std::thread::sleep(Duration::from_millis(150));
-
-        app.process_pty_streams();
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
 
         // Errored session remains in registry with status Error and exit code 42
         assert_eq!(app.registry.len(), 1);
@@ -1942,8 +2065,11 @@ repos = []
 
         let dashboard = DashboardState::new(vec!["ws".to_string()], vec![]);
         let mut app1 = TuiApp::new(registry1).with_dashboard(dashboard);
-        std::thread::sleep(Duration::from_millis(150));
-        app1.process_pty_streams();
+        wait_for(&mut app1, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
         assert_eq!(app1.registry.len(), 1);
 
         app1.handle_raw_bytes(b" ");
@@ -1960,8 +2086,11 @@ repos = []
         registry2.add(ps2, pty2, vt2).unwrap();
 
         let mut app2 = TuiApp::new(registry2);
-        std::thread::sleep(Duration::from_millis(150));
-        app2.process_pty_streams();
+        wait_for(&mut app2, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
         assert_eq!(app2.registry.len(), 1);
 
         app2.handle_raw_bytes(&[0x00]);
@@ -3193,8 +3322,11 @@ repos = []
         registry.add(ps, pty, vt).unwrap();
 
         let mut app = TuiApp::new(registry);
-        std::thread::sleep(Duration::from_millis(150));
-        app.process_pty_streams();
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
         assert_eq!(app.registry.len(), 1);
         assert_eq!(
             app.registry.active_session().unwrap().status(),

@@ -82,10 +82,10 @@ repos = [
     "{}"
 ]
 "#,
-        repos_dir.to_string_lossy(),
-        upstream_api.to_string_lossy(),
-        upstream_web.to_string_lossy(),
-        local_shared.to_string_lossy()
+        repos_dir.to_string_lossy().replace('\\', "\\\\"),
+        upstream_api.to_string_lossy().replace('\\', "/"),
+        upstream_web.to_string_lossy().replace('\\', "/"),
+        local_shared.to_string_lossy().replace('\\', "\\\\")
     );
 
     fs::write(&config_path, toml_content).expect("write config");

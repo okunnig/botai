@@ -2037,6 +2037,10 @@ mod tests {
             .status();
     }
 
+    fn toml_path(p: &Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
     #[test]
     fn test_modal_full_workflow_and_submission() {
         let toml_str = r#"
@@ -2396,8 +2400,8 @@ mod tests {
             [templates.core_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("core_tpl"));
@@ -2465,8 +2469,8 @@ mod tests {
             [templates.alpha_tpl]
             repos = ["{}"]
             "#,
-            temp_dir.path().display(),
-            repo_dir.display()
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&toml_str).unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("alpha_tpl"));
