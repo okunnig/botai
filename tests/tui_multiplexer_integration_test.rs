@@ -854,6 +854,7 @@ fn test_integration_mouse_coordinate_translation_to_child_viewport() {
     use botai::tui::events::{mouse_event_to_sgr_bytes, translate_mouse_event};
     use botai::tui::ui::STATUS_BAR_HEIGHT;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    #[cfg(not(windows))]
     use std::time::Duration;
 
     let tmp = tempdir().expect("Failed to create tempdir");
@@ -1082,6 +1083,7 @@ fn test_integration_mouse_coordinate_translation_to_child_viewport() {
 #[test]
 fn test_integration_escape_key_forwarding_and_leader_cancellation() {
     use botai::tui::app::TuiApp;
+    #[cfg(not(windows))]
     use std::time::Duration;
 
     let tmp = tempdir().expect("Failed to create tempdir");

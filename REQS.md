@@ -577,18 +577,22 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Exclusively runs on Pull Requests targeting the `main` branch.
   - **Concurrency Control**: Automatically cancels in-progress workflow runs for the same branch or PR ref (`cancel-in-progress: true`), preventing redundant build queue congestion.
   - **Security & Least Privilege**: Top-level permissions explicitly constrained to `contents: read`.
-- **Parallel Quality Gates (Running on `ubuntu-latest`)**:
+- **Parallel Quality Gates**:
   - **1. Rustfmt Gate (`fmt`)**:
+    - Runs on `ubuntu-latest`.
     - Validates uniform codebase formatting across all source and test files (`cargo fmt --all -- --check`).
     - Uses stable toolchain with the official `rustfmt` component.
   - **2. Clippy Linter Gate (`clippy`)**:
+    - Matrix across both Linux (`ubuntu-latest`) and Windows (`windows-latest`) runners with `fail-fast: false` (Job Name: `Clippy (${{ matrix.os }})`).
     - Enforces zero compiler and linter warnings (`cargo clippy --all-targets --all-features -- -D warnings`).
     - Employs GitHub Actions Rust caching (`Swatinem/rust-cache@v2`) for accelerated feedback cycles.
   - **3. Test Suite Gate (`test`)**:
+    - Matrix across both Linux (`ubuntu-latest`) and Windows (`windows-latest`) runners with `fail-fast: false` (Job Name: `Test Suite (${{ matrix.os }})`).
     - Executes the entire test suite across all crates, targets, unit tests, and integration tests (`cargo test --all-targets --all-features`).
     - Executes documentation test suite (`cargo test --doc`).
     - Leverages shared Rust dependency and compilation caching (`Swatinem/rust-cache@v2`).
   - **4. Unsafe Code Audit Gate (`unsafe-audit`)**:
+    - Runs on `ubuntu-latest`.
     - **Strict `#![forbid(unsafe_code)]` Enforcement**: Verifies that crate root headers (`src/lib.rs` and `src/main.rs`) explicitly mandate `#![forbid(unsafe_code)]`.
     - **Zero Unsafe Usage Policy**: Scans all source files under `src/` to guarantee zero `unsafe` keyword blocks or invocations exist in the production codebase.
     - **Compilation Verification**: Confirms clean `cargo check --all-targets --all-features` pass under the strict forbid lint constraint.
