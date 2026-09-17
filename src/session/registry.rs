@@ -1,4 +1,4 @@
-use super::{ProjectSession, PtySession, SessionError, SessionStatus, VtScreen};
+use super::{DsrResponder, ProjectSession, PtySession, SessionError, SessionStatus, VtScreen};
 use crate::notify::ActivityTracker;
 
 /// A single active session entry in the session registry, holding state, PTY handle, virtual terminal, and activity tracker.
@@ -11,6 +11,8 @@ pub struct SessionEntry {
     pub vt: VtScreen,
     /// Isolated activity tracker and stream scanner for this session.
     pub tracker: ActivityTracker,
+    /// Answers Device Status Report queries; ConPTY blocks until they are replied to.
+    pub dsr: DsrResponder,
 }
 
 impl SessionEntry {
@@ -21,6 +23,7 @@ impl SessionEntry {
             pty,
             vt,
             tracker: ActivityTracker::default(),
+            dsr: DsrResponder::new(),
         }
     }
 

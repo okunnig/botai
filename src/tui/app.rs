@@ -726,6 +726,17 @@ impl TuiApp {
             if let Ok(bytes) = session.pty_mut().read_nonblocking() {
                 if !bytes.is_empty() {
                     session.vt_mut().process(&bytes);
+
+                    // Answer Device Status Report queries after feeding the parser, so the
+                    // reported cursor position reflects this chunk. ConPTY sends ESC[6n at
+                    // startup and blocks until it is answered, which froze every session on
+                    // Windows before the child produced a single byte.
+                    let cursor = session.vt.cursor_position();
+                    let reply = session.dsr.responses(&bytes, cursor);
+                    if !reply.is_empty() {
+                        let _ = session.pty.write_all(&reply);
+                    }
+
                     let notifs = session.tracker.process_bytes(&bytes);
                     session.project_session.set_status(session.tracker.status());
 

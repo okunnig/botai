@@ -629,10 +629,18 @@ mod tests {
         // Wait a brief moment for child to execute and output
         thread::sleep(Duration::from_millis(150));
 
+        // ConPTY writes ESC[6n on startup and blocks until it is answered, so a reader that
+        // never replies sees nothing at all. `TuiApp` answers via `DsrResponder`; a test
+        // driving `PtySession` directly has to do the same.
+        let mut dsr = crate::session::DsrResponder::new();
         let mut output = String::new();
         for _ in 0..10 {
             if let Ok(bytes) = session.read_nonblocking() {
                 if !bytes.is_empty() {
+                    let reply = dsr.responses(&bytes, (0, 0));
+                    if !reply.is_empty() {
+                        let _ = session.write_all(&reply);
+                    }
                     output.push_str(&String::from_utf8_lossy(&bytes));
                 }
             }
@@ -686,14 +694,26 @@ mod tests {
 
         thread::sleep(Duration::from_millis(150));
 
+        // See the note in test_pty_session_spawn_and_read_output: ConPTY blocks until its
+        // ESC[6n is answered.
+        let mut dsr = crate::session::DsrResponder::new();
         let mut output = String::new();
         for _ in 0..10 {
             if let Ok(bytes) = session.read_nonblocking() {
                 if !bytes.is_empty() {
+                    let reply = dsr.responses(&bytes, (0, 0));
+                    if !reply.is_empty() {
+                        let _ = session.write_all(&reply);
+                    }
                     output.push_str(&String::from_utf8_lossy(&bytes));
                 }
             }
-            if !output.trim().is_empty() {
+            // Wait for the directory itself, not merely for any output: the first chunk is
+            // ConPTY's ESC[6n, and breaking on that would abandon the loop before the reply
+            // above has let the child run.
+            if output.contains(&*canonical_tmp.to_string_lossy())
+                || output.contains(tmp.path().to_str().unwrap())
+            {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
