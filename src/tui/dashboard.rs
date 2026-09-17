@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
 
-use crate::config::Config;
+use crate::config::{Config, ConfigError};
 use crate::session::SessionStatus;
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
 use crate::tui::status_bar::TopBar;
@@ -71,6 +71,9 @@ pub struct DashboardState {
     pub destroy_modal: Option<DestroyModalState>,
     pub config: Config,
     pub cwd: PathBuf,
+    pub config_path: Option<PathBuf>,
+    pub config_last_modified: Option<std::time::SystemTime>,
+    pub config_file_len: Option<u64>,
 }
 
 impl DashboardState {
@@ -113,6 +116,9 @@ impl DashboardState {
             destroy_modal: None,
             config,
             cwd,
+            config_path: None,
+            config_last_modified: None,
+            config_file_len: None,
         }
     }
 
@@ -125,6 +131,16 @@ impl DashboardState {
     /// Sets the configuration used by the dashboard.
     pub fn with_config(mut self, config: Config) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Sets the configuration file path used for reloading.
+    pub fn with_config_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
+        let p = path.into();
+        let meta = std::fs::metadata(&p).ok();
+        self.config_last_modified = meta.as_ref().and_then(|m| m.modified().ok());
+        self.config_file_len = meta.map(|m| m.len());
+        self.config_path = Some(p);
         self
     }
 
@@ -162,6 +178,30 @@ impl DashboardState {
             .with_cwd(cwd.to_path_buf())
     }
 
+    /// Reloads configuration from disk if a configuration file path is known and valid.
+    /// Updates `self.config` and `self.templates` to reflect newly added or modified templates.
+    pub fn reload_config(&mut self) -> Result<bool, ConfigError> {
+        if let Some(ref path) = self.config_path {
+            if path.exists() {
+                let meta = std::fs::metadata(path)?;
+                let curr_len = meta.len();
+                if let (Some(last), Ok(curr)) = (self.config_last_modified, meta.modified()) {
+                    if curr == last && self.config_file_len == Some(curr_len) {
+                        return Ok(false);
+                    }
+                }
+                self.config_last_modified = meta.modified().ok();
+                self.config_file_len = Some(curr_len);
+                self.config = Config::load_from_file(path)?;
+                let mut templates: Vec<String> = self.config.templates.keys().cloned().collect();
+                templates.sort();
+                self.templates = templates;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Moves selection down to the next project item.
     pub fn next_item(&mut self) {
         if !self.local_projects.is_empty()
@@ -188,8 +228,9 @@ impl DashboardState {
         }
     }
 
-    /// Opens the project creation modal.
+    /// Opens the project creation modal, reloading potentially updated configuration first.
     pub fn open_creation_modal(&mut self) {
+        let _ = self.reload_config();
         let default_tpl = self.templates.first().map(|s| s.as_str());
         self.creation_modal = Some(ProjectCreationModal::new(
             &self.config,
@@ -1316,5 +1357,89 @@ command = "claude"
             modifiers: KeyModifiers::empty(),
         };
         assert_eq!(state.handle_mouse(click), DashboardAction::None);
+    }
+
+    #[test]
+    fn test_dashboard_open_creation_modal_reloads_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_file = dir.path().join("config.toml");
+        let toml_v1 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.base_tpl]
+repos = ["repo1"]
+"#;
+        std::fs::write(&config_file, toml_v1).unwrap();
+
+        let config = Config::load_from_file(&config_file).unwrap();
+        let mut state =
+            DashboardState::from_env(&config, dir.path()).with_config_path(&config_file);
+        assert_eq!(state.templates, vec!["base_tpl".to_string()]);
+
+        // Add a new template while dashboard is running
+        let toml_v2 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.base_tpl]
+repos = ["repo1"]
+
+[templates.new_tpl]
+repos = ["repo2"]
+"#;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&config_file, toml_v2).unwrap();
+
+        // Opening creation modal reloads config and updates template list
+        state.open_creation_modal();
+
+        assert_eq!(
+            state.templates,
+            vec!["base_tpl".to_string(), "new_tpl".to_string()]
+        );
+        let modal = state
+            .creation_modal
+            .as_ref()
+            .expect("creation modal must be open");
+        assert_eq!(
+            modal.templates,
+            vec!["base_tpl".to_string(), "new_tpl".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_dashboard_reload_config_syntax_error_preserves_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_file = dir.path().join("config.toml");
+        let toml_v1 = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.base_tpl]
+repos = ["repo1"]
+"#;
+        std::fs::write(&config_file, toml_v1).unwrap();
+
+        let config = Config::load_from_file(&config_file).unwrap();
+        let mut state =
+            DashboardState::from_env(&config, dir.path()).with_config_path(&config_file);
+
+        // Write broken TOML
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&config_file, "invalid = [unterminated").unwrap();
+
+        // reload_config returns error but keeps previous config
+        let res = state.reload_config();
+        assert!(res.is_err());
+        assert_eq!(state.templates, vec!["base_tpl".to_string()]);
+
+        // open_creation_modal does not crash and uses existing valid config
+        state.open_creation_modal();
+        assert!(state.creation_modal.is_some());
+        assert_eq!(
+            state.creation_modal.unwrap().templates,
+            vec!["base_tpl".to_string()]
+        );
     }
 }

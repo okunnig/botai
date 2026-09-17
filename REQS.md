@@ -43,6 +43,12 @@
     - `post_create`: (Optional) List of commands executed at the project root after worktrees and setup hooks finish.
     - `pre_destroy`: (Optional) List of commands executed at the project root before destroying worktrees.
 - **Agent Definitions**: Configurable agent launch commands, arguments, and environment variables.
+- **Dynamic Configuration & Template Reloading**:
+  - `Config` is designed as a pure, lightweight data structure containing parsed configuration without filesystem path tracking or self-reloading responsibilities.
+  - Runtime application state containers (`TuiApp` and `DashboardState`) track the configuration file path (`config_path`), last known filesystem modification time (`config_last_modified` / `mtime`), and file size (`config_file_len` / `len`).
+  - When initiating project creation (opening the project creation modal via `n`/`c` on the dashboard, via the in-session launcher shortcut, or submitting creation), `botai` checks both filesystem modification time (`mtime`) and file size (`len`) against `config_last_modified` and `config_file_len`. If both `mtime` and `len` are unchanged, disk reloading is skipped (returning `Ok(false)`), avoiding redundant I/O and deserialization. When either timestamp or file size changes, configuration is reloaded from disk (returning `Ok(true)`), immediately updating active templates and settings. Checking both attributes ensures robust cross-platform change detection even within coarse timestamp intervals (e.g. Windows NTFS ~15ms timestamp granularity).
+  - Enables users to add, update, or remove templates and agent tools in `config.toml` (e.g. via `botai edit` in another terminal or an external editor) and immediately select and instantiate them without restarting `botai`.
+  - **Graceful Error Handling**: If the configuration file on disk contains invalid TOML syntax or cannot be read while being edited, `botai` gracefully retains the last valid active configuration without crashing or interrupting running sessions.
 - **Configuration Template Generation (`botai init`)**:
   - Built-in generator for a fully documented, self-describing configuration file with extensive explanatory comments.
   - Serves as an interactive starting template and inline documentation for all supported agents, project templates, repos, and environment variable configurations.
@@ -184,6 +190,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - The multi-repo structure and mapping of child worktree directories.
     - Each repository's purpose and inter-dependencies.
     - Guidance for the AI agent on navigating, building, and modifying multiple repos simultaneously.
+    - Explicit repository guidelines instructing AI agents to inspect and adhere to local instruction files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`) in child worktrees prior to planning, reading, or modifying code in those subdirectories.
   - **`CLAUDE.md` Context Import (`@AGENTS.md`)**:
     - When `AGENTS.md` is created at the project root, automatically creates a `CLAUDE.md` file at the project root containing `@AGENTS.md` so that Claude Code imports and evaluates the synthesized multi-repo orientation context directly via its native `@include` directive without duplicating file content or relying on fragile OS filesystem symlinks.
 - **Custom Template Instructions (`agents_md_append`)**:
@@ -431,6 +438,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Atomic Rollback**: On any core initialization error (e.g. branch collision, clone failure, worktree creation failure, agent spawn failure), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory. (Note: Non-zero exit codes from user setup/post-create hooks log warnings and do not trigger destructive rollback).
 - **Unified Interactive Project Creation Modal (Two-Step Flow)**:
   - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session creation.
+  - **Dynamic Configuration & Template Reloading on Modal Activation**:
+    - Opening the creation modal (via `n`/`c` on the dashboard or `RawAction::OpenLauncher` within an active session) triggers configuration reloading from disk using filesystem modification time (`mtime`) and file size (`len`) caching.
+    - While `Config` remains a pure data structure, `TuiApp` and `DashboardState` track `config_path`, `config_last_modified` (`mtime`), and `config_file_len` (`len`), checking both filesystem modification time and file size to ensure robust cross-platform change detection even within coarse timestamp intervals (e.g. Windows NTFS ~15ms granularity). Unnecessary reloads are skipped when both attributes remain unchanged, and newly configured templates or modified repository references are immediately reflected in Step 1 template selection when the file has been modified.
   - **Asynchronous Non-Blocking Pre-Validation**:
     - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
     - Git branch collisions are checked asynchronously in background worker threads with generation counters to prevent stale results and UI freezing.

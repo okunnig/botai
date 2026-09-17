@@ -479,7 +479,7 @@ impl Config {
 
     /// Loads configuration from a file path.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(&path)?;
         Self::load_from_str(&content)
     }
 
