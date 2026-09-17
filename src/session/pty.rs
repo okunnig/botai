@@ -178,12 +178,12 @@ impl PtyConfig {
     pub fn new(command: impl Into<String>, working_dir: impl Into<PathBuf>) -> Self {
         let raw_dir = working_dir.into();
         let canonical_dir = if is_path_absolute(&raw_dir) {
-            raw_dir.canonicalize().unwrap_or(raw_dir)
+            dunce::canonicalize(&raw_dir).unwrap_or(raw_dir)
         } else {
             let abs_dir = std::env::current_dir()
                 .map(|c| c.join(&raw_dir))
                 .unwrap_or(raw_dir);
-            abs_dir.canonicalize().unwrap_or(abs_dir)
+            dunce::canonicalize(&abs_dir).unwrap_or(abs_dir)
         };
 
         Self {
@@ -250,15 +250,13 @@ impl PtySession {
     /// Spawns a new process in a pseudo-terminal according to the provided `PtyConfig`.
     pub fn spawn(config: PtyConfig) -> Result<Self, SessionError> {
         let canonical_working_dir = if is_path_absolute(&config.working_dir) {
-            config
-                .working_dir
-                .canonicalize()
+            dunce::canonicalize(&config.working_dir)
                 .unwrap_or_else(|_| config.working_dir.clone())
         } else {
             let abs_dir = std::env::current_dir()
                 .map(|c| c.join(&config.working_dir))
                 .unwrap_or_else(|_| config.working_dir.clone());
-            abs_dir.canonicalize().unwrap_or(abs_dir)
+            dunce::canonicalize(&abs_dir).unwrap_or(abs_dir)
         };
 
         if !canonical_working_dir.exists() {
@@ -674,7 +672,7 @@ mod tests {
     #[test]
     fn test_pty_session_spawns_strictly_in_canonical_working_directory() {
         let tmp = tempdir().expect("Failed to create tempdir");
-        let canonical_tmp = tmp.path().canonicalize().expect("canonicalize tmp path");
+        let canonical_tmp = dunce::canonicalize(tmp.path()).expect("canonicalize tmp path");
 
         #[cfg(windows)]
         let (cmd, args) = ("cmd.exe", vec!["/c", "cd"]);

@@ -1076,7 +1076,7 @@ impl TuiApp {
         if !project_dir.exists() {
             anyhow::bail!("Project directory '{project_name}' does not exist in CWD");
         }
-        let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
+        let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
 
         let default_config =
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
@@ -1661,7 +1661,7 @@ repos = []
         assert!(active.pty().config().working_dir.is_absolute());
         assert_eq!(
             active.pty().config().working_dir,
-            cwd.join("billing-service").canonicalize().unwrap()
+            dunce::canonicalize(cwd.join("billing-service")).unwrap()
         );
         assert!(cwd.join("billing-service").join("AGENTS.md").is_file());
     }

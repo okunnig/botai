@@ -251,9 +251,10 @@ impl GitWorktreeManager {
                 .map(|cwd| cwd.join(worktree_path))
                 .unwrap_or_else(|_| worktree_path.to_path_buf())
         };
-        let wt_arg = abs_worktree_path
-            .canonicalize()
-            .unwrap_or(abs_worktree_path);
+        // `dunce`, not `Path::canonicalize`: this is a positional argument to git, and a
+        // Windows verbatim (`\\?\`) path makes it fail with "could not create leading
+        // directories ... Invalid argument".
+        let wt_arg = dunce::canonicalize(&abs_worktree_path).unwrap_or(abs_worktree_path);
 
         let mut cmd = Command::new("git");
         cmd.arg("worktree").arg("remove");
@@ -310,7 +311,7 @@ impl GitWorktreeManager {
                     } else {
                         worktree_path.join(common_path)
                     };
-                    let canon_common = abs_common.canonicalize().unwrap_or(abs_common);
+                    let canon_common = dunce::canonicalize(&abs_common).unwrap_or(abs_common);
 
                     // If common dir ends with .git, its parent is the repo root
                     if canon_common.file_name().and_then(|n| n.to_str()) == Some(".git") {
@@ -344,7 +345,7 @@ impl GitWorktreeManager {
                         } else {
                             worktree_path.join(gitdir_path)
                         };
-                        let canon_gitdir = abs_gitdir.canonicalize().unwrap_or(abs_gitdir);
+                        let canon_gitdir = dunce::canonicalize(&abs_gitdir).unwrap_or(abs_gitdir);
 
                         // Walk up ancestors looking for main repo root
                         let mut current = Some(canon_gitdir.as_path());
@@ -369,8 +370,7 @@ impl GitWorktreeManager {
 
         // 3. Fallback: check if worktree_path itself is a git repository
         if ensure_git_repo(worktree_path).is_ok() {
-            let canon = worktree_path
-                .canonicalize()
+            let canon = dunce::canonicalize(worktree_path)
                 .unwrap_or_else(|_| worktree_path.to_path_buf());
             return Ok(canon);
         }
@@ -500,6 +500,32 @@ impl GitWorktreeManager {
         Ok(output.status.success())
     }
 
+    /// Force-deletes `branch_name` from `repo_path`.
+    ///
+    /// Used to roll back branches that [`Self::create_worktree`] created earlier in a failed
+    /// project setup. Force (`-D`) rather than `-d` because a setup hook may already have
+    /// committed to the branch, and the caller has established the branch is its own.
+    ///
+    /// Deleting a branch is destructive, so callers must only pass a branch they created:
+    /// [`Self::create_worktree`] returns [`GitError::BranchAlreadyExists`] *before* running any
+    /// git command, so a later failure proves the branch did not exist beforehand.
+    pub fn delete_branch(repo_path: &Path, branch_name: &str) -> Result<(), GitError> {
+        ensure_git_repo(repo_path)?;
+        let output = Command::new("git")
+            .args(["branch", "-D", branch_name])
+            .current_dir(repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(GitError::CommandFailed {
+                command: format!("git branch -D {branch_name}"),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Returns the current checked out branch name for `path`.
     pub fn get_current_branch(path: &Path) -> Result<String, GitError> {
         if !path.exists() {
@@ -623,6 +649,11 @@ pub fn get_default_branch(repo_path: &Path) -> Result<String, GitError> {
 /// Module-level convenience function to check if a branch exists.
 pub fn branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, GitError> {
     GitWorktreeManager::branch_exists(repo_path, branch_name)
+}
+
+/// Module-level convenience function to force-delete a branch.
+pub fn delete_branch(repo_path: &Path, branch_name: &str) -> Result<(), GitError> {
+    GitWorktreeManager::delete_branch(repo_path, branch_name)
 }
 
 /// Module-level convenience function to get current checked out branch.
@@ -1042,8 +1073,8 @@ mod tests {
 
         let resolved = resolve_main_repo(&worktree_path).expect("resolve main repo");
         assert_eq!(
-            resolved.canonicalize().expect("canon resolved"),
-            repo_path.canonicalize().expect("canon repo")
+            dunce::canonicalize(&resolved).expect("canon resolved"),
+            dunce::canonicalize(&repo_path).expect("canon repo")
         );
     }
 
@@ -1052,8 +1083,8 @@ mod tests {
         let (_dir, repo_path) = init_mock_repo("main");
         let resolved = resolve_main_repo(&repo_path).expect("resolve repo itself");
         assert_eq!(
-            resolved.canonicalize().expect("canon resolved"),
-            repo_path.canonicalize().expect("canon repo")
+            dunce::canonicalize(&resolved).expect("canon resolved"),
+            dunce::canonicalize(&repo_path).expect("canon repo")
         );
     }
 
@@ -1205,5 +1236,66 @@ mod tests {
             get_current_branch(&wt_path).expect("current branch"),
             "branch2"
         );
+    }
+
+    /// Regression test: the worktree destination must never be a Windows verbatim (`\\?\`)
+    /// path.
+    ///
+    /// `ProjectBuilder::create_workspace` canonicalizes the project directory and derives
+    /// every worktree path from it. With `Path::canonicalize` that yielded `\\?\C:\...`, which
+    /// git rewrites to `//?/C:/...` and then rejects:
+    /// `fatal: could not create leading directories of '//?/...': Invalid argument`.
+    /// `dunce::canonicalize` returns a plain path instead.
+    ///
+    /// The assertion is cross-platform: on unix `dunce::canonicalize` is `canonicalize`, and
+    /// no path acquires the prefix, so the check is simply always true there.
+    #[test]
+    fn test_create_worktree_accepts_canonicalized_project_dir() {
+        let (temp_dir, repo_path) = init_mock_repo("main");
+
+        let project_dir = temp_dir.path().join("project");
+        fs::create_dir_all(&project_dir).expect("create project dir");
+        let project_dir_canon = dunce::canonicalize(&project_dir).expect("canonicalize");
+
+        assert!(
+            !project_dir_canon.to_string_lossy().starts_with(r"\\?\"),
+            "canonicalized project dir must not be a verbatim path, got {}",
+            project_dir_canon.display()
+        );
+
+        // The exact shape create_workspace builds: <project_dir_canon>/<repo name>.
+        let wt_path = project_dir_canon.join("backend");
+        create_worktree(&repo_path, &wt_path, "feature-x")
+            .expect("create_worktree should succeed for a canonicalized project dir");
+
+        assert!(wt_path.exists());
+        assert_eq!(
+            get_current_branch(&wt_path).expect("current branch"),
+            "feature-x"
+        );
+    }
+
+    #[test]
+    fn test_delete_branch_removes_branch_and_errors_when_missing() {
+        let (_temp_dir, repo_path) = init_mock_repo("main");
+
+        let wt_dir = _temp_dir.path().join("wt");
+        create_worktree(&repo_path, &wt_dir, "doomed").expect("create_worktree");
+        assert!(branch_exists(&repo_path, "doomed").expect("branch_exists"));
+
+        // The branch is checked out by the worktree, so it has to go first.
+        remove_worktree(&repo_path, &wt_dir, true).expect("remove_worktree");
+        // Removing a worktree leaves the branch behind - that is why rollback needs this.
+        assert!(
+            branch_exists(&repo_path, "doomed").expect("branch_exists"),
+            "removing a worktree must not delete its branch"
+        );
+
+        delete_branch(&repo_path, "doomed").expect("delete_branch");
+        assert!(!branch_exists(&repo_path, "doomed").expect("branch_exists"));
+
+        // Deleting a branch that is not there is an error, not a silent success - callers on
+        // the rollback path swallow it with `let _ =`.
+        assert!(delete_branch(&repo_path, "never-existed").is_err());
     }
 }

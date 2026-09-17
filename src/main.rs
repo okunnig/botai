@@ -277,7 +277,7 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
         bail!("Project directory '{project_dir:?}' does not exist.");
     }
 
-    let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
+    let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
 
     let template_name = botai::project::extract_template_name_from_agents_md(&project_dir);
     let agent_name = template_name

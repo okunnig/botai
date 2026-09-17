@@ -529,7 +529,7 @@ impl Config {
                     let local_path = if path_obj.is_absolute() || url_trimmed.starts_with('~') {
                         expand_tilde(url_trimmed)
                     } else if path_obj.exists() {
-                        std::fs::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf())
+                        dunce::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf())
                     } else {
                         repos_dir.join(url_trimmed)
                     };
@@ -569,7 +569,7 @@ impl Config {
                 let local_path = if path_obj.is_absolute() || trimmed.starts_with('~') {
                     expand_tilde(trimmed)
                 } else if path_obj.exists() {
-                    std::fs::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf())
+                    dunce::canonicalize(path_obj).unwrap_or_else(|_| path_obj.to_path_buf())
                 } else {
                     repos_dir.join(trimmed)
                 };
