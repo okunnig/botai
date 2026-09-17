@@ -153,6 +153,7 @@ impl ContextSynthesizer {
         md.push_str("- **Multi-Repo Project**: Each subfolder corresponds to an independent Git worktree repository.\n");
         md.push_str("- **Atomic Commits**: Commit changes within each individual repository worktree as appropriate.\n");
         md.push_str("- **Execution Context**: Run build/test commands within the respective repository subdirectories.\n");
+        md.push_str("- **Repository Guidelines**: Before planning, reading, or modifying code in any repository worktree, check for and read its local instruction file (`AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`) and adhere to its repo-specific conventions.\n");
 
         if let Some(text) = &context.agents_md_append {
             let trimmed = text.trim();
@@ -265,6 +266,7 @@ mod tests {
         // Agent orientation guidance
         assert!(markdown.contains("Multi-Repository Guidelines"));
         assert!(markdown.contains("checkout-flow"));
+        assert!(markdown.contains("Repository Guidelines"));
     }
 
     #[test]
@@ -449,5 +451,21 @@ mod tests {
 
         let metadata = fs::symlink_metadata(&claude_md_path).expect("read symlink metadata");
         assert!(!metadata.file_type().is_symlink());
+    }
+
+    #[test]
+    fn test_synthesize_includes_repository_guidelines() {
+        let repos = vec![RepoMapping::new(
+            "backend",
+            PathBuf::from("/repos/backend"),
+            PathBuf::from("backend"),
+        )];
+        let context = ProjectContext::new("test-project", "test-template").with_repos(repos);
+        let markdown = ContextSynthesizer::synthesize(&context);
+
+        assert!(markdown.contains("## Multi-Repository Guidelines"));
+        assert!(markdown.contains(
+            "- **Repository Guidelines**: Before planning, reading, or modifying code in any repository worktree, check for and read its local instruction file (`AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`) and adhere to its repo-specific conventions.\n"
+        ));
     }
 }

@@ -188,6 +188,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - The multi-repo structure and mapping of child worktree directories.
     - Each repository's purpose and inter-dependencies.
     - Guidance for the AI agent on navigating, building, and modifying multiple repos simultaneously.
+    - Explicit repository guidelines instructing AI agents to inspect and adhere to local instruction files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`) in child worktrees prior to planning, reading, or modifying code in those subdirectories.
   - **`CLAUDE.md` Context Import (`@AGENTS.md`)**:
     - When `AGENTS.md` is created at the project root, automatically creates a `CLAUDE.md` file at the project root containing `@AGENTS.md` so that Claude Code imports and evaluates the synthesized multi-repo orientation context directly via its native `@include` directive without duplicating file content or relying on fragile OS filesystem symlinks.
 - **Custom Template Instructions (`agents_md_append`)**:
