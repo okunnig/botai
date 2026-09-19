@@ -507,25 +507,34 @@ env = { PORT = "8080", NODE_ENV = "development" }
             - **Paste Handling**: Sanitizes pasted text by stripping newlines and inserting content at the current cursor position.
             - **Accurate Terminal Hardware Cursor**: Positions the terminal cursor at the exact column offset matching the current cursor position.
             - **Real-Time Pre-Validation Badges**: Dynamically displays `[✓ Ready]`, `[✗ Collision]`, or `[Required]`.
-          - `Repositories:` Interactive repository selection checklist:
-            - **Checklist Representation**: Displays all template repositories with a visual selection checkbox indicator (`[x]` for included/selected, `[ ]` for excluded/unselected), repository name, and optional `[optional]` tag.
-            - **Initial State**: Pre-populated according to the template configuration: repositories with `default = true` (and simple strings) are initially checked `[x]`, while repositories with `default = false` are initially unchecked `[ ]`.
-            - **Navigation & Toggling**: Navigated vertically using `Up` / `Down` arrows within the checklist when focused. Pressing `Space` toggles the selection state of the highlighted repository.
-            - **Scrollable Viewport**: When a template contains more repositories than fit within the allocated visible checklist height, the checklist smoothly scrolls vertically, maintaining the active highlighted item in view.
-            - **Focus Cycle**: Integrated into the Step 2 field focus cycle (`Project Name` -> `Repositories` -> `Agent CLI` -> `Initial Prompt`), navigated using `Tab` / `Shift+Tab`.
-            - **Real-Time Pre-Validation**: Continuously validates that at least one repository is selected. If all repositories are unchecked, displays an inline validation error `[✗ At least 1 repository required]` and blocks form submission (`Enter`).
           - `Agent CLI:` Interactive tool selector (`claude`, `agy`, `copilot`, `aider`, etc. cycled via `Left`/`Right`).
-         - `Initial Prompt:` Optional task instruction prompt rendered in a dedicated multi-line box (3–4 visible lines) with:
-           - **Word Wrapping & Sizing**: Automatic line wrapping according to available modal width, preserving line breaks.
-           - **Internal Vertical Scrolling**: Automatic vertical scrolling keeping the active line and cursor in view when text exceeds visible lines.
-           - **In-Line Cursor Navigation**: Full cursor positioning (`Left`/`Right` character movement, `Home`/`End` to line/prompt boundaries, `Backspace`/`Delete` at cursor position).
-           - **Vertical Navigation**: `Up`/`Down` arrows move the cursor vertically across lines within the prompt (with top-line `Up` / bottom-line `Down` transitioning focus between form fields).
-           - **Newline Insertion**: `Shift+Enter` or `Alt+Enter` inserts a newline (`\n`) at the cursor position without triggering submission.
-           - **Bracketed / Multi-line Paste**: Pasting multi-line content preserves newlines cleanly without premature form submission.
-           - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
-         - Live pre-validation status banner at the bottom.
-       - **Back-Navigation**: Pressing `Esc` in Step 2 returns to Step 1 without losing configuration. Pressing `Backspace` inside editable text fields strictly performs character deletion (no-op when empty or at cursor offset 0) and never navigates away from the step.
-       - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, and optional initial prompt. The selected agent override is plumbed through `DashboardAction::CreateProject` and `CreationModalAction::Submit` directly into `start_project_creation` and `run_setup_worker` to instantiate the chosen agent CLI.
+          - `Repositories:` Interactive repository selection checklist:
+            - **Header & Counter**: Displays `Repositories (<selected_count>/<total_count> selected):` with dynamic scroll indicator badges (`▲` if scrolled down, `▼` if more items exist below).
+            - **Item Presentation**: Each repository item displays an active pointer indicator (`▶ ` for the highlighted item, `  ` otherwise), checkbox state (`[x]` for included/selected, `[ ]` for excluded/unselected), repository name (bold when selected, dimmed when unselected), and an ` (optional)` tag for repositories configured with `default = false`.
+            - **Initial State**: Automatically pre-populated when selecting or changing templates based on template repository configurations: repositories with `default = true` (or string syntax) are pre-checked `[x]`, and repositories with `default = false` are pre-unchecked `[ ]`.
+            - **Navigation & Focus Cycle**: Integrated into the Step 2 field focus cycle (`Project Name` -> `Agent CLI` -> `Repositories` -> `Initial Prompt`), navigated using `Tab` / `Shift+Tab`. When `Repositories` is focused:
+              - `Up` / `Down` arrows or `k` / `j` move the highlighted item up and down through the checklist.
+              - Navigating `Up` / `k` past the top repository transitions focus to `Agent CLI`.
+              - Navigating `Down` / `j` past the bottom repository transitions focus to `Initial Prompt`.
+              - Mouse wheel scrolling up and down inside the repository list scrolls the checklist item selection.
+            - **Selection Controls**:
+              - `Space`: Toggles the inclusion state of the currently highlighted repository.
+              - `a` / `A`: Bulk toggles all repositories (deselects all if all are currently selected; otherwise selects all).
+            - **Scrollable Viewport**: Constrained to a visible height of up to 3 items (`REPOS_VISIBLE_ROWS = 3`). When repository count exceeds 3, the viewport scrolls smoothly to keep the active item visible, accompanied by `▲` / `▼` indicators.
+            - **Real-Time Pre-Validation**: Continuously validates repository selection:
+              - Fast synchronous validation: If zero repositories are selected, immediately marks the modal invalid with `"At least one repository must be selected"` and blocks form submission (`Enter`).
+              - Asynchronous branch collision validation: Passes only currently selected repositories (`with_selected_repos(selected_repos)`) to `ProjectBuilder::pre_validate()`, ensuring that branch collisions in unselected/deselected repositories do not block project creation.
+          - `Initial Prompt:` Optional task instruction prompt rendered in a dedicated multi-line box (3–4 visible lines) with:
+            - **Word Wrapping & Sizing**: Automatic line wrapping according to available modal width, preserving line breaks.
+            - **Internal Vertical Scrolling**: Automatic vertical scrolling keeping the active line and cursor in view when text exceeds visible lines.
+            - **In-Line Cursor Navigation**: Full cursor positioning (`Left`/`Right` character movement, `Home`/`End` to line/prompt boundaries, `Backspace`/`Delete` at cursor position).
+            - **Vertical Navigation**: `Up`/`Down` arrows move the cursor vertically across lines within the prompt (with top-line `Up` / bottom-line `Down` transitioning focus between form fields).
+            - **Newline Insertion**: `Shift+Enter` or `Alt+Enter` inserts a newline (`\n`) at the cursor position without triggering submission.
+            - **Bracketed / Multi-line Paste**: Pasting multi-line content preserves newlines cleanly without premature form submission.
+            - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
+          - Live pre-validation status banner at the bottom.
+        - **Back-Navigation**: Pressing `Esc` in Step 2 returns to Step 1 without losing configuration. Pressing `Backspace` inside editable text fields strictly performs character deletion (no-op when empty or at cursor offset 0) and never navigates away from the step.
+        - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, explicit list of selected repositories (`with_selected_repos(selected_repos)`), and optional initial prompt. The selected agent override and repository list are plumbed through `DashboardAction::CreateProject` and `CreationModalAction::Submit` directly into `start_project_creation` and `run_setup_worker` to initialize the project with exactly the chosen repositories.
 
 ---
 

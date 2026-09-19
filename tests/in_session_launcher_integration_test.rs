@@ -158,6 +158,13 @@ repos = ['{repo_path_str}']
         CreationFocus::Agent
     );
 
+    // Tab to Repositories
+    app.handle_creation_modal_key(key(KeyCode::Tab));
+    assert_eq!(
+        app.creation_modal.as_ref().unwrap().focus,
+        CreationFocus::Repositories
+    );
+
     // Tab to Prompt
     app.handle_creation_modal_key(key(KeyCode::Tab));
     assert_eq!(

@@ -831,6 +831,7 @@ impl TuiApp {
                     project,
                     agent_override,
                     prompt,
+                    selected_repos,
                 } => {
                     self.creation_modal = None;
                     self.start_project_creation(
@@ -838,6 +839,7 @@ impl TuiApp {
                         &project,
                         agent_override.as_deref(),
                         prompt.as_deref(),
+                        selected_repos,
                     );
                 }
                 CreationModalAction::None => {
@@ -914,12 +916,14 @@ impl TuiApp {
                 project,
                 agent_override,
                 prompt,
+                selected_repos,
             } => {
                 self.start_project_creation(
                     &template,
                     &project,
                     agent_override.as_deref(),
                     prompt.as_deref(),
+                    selected_repos,
                 );
             }
             DashboardAction::Destroy(project) => {
@@ -1044,6 +1048,7 @@ impl TuiApp {
         project_name: &str,
         agent_override: Option<&str>,
         prompt: Option<&str>,
+        selected_repos: Vec<String>,
     ) {
         let _ = self.reload_config();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1082,6 +1087,7 @@ impl TuiApp {
                 cwd,
                 viewport_size,
                 tx,
+                selected_repos,
             );
         });
     }
@@ -2802,7 +2808,13 @@ repos = ['{}']
             .with_config(config)
             .with_cwd(cwd.clone());
 
-        app.start_project_creation("test_ws", "async-proj", None, Some("Initial prompt"));
+        app.start_project_creation(
+            "test_ws",
+            "async-proj",
+            None,
+            Some("Initial prompt"),
+            vec!["repo_test".to_string()],
+        );
         assert!(app.setup_modal.is_some());
 
         // Wait up to 5 seconds for worker thread to finish
@@ -2868,6 +2880,7 @@ repos = ['{}']
             "override-proj",
             Some("mock_override"),
             Some("Task instructions"),
+            vec!["repo_test".to_string()],
         );
         assert!(app.setup_modal.is_some());
 
@@ -2905,7 +2918,7 @@ repos = ['{}']
         let mut app = TuiApp::new(registry).with_cwd(cwd.clone());
 
         // Try creating project with name that already exists in registry
-        app.start_project_creation("ws", "active-proj", None, None);
+        app.start_project_creation("ws", "active-proj", None, None, vec![]);
         assert!(app.setup_modal.is_some());
         let modal = app.setup_modal.as_ref().unwrap();
         assert!(modal.error.is_some());

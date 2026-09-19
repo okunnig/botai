@@ -265,6 +265,7 @@ repos = ["cloud_service"]
         project: "microservice-alpha".to_string(),
         agent_override: Some("mock_agent".to_string()),
         prompt: Some("Initialize API endpoints".to_string()),
+        selected_repos: vec!["cloud_service".to_string()],
     });
 
     assert!(app.setup_modal.is_some());
@@ -347,6 +348,7 @@ repos = ["cloud_service"]
         project: "custom-agent-proj".to_string(),
         agent_override: Some("mock_custom".to_string()),
         prompt: None,
+        selected_repos: vec!["cloud_service".to_string()],
     });
 
     let start = std::time::Instant::now();
@@ -389,7 +391,13 @@ repos = ["nonexistent-repo-that-does-not-exist"]
         .with_config(config)
         .with_cwd(cwd.clone());
 
-    app.start_project_creation("bad_ws", "failing-proj", None, None);
+    app.start_project_creation(
+        "bad_ws",
+        "failing-proj",
+        None,
+        None,
+        vec!["nonexistent-repo-that-does-not-exist".to_string()],
+    );
     assert!(app.setup_modal.is_some());
 
     // Wait for worker to encounter error and stream failure event

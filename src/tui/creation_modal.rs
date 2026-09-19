@@ -29,7 +29,16 @@ pub enum CreationFocus {
     Template,
     ProjectName,
     Agent,
+    Repositories,
     Prompt,
+}
+
+/// Item in the interactive repository selection checklist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoSelectionItem {
+    pub name: String,
+    pub default_included: bool,
+    pub selected: bool,
 }
 
 /// Actions emitted by user interactions with the Project Creation Modal.
@@ -41,11 +50,13 @@ pub enum CreationModalAction {
         project: String,
         agent_override: Option<String>,
         prompt: Option<String>,
+        selected_repos: Vec<String>,
     },
     Cancel,
 }
 
 pub const PROMPT_VISIBLE_LINES: usize = 3;
+pub const REPOS_VISIBLE_ROWS: usize = 3;
 
 /// A wrapped line of prompt text with its character offsets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +85,9 @@ pub struct ProjectCreationModal {
     pub project_name_cursor: usize,
     pub agent_list: Vec<String>,
     pub selected_agent_idx: usize,
+    pub repo_items: Vec<RepoSelectionItem>,
+    pub selected_repo_idx: usize,
+    pub repo_scroll_offset: usize,
     pub prompt_input: String,
     pub prompt_cursor: usize,
     pub prompt_scroll_offset: usize,
@@ -98,6 +112,9 @@ impl Clone for ProjectCreationModal {
             project_name_cursor: self.project_name_cursor,
             agent_list: self.agent_list.clone(),
             selected_agent_idx: self.selected_agent_idx,
+            repo_items: self.repo_items.clone(),
+            selected_repo_idx: self.selected_repo_idx,
+            repo_scroll_offset: self.repo_scroll_offset,
             prompt_input: self.prompt_input.clone(),
             prompt_cursor: self.prompt_cursor,
             prompt_scroll_offset: self.prompt_scroll_offset,
@@ -122,6 +139,9 @@ impl PartialEq for ProjectCreationModal {
             && self.project_name_cursor == other.project_name_cursor
             && self.agent_list == other.agent_list
             && self.selected_agent_idx == other.selected_agent_idx
+            && self.repo_items == other.repo_items
+            && self.selected_repo_idx == other.selected_repo_idx
+            && self.repo_scroll_offset == other.repo_scroll_offset
             && self.prompt_input == other.prompt_input
             && self.prompt_cursor == other.prompt_cursor
             && self.prompt_scroll_offset == other.prompt_scroll_offset
@@ -184,6 +204,9 @@ impl ProjectCreationModal {
             project_name_cursor: 0,
             agent_list,
             selected_agent_idx,
+            repo_items: Vec::new(),
+            selected_repo_idx: 0,
+            repo_scroll_offset: 0,
             prompt_input: String::new(),
             prompt_cursor: 0,
             prompt_scroll_offset: 0,
@@ -194,6 +217,7 @@ impl ProjectCreationModal {
             validation_rx: Arc::new(Mutex::new(validation_rx)),
         };
 
+        modal.sync_repos_with_template();
         modal.revalidate();
         modal
     }
@@ -298,7 +322,7 @@ impl ProjectCreationModal {
         }
     }
 
-    /// Cycles to the next available template and updates default agent override if appropriate.
+    /// Cycles to the next available template and updates default agent override and repository selection.
     pub fn cycle_template_next(&mut self) {
         match self.step {
             CreationStep::SelectTemplate => {
@@ -306,6 +330,7 @@ impl ProjectCreationModal {
                 if !matching.is_empty() {
                     self.selected_template_idx = (self.selected_template_idx + 1) % matching.len();
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
@@ -314,13 +339,14 @@ impl ProjectCreationModal {
                     self.selected_template_idx =
                         (self.selected_template_idx + 1) % self.templates.len();
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
         }
     }
 
-    /// Cycles to the previous available template and updates default agent override if appropriate.
+    /// Cycles to the previous available template and updates default agent override and repository selection.
     pub fn cycle_template_prev(&mut self) {
         match self.step {
             CreationStep::SelectTemplate => {
@@ -329,6 +355,7 @@ impl ProjectCreationModal {
                     self.selected_template_idx =
                         (self.selected_template_idx + matching.len() - 1) % matching.len();
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
@@ -338,6 +365,7 @@ impl ProjectCreationModal {
                         (self.selected_template_idx + self.templates.len() - 1)
                             % self.templates.len();
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
@@ -376,11 +404,103 @@ impl ProjectCreationModal {
         }
     }
 
+    /// Synchronizes repository selection items with the newly selected template's declared repositories.
+    pub fn sync_repos_with_template(&mut self) {
+        if let Some(tpl_name) = self.selected_template() {
+            if let Ok(resolved) = self.config.resolve_template_repos(tpl_name) {
+                self.repo_items = resolved
+                    .into_iter()
+                    .map(|r| RepoSelectionItem {
+                        name: r.name,
+                        default_included: r.default_include,
+                        selected: r.default_include,
+                    })
+                    .collect();
+            } else {
+                self.repo_items.clear();
+            }
+        } else {
+            self.repo_items.clear();
+        }
+        self.selected_repo_idx = 0;
+        self.repo_scroll_offset = 0;
+    }
+
+    /// Returns the names of all currently selected repositories in the checklist.
+    pub fn selected_repo_names(&self) -> Vec<String> {
+        self.repo_items
+            .iter()
+            .filter(|item| item.selected)
+            .map(|item| item.name.clone())
+            .collect()
+    }
+
+    /// Toggles the inclusion state of the highlighted repository item and triggers revalidation.
+    pub fn toggle_selected_repo(&mut self) {
+        if !self.repo_items.is_empty() && self.selected_repo_idx < self.repo_items.len() {
+            self.repo_items[self.selected_repo_idx].selected =
+                !self.repo_items[self.selected_repo_idx].selected;
+            self.revalidate();
+        }
+    }
+
+    /// Toggles all repository items: if all are currently selected, unselects all; otherwise selects all.
+    pub fn toggle_all_repos(&mut self) {
+        if self.repo_items.is_empty() {
+            return;
+        }
+        let all_selected = self.repo_items.iter().all(|r| r.selected);
+        let new_state = !all_selected;
+        for item in &mut self.repo_items {
+            item.selected = new_state;
+        }
+        self.revalidate();
+    }
+
+    /// Cycles to the previous repository in the checklist, scrolling up if necessary.
+    /// Returns `true` if moved, `false` if already at the top (idx 0).
+    pub fn cycle_repo_prev(&mut self) -> bool {
+        if self.repo_items.is_empty() || self.selected_repo_idx == 0 {
+            false
+        } else {
+            self.selected_repo_idx -= 1;
+            if self.selected_repo_idx < self.repo_scroll_offset {
+                self.repo_scroll_offset = self.selected_repo_idx;
+            }
+            true
+        }
+    }
+
+    /// Cycles to the next repository in the checklist, scrolling down if necessary.
+    /// Returns `true` if moved, `false` if already at the bottom.
+    pub fn cycle_repo_next(&mut self) -> bool {
+        if self.repo_items.is_empty() || self.selected_repo_idx + 1 >= self.repo_items.len() {
+            false
+        } else {
+            self.selected_repo_idx += 1;
+            if self.selected_repo_idx >= self.repo_scroll_offset + REPOS_VISIBLE_ROWS {
+                self.repo_scroll_offset =
+                    self.selected_repo_idx.saturating_sub(REPOS_VISIBLE_ROWS.saturating_sub(1));
+            }
+            true
+        }
+    }
+
+    /// Returns the number of visible repository checklist rows to render in Step 2.
+    pub fn repos_rendered_rows(&self) -> usize {
+        if self.repo_items.is_empty() {
+            1
+        } else {
+            self.repo_items.len().min(REPOS_VISIBLE_ROWS)
+        }
+    }
+
     /// Moves focus to the next input field.
     pub fn next_focus(&mut self) {
         self.focus = match self.focus {
             CreationFocus::ProjectName => CreationFocus::Agent,
-            CreationFocus::Agent => CreationFocus::Prompt,
+            CreationFocus::Agent => CreationFocus::Repositories,
+            CreationFocus::Repositories => CreationFocus::Prompt,
             CreationFocus::Prompt => CreationFocus::ProjectName,
             CreationFocus::Template => CreationFocus::ProjectName,
         };
@@ -391,7 +511,8 @@ impl ProjectCreationModal {
         self.focus = match self.focus {
             CreationFocus::ProjectName => CreationFocus::Prompt,
             CreationFocus::Agent => CreationFocus::ProjectName,
-            CreationFocus::Prompt => CreationFocus::Agent,
+            CreationFocus::Repositories => CreationFocus::Agent,
+            CreationFocus::Prompt => CreationFocus::Repositories,
             CreationFocus::Template => CreationFocus::Prompt,
         };
     }
@@ -400,15 +521,21 @@ impl ProjectCreationModal {
     /// git branch collision checks across template repositories if fast checks pass.
     pub fn revalidate(&mut self) {
         let tpl_name = self.selected_template().unwrap_or("");
+        let selected_repos = self.selected_repo_names();
         let builder = ProjectBuilder::new(
             self.config.clone(),
             tpl_name,
             self.project_name_input.value(),
         )
         .with_cwd(&self.cwd)
-        .with_agent(self.selected_agent());
+        .with_agent(self.selected_agent())
+        .with_selected_repos(selected_repos.clone());
 
         self.validation = builder.validate_fast();
+        if selected_repos.is_empty() {
+            self.validation.is_valid = false;
+            self.validation.add_error("At least one repository must be selected");
+        }
         self.validation_generation = self.validation_generation.wrapping_add(1);
 
         if self.validation.is_valid && !self.project_name_input.trim().is_empty() {
@@ -960,8 +1087,9 @@ impl ProjectCreationModal {
                     let scroll_offset = self.prompt_scroll_offset.min(line_idx);
                     let visible_line = line_idx.saturating_sub(scroll_offset);
                     if visible_line < PROMPT_VISIBLE_LINES {
+                        let repos_rows = 1 + self.repos_rendered_rows() as u16;
                         let cursor_x = inner.x + 18 + col_idx as u16;
-                        let cursor_y = inner.y + 5 + visible_line as u16;
+                        let cursor_y = inner.y + 5 + repos_rows + visible_line as u16;
                         if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                             Some(Position::new(cursor_x, cursor_y))
                         } else {
@@ -1026,6 +1154,7 @@ impl ProjectCreationModal {
                             matching[self.selected_template_idx.min(matching.len() - 1)];
                         self.selected_template_idx = target_idx;
                         self.sync_agent_with_template();
+                        self.sync_repos_with_template();
                         self.revalidate();
                         self.step = CreationStep::ConfigureDetails;
                         self.focus = CreationFocus::ProjectName;
@@ -1042,6 +1171,7 @@ impl ProjectCreationModal {
                     }
                     if modified {
                         self.sync_agent_with_template();
+                        self.sync_repos_with_template();
                         self.revalidate();
                     }
                     CreationModalAction::None
@@ -1200,6 +1330,52 @@ impl ProjectCreationModal {
                         }
                         _ => CreationModalAction::None,
                     }
+                } else if self.focus == CreationFocus::Repositories {
+                    match key.code {
+                        KeyCode::Esc => self.handle_back_or_cancel(),
+                        KeyCode::Tab => {
+                            self.next_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::BackTab => {
+                            self.prev_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Up => {
+                            if !self.cycle_repo_prev() {
+                                self.prev_focus();
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Down => {
+                            if !self.cycle_repo_next() {
+                                self.next_focus();
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char('k') if !has_ctrl && !has_alt => {
+                            if !self.cycle_repo_prev() {
+                                self.prev_focus();
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char('j') if !has_ctrl && !has_alt => {
+                            if !self.cycle_repo_next() {
+                                self.next_focus();
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char(' ') => {
+                            self.toggle_selected_repo();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('A') if !has_ctrl && !has_alt => {
+                            self.toggle_all_repos();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Enter => self.try_submit(),
+                        _ => CreationModalAction::None,
+                    }
                 } else {
                     match key.code {
                         KeyCode::Esc => self.handle_back_or_cancel(),
@@ -1252,6 +1428,7 @@ impl ProjectCreationModal {
     /// Attempts to validate and submit the project creation modal.
     pub fn try_submit(&mut self) -> CreationModalAction {
         self.poll_validation();
+        let selected_repos = self.selected_repo_names();
         if self.validation.is_valid {
             let tpl_name = self.selected_template().unwrap_or("");
             let builder = ProjectBuilder::new(
@@ -1260,8 +1437,13 @@ impl ProjectCreationModal {
                 self.project_name_input.value(),
             )
             .with_cwd(&self.cwd)
-            .with_agent(self.selected_agent());
+            .with_agent(self.selected_agent())
+            .with_selected_repos(selected_repos.clone());
             self.validation = builder.validate_detailed();
+            if selected_repos.is_empty() {
+                self.validation.is_valid = false;
+                self.validation.add_error("At least one repository must be selected");
+            }
         }
         if self.validation.is_valid {
             let trimmed = self.project_name_input.trim();
@@ -1276,6 +1458,7 @@ impl ProjectCreationModal {
                     project: trimmed.to_string(),
                     agent_override: Some(self.selected_agent().to_string()),
                     prompt,
+                    selected_repos,
                 }
             } else {
                 CreationModalAction::None
@@ -1313,6 +1496,7 @@ impl ProjectCreationModal {
                         self.selected_template_idx = matching.len() - 1;
                     }
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
@@ -1327,7 +1511,7 @@ impl ProjectCreationModal {
                 CreationFocus::Prompt => {
                     self.insert_str_prompt(text);
                 }
-                CreationFocus::Agent | CreationFocus::Template => {}
+                CreationFocus::Agent | CreationFocus::Repositories | CreationFocus::Template => {}
             },
         }
     }
@@ -1343,6 +1527,8 @@ impl ProjectCreationModal {
                     CreationStep::ConfigureDetails => {
                         if self.focus == CreationFocus::Agent {
                             self.cycle_agent_prev();
+                        } else if self.focus == CreationFocus::Repositories {
+                            self.cycle_repo_prev();
                         } else if self.focus == CreationFocus::Prompt {
                             if !self.move_prompt_cursor_up() {
                                 self.prev_focus();
@@ -1362,6 +1548,8 @@ impl ProjectCreationModal {
                     CreationStep::ConfigureDetails => {
                         if self.focus == CreationFocus::Agent {
                             self.cycle_agent_next();
+                        } else if self.focus == CreationFocus::Repositories {
+                            self.cycle_repo_next();
                         } else if self.focus == CreationFocus::Prompt {
                             if !self.move_prompt_cursor_down() {
                                 self.next_focus();
@@ -1728,6 +1916,7 @@ impl ProjectCreationModal {
 
         let proj_focused = self.focus == CreationFocus::ProjectName;
         let agent_focused = self.focus == CreationFocus::Agent;
+        let repos_focused = self.focus == CreationFocus::Repositories;
         let prompt_focused = self.focus == CreationFocus::Prompt;
 
         let proj_label_style = if proj_focused {
@@ -1746,6 +1935,14 @@ impl ProjectCreationModal {
             Style::default().fg(theme.status_bar_fg)
         };
 
+        let repos_label_style = if repos_focused {
+            Style::default()
+                .fg(theme.modal_label)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.status_bar_fg)
+        };
+
         let prompt_label_style = if prompt_focused {
             Style::default()
                 .fg(theme.modal_label)
@@ -1756,6 +1953,7 @@ impl ProjectCreationModal {
 
         let proj_prefix = if proj_focused { "▶ " } else { "  " };
         let agent_prefix = if agent_focused { "▶ " } else { "  " };
+        let repos_prefix = if repos_focused { "▶ " } else { "  " };
         let prompt_prefix = if prompt_focused { "▶ " } else { "  " };
 
         // 1. Template summary info
@@ -1840,7 +2038,97 @@ impl ProjectCreationModal {
                 .add_modifier(Modifier::BOLD),
         );
 
-        // 4. Initial Prompt (multi-line box with visible lines)
+        // 4. Repositories Selection Checklist
+        let selected_count = self.selected_repo_names().len();
+        let total_count = self.repo_items.len();
+        let mut repos_header_spans = vec![Span::styled(
+            format!("{repos_prefix}Repositories ({selected_count}/{total_count} selected):"),
+            repos_label_style,
+        )];
+
+        if total_count > REPOS_VISIBLE_ROWS {
+            let mut indicators = Vec::new();
+            if self.repo_scroll_offset > 0 {
+                indicators.push("▲");
+            }
+            if self.repo_scroll_offset + REPOS_VISIBLE_ROWS < total_count {
+                indicators.push("▼");
+            }
+            if !indicators.is_empty() {
+                repos_header_spans.push(Span::raw(" "));
+                repos_header_spans.push(Span::styled(
+                    indicators.join(" "),
+                    Style::default()
+                        .fg(theme.key_hint)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+
+        let mut repo_row_lines = Vec::new();
+        if self.repo_items.is_empty() {
+            repo_row_lines.push(Line::from(vec![
+                Span::raw("      "),
+                Span::styled("(none)", Style::default().fg(theme.input_placeholder)),
+            ]));
+        } else {
+            let start = self
+                .repo_scroll_offset
+                .min(self.repo_items.len().saturating_sub(1));
+            let end = (start + REPOS_VISIBLE_ROWS).min(self.repo_items.len());
+            for idx in start..end {
+                let item = &self.repo_items[idx];
+                let is_highlighted = repos_focused && idx == self.selected_repo_idx;
+                let item_indicator = if is_highlighted { "▶ " } else { "  " };
+                let check_box = if item.selected { "[x] " } else { "[ ] " };
+
+                let indicator_style = if is_highlighted {
+                    Style::default()
+                        .fg(theme.selection_indicator)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.modal_label)
+                };
+
+                let check_style = if item.selected {
+                    Style::default()
+                        .fg(theme.status_done)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.input_placeholder)
+                };
+
+                let name_style = if is_highlighted {
+                    Style::default()
+                        .fg(theme.selection_indicator)
+                        .add_modifier(Modifier::BOLD)
+                } else if item.selected {
+                    Style::default()
+                        .fg(theme.input_text)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.input_text)
+                };
+
+                let mut row_spans = vec![
+                    Span::raw("    "),
+                    Span::styled(item_indicator, indicator_style),
+                    Span::styled(check_box, check_style),
+                    Span::styled(&item.name, name_style),
+                ];
+
+                if !item.default_included {
+                    row_spans.push(Span::styled(
+                        " (optional)",
+                        Style::default().fg(theme.input_placeholder),
+                    ));
+                }
+
+                repo_row_lines.push(Line::from(row_spans));
+            }
+        }
+
+        // 5. Initial Prompt (multi-line box with visible lines)
         let prompt_text_width = (inner.width.saturating_sub(18) as usize).max(10);
         let prompt_lines = self.compute_wrapped_prompt_lines(prompt_text_width);
         let visible_count = PROMPT_VISIBLE_LINES;
@@ -1891,7 +2179,7 @@ impl ProjectCreationModal {
             }
         }
 
-        // 5. Validation Status Banner
+        // 6. Validation Status Banner
         let banner_line = if let Some(msg) = self.validation.primary_message() {
             if self.validation.is_valid {
                 Line::from(vec![
@@ -1936,8 +2224,10 @@ impl ProjectCreationModal {
             Line::from("")
         };
 
-        // 6. Footer Hints
-        let footer_text = if self.templates.len() > 1 {
+        // 7. Footer Hints
+        let footer_text = if repos_focused {
+            " [Tab] Next | [Space] Toggle | [A] All | [Enter] Create Project | [Esc] Back "
+        } else if self.templates.len() > 1 {
             " [Tab] Next | [←/→] Agent | [Enter] Create Project | [Esc/Bksp] Back "
         } else {
             " [Tab] Next | [←/→] Agent | [Enter] Create Project | [Esc] Cancel "
@@ -1983,7 +2273,11 @@ impl ProjectCreationModal {
             agent_display,
         ]));
 
-        // Rows 5..=7: Prompt
+        // Repositories section (header + item rows)
+        lines.push(Line::from(repos_header_spans));
+        lines.extend(repo_row_lines);
+
+        // Rows Prompt
         lines.extend(prompt_row_spans);
 
         lines.push(Line::from(""));
@@ -2107,6 +2401,10 @@ mod tests {
         modal.handle_key(key(KeyCode::Right));
         assert_ne!(modal.selected_agent(), &initial_agent);
 
+        // Tab to Repositories
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
         // Tab to Prompt
         modal.handle_key(key(KeyCode::Tab));
         assert_eq!(modal.focus, CreationFocus::Prompt);
@@ -2125,11 +2423,13 @@ mod tests {
                 project,
                 agent_override,
                 prompt,
+                selected_repos,
             } => {
                 assert_eq!(template, "ecommerce");
                 assert_eq!(project, "feat-pay");
                 assert!(agent_override.is_some());
                 assert_eq!(prompt.as_deref(), Some("Do task"));
+                assert!(!selected_repos.is_empty());
             }
             other => panic!("Expected Submit action, got: {other:?}"),
         }
@@ -2528,11 +2828,11 @@ mod tests {
         modal.prompt_input = "fix bug".to_string();
         modal.prompt_cursor = 7;
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(38, 12)));
+        assert_eq!(pos, Some(Position::new(38, 14)));
 
         modal.prompt_cursor = 0;
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(31, 12)));
+        assert_eq!(pos, Some(Position::new(31, 14)));
 
         modal.focus = CreationFocus::Template;
         assert_eq!(modal.cursor_position(area), None);
@@ -2670,11 +2970,11 @@ mod tests {
         // On top line, move_prompt_cursor_up returns false
         assert!(!modal.move_prompt_cursor_up());
 
-        // Pressing Up when on top line transitions focus to prev field (Agent)
+        // Pressing Up when on top line transitions focus to prev field (Repositories)
         modal.handle_key(key(KeyCode::Up));
-        assert_eq!(modal.focus, CreationFocus::Agent);
+        assert_eq!(modal.focus, CreationFocus::Repositories);
 
-        // Down from Agent returns to Prompt
+        // Down from Repositories returns to Prompt
         modal.handle_key(key(KeyCode::Down));
         assert_eq!(modal.focus, CreationFocus::Prompt);
 
@@ -3267,5 +3567,387 @@ mod tests {
         modal.handle_paste("lp\r\nha-\x07test");
         assert_eq!(modal.template_search_query.value(), "alpha-test");
         assert_eq!(modal.template_search_query.cursor(), 10);
+    }
+
+    #[test]
+    fn test_repo_items_initialization_with_template_defaults() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.multi_repo]
+            repos = [
+                "repo_a",
+                { repo = "repo_b", default = false },
+                { repo = "repo_c", default = true }
+            ]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("multi_repo"));
+
+        assert_eq!(modal.repo_items.len(), 3);
+
+        assert_eq!(modal.repo_items[0].name, "repo_a");
+        assert!(modal.repo_items[0].default_included);
+        assert!(modal.repo_items[0].selected);
+
+        assert_eq!(modal.repo_items[1].name, "repo_b");
+        assert!(!modal.repo_items[1].default_included);
+        assert!(!modal.repo_items[1].selected);
+
+        assert_eq!(modal.repo_items[2].name, "repo_c");
+        assert!(modal.repo_items[2].default_included);
+        assert!(modal.repo_items[2].selected);
+
+        assert_eq!(
+            modal.selected_repo_names(),
+            vec!["repo_a".to_string(), "repo_c".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_focus_navigation_across_all_fields_tab_and_backtab() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = ["repo1", "repo2"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+
+        // Forward tab cycle: ProjectName -> Agent -> Repositories -> Prompt -> ProjectName
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Prompt);
+
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+
+        // Backward backtab cycle: ProjectName -> Prompt -> Repositories -> Agent -> ProjectName
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::Prompt);
+
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+
+        // Arrow navigation: Down from ProjectName -> Agent -> Repositories -> Prompt
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // In Repositories with 2 items (idx 0 -> idx 1 -> Prompt)
+        assert_eq!(modal.selected_repo_idx, 0);
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.selected_repo_idx, 1);
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // At bottom of repo list, Down moves to Prompt
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Prompt);
+
+        // Up at top line of prompt moves back to Repositories
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // In Repositories, Up moves to top item (idx 1 -> idx 0)
+        assert_eq!(modal.selected_repo_idx, 1);
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.selected_repo_idx, 0);
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // At top of Repositories, Up moves to Agent
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        // From Agent, Up moves to ProjectName
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+    }
+
+    #[test]
+    fn test_repositories_focus_navigation_and_space_toggle() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = [
+                "repo_alpha",
+                { repo = "repo_beta", default = false },
+                "repo_gamma"
+            ]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::Repositories;
+
+        // Initially alpha and gamma are selected, beta is not
+        assert_eq!(
+            modal.selected_repo_names(),
+            vec!["repo_alpha".to_string(), "repo_gamma".to_string()]
+        );
+        assert_eq!(modal.selected_repo_idx, 0);
+
+        // Space toggles repo_alpha off
+        modal.handle_key(key(KeyCode::Char(' ')));
+        assert!(!modal.repo_items[0].selected);
+        assert_eq!(modal.selected_repo_names(), vec!["repo_gamma".to_string()]);
+
+        // 'j' moves down to repo_beta
+        modal.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(modal.selected_repo_idx, 1);
+
+        // Space toggles repo_beta on
+        modal.handle_key(key(KeyCode::Char(' ')));
+        assert!(modal.repo_items[1].selected);
+        assert_eq!(
+            modal.selected_repo_names(),
+            vec!["repo_beta".to_string(), "repo_gamma".to_string()]
+        );
+
+        // 'k' moves back up to repo_alpha
+        modal.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(modal.selected_repo_idx, 0);
+
+        // 'a' toggles all repos: not all selected -> selects all
+        modal.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            modal.selected_repo_names(),
+            vec![
+                "repo_alpha".to_string(),
+                "repo_beta".to_string(),
+                "repo_gamma".to_string()
+            ]
+        );
+
+        // 'a' again toggles all repos: all selected -> unselects all
+        modal.handle_key(key(KeyCode::Char('A')));
+        assert!(modal.selected_repo_names().is_empty());
+    }
+
+    #[test]
+    fn test_deselecting_all_repos_invalidates_modal() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = ["repo1", "repo2"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.set_project_name("valid-project");
+        assert!(modal.validation.is_valid);
+
+        // Toggle all off
+        modal.toggle_all_repos();
+        assert!(modal.selected_repo_names().is_empty());
+        assert!(!modal.validation.is_valid);
+        assert!(modal
+            .validation
+            .errors
+            .iter()
+            .any(|e| e.contains("At least one repository must be selected")));
+
+        // try_submit fails when invalid
+        let act = modal.try_submit();
+        assert_eq!(act, CreationModalAction::None);
+
+        // Select one repo back
+        modal.selected_repo_idx = 0;
+        modal.toggle_selected_repo();
+        assert_eq!(modal.selected_repo_names(), vec!["repo1".to_string()]);
+        assert!(modal.validation.is_valid);
+
+        // try_submit succeeds
+        let act = modal.try_submit();
+        match act {
+            CreationModalAction::Submit {
+                template,
+                project,
+                selected_repos,
+                ..
+            } => {
+                assert_eq!(template, "tpl");
+                assert_eq!(project, "valid-project");
+                assert_eq!(selected_repos, vec!["repo1".to_string()]);
+            }
+            other => panic!("Expected Submit, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_deselecting_repo_ignores_branch_collision_on_that_repo() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_a_dir = temp_dir.path().join("repo_a");
+        let repo_b_dir = temp_dir.path().join("repo_b");
+        init_mock_repo(&repo_a_dir);
+        init_mock_repo(&repo_b_dir);
+
+        // Create a collision branch strictly in repo_b
+        let _ = std::process::Command::new("git")
+            .args(["branch", "collision-branch"])
+            .current_dir(&repo_b_dir)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.collision_tpl]
+            repos = ['{}', '{}']
+            "#,
+            toml_path(temp_dir.path()),
+            toml_path(&repo_a_dir),
+            toml_path(&repo_b_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        let mut modal =
+            ProjectCreationModal::new(&config, temp_dir.path(), Some("collision_tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.set_project_name("collision-branch");
+
+        // Wait for background validation to detect collision
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(300) {
+            modal.poll_validation();
+            if !modal.validation.is_valid {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            !modal.validation.is_valid,
+            "Validation should fail due to branch collision in repo_b"
+        );
+        assert!(modal
+            .validation
+            .errors
+            .iter()
+            .any(|e| e.contains("repo_b") && e.contains("collision-branch")));
+
+        // Deselect repo_b (repo_items[1])
+        modal.selected_repo_idx = 1;
+        assert_eq!(modal.repo_items[1].name, "repo_b");
+        modal.toggle_selected_repo();
+        assert_eq!(modal.selected_repo_names(), vec!["repo_a".to_string()]);
+
+        // Wait for revalidation without repo_b
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(300) {
+            modal.poll_validation();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            modal.validation.is_valid,
+            "Validation should be valid once repo_b with collision is deselected: {:?}",
+            modal.validation.errors
+        );
+
+        let act = modal.try_submit();
+        match act {
+            CreationModalAction::Submit {
+                project,
+                selected_repos,
+                ..
+            } => {
+                assert_eq!(project, "collision-branch");
+                assert_eq!(selected_repos, vec!["repo_a".to_string()]);
+            }
+            other => panic!("Expected Submit, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_repositories_scrolling_and_rendering() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.many_repos]
+            repos = ["repo1", "repo2", "repo3", "repo4", "repo5"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("many_repos"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::Repositories;
+
+        assert_eq!(modal.repo_items.len(), 5);
+        assert_eq!(modal.selected_repo_idx, 0);
+        assert_eq!(modal.repo_scroll_offset, 0);
+
+        // Move down past REPOS_VISIBLE_ROWS (3)
+        modal.handle_key(key(KeyCode::Down)); // idx 1, scroll 0
+        assert_eq!(modal.selected_repo_idx, 1);
+        assert_eq!(modal.repo_scroll_offset, 0);
+
+        modal.handle_key(key(KeyCode::Down)); // idx 2, scroll 0
+        assert_eq!(modal.selected_repo_idx, 2);
+        assert_eq!(modal.repo_scroll_offset, 0);
+
+        modal.handle_key(key(KeyCode::Down)); // idx 3, scroll 1 (visible: idx 1, 2, 3)
+        assert_eq!(modal.selected_repo_idx, 3);
+        assert_eq!(modal.repo_scroll_offset, 1);
+
+        modal.handle_key(key(KeyCode::Down)); // idx 4, scroll 2 (visible: idx 2, 3, 4)
+        assert_eq!(modal.selected_repo_idx, 4);
+        assert_eq!(modal.repo_scroll_offset, 2);
+
+        // Render in buffer and verify content and scroll indicator
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+        modal.render_modal(area, &mut buf, &theme);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("Repositories (5/5 selected):"));
+        assert!(rendered.contains("repo3"));
+        assert!(rendered.contains("repo4"));
+        assert!(rendered.contains("repo5"));
+        assert!(rendered.contains("▲")); // Indicates items above can be scrolled to
+
+        // Move back up
+        modal.handle_key(key(KeyCode::Up)); // idx 3, scroll 2
+        assert_eq!(modal.selected_repo_idx, 3);
+        assert_eq!(modal.repo_scroll_offset, 2);
+
+        modal.handle_key(key(KeyCode::Up)); // idx 2, scroll 2
+        assert_eq!(modal.selected_repo_idx, 2);
+        assert_eq!(modal.repo_scroll_offset, 2);
+
+        modal.handle_key(key(KeyCode::Up)); // idx 1, scroll 1
+        assert_eq!(modal.selected_repo_idx, 1);
+        assert_eq!(modal.repo_scroll_offset, 1);
+
+        modal.handle_key(key(KeyCode::Up)); // idx 0, scroll 0
+        assert_eq!(modal.selected_repo_idx, 0);
+        assert_eq!(modal.repo_scroll_offset, 0);
     }
 }

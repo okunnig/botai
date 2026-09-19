@@ -191,6 +191,7 @@ pub fn run_setup_worker(
     cwd: PathBuf,
     viewport_size: (u16, u16),
     tx: Sender<SetupProgressEvent>,
+    selected_repos: Vec<String>,
 ) {
     let cfg = config.unwrap_or_else(|| {
         Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
@@ -208,6 +209,10 @@ pub fn run_setup_worker(
     let mut builder = ProjectBuilder::new(cfg, &template_name, &project_name)
         .with_cwd(cwd)
         .with_viewport(cols, rows);
+
+    if !selected_repos.is_empty() {
+        builder = builder.with_selected_repos(selected_repos);
+    }
 
     if let Some(ref a) = agent_override {
         builder = builder.with_agent(a);

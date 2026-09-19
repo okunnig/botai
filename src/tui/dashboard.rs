@@ -29,6 +29,7 @@ pub enum DashboardAction {
         project: String,
         agent_override: Option<String>,
         prompt: Option<String>,
+        selected_repos: Vec<String>,
     },
     Destroy(String),
     Quit,
@@ -288,6 +289,7 @@ impl DashboardState {
                     project,
                     agent_override,
                     prompt,
+                    selected_repos,
                 } => {
                     self.creation_modal = None;
                     return DashboardAction::CreateProject {
@@ -295,6 +297,7 @@ impl DashboardState {
                         project,
                         agent_override,
                         prompt,
+                        selected_repos,
                     };
                 }
                 CreationModalAction::None => {
@@ -373,6 +376,7 @@ impl DashboardState {
                     project,
                     agent_override,
                     prompt,
+                    selected_repos,
                 } => {
                     self.creation_modal = None;
                     return DashboardAction::CreateProject {
@@ -380,6 +384,7 @@ impl DashboardState {
                         project,
                         agent_override,
                         prompt,
+                        selected_repos,
                     };
                 }
                 CreationModalAction::None => return DashboardAction::None,
@@ -768,6 +773,7 @@ mod tests {
                 project: "проект-юникод".to_string(),
                 agent_override: Some("claude".to_string()),
                 prompt: None,
+                selected_repos: vec!["воркспейс-1 🚀-repo".to_string()],
             }
         );
     }
@@ -987,6 +993,7 @@ command = "claude"
             state.handle_key(key(KeyCode::Char(c)));
         }
         state.handle_key(key(KeyCode::Tab)); // switch to Agent
+        state.handle_key(key(KeyCode::Tab)); // switch to Repositories
         state.handle_key(key(KeyCode::Tab)); // switch to Prompt
         for c in "Deploy helm chart".chars() {
             state.handle_key(key(KeyCode::Char(c)));
@@ -1000,6 +1007,7 @@ command = "claude"
                 project: "k8s-cluster".to_string(),
                 agent_override: Some("claude".to_string()),
                 prompt: Some("Deploy helm chart".to_string()),
+                selected_repos: vec!["cloud-infra-repo".to_string()],
             }
         );
         assert!(
@@ -1026,6 +1034,7 @@ command = "claude"
                 project: "my-project".to_string(),
                 agent_override: Some("claude".to_string()),
                 prompt: None,
+                selected_repos: vec!["ws-repo".to_string()],
             }
         );
     }
@@ -1064,6 +1073,7 @@ command = "claude"
                 project: "my-agent-project".to_string(),
                 agent_override: Some(selected_agent),
                 prompt: None,
+                selected_repos: vec!["ws-repo".to_string()],
             }
         );
     }
