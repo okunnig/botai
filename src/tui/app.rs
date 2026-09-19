@@ -831,6 +831,7 @@ impl TuiApp {
                     project,
                     agent_override,
                     prompt,
+                    selected_repos,
                 } => {
                     self.creation_modal = None;
                     self.start_project_creation(
@@ -838,6 +839,7 @@ impl TuiApp {
                         &project,
                         agent_override.as_deref(),
                         prompt.as_deref(),
+                        selected_repos,
                     );
                 }
                 CreationModalAction::None => {
@@ -914,12 +916,14 @@ impl TuiApp {
                 project,
                 agent_override,
                 prompt,
+                selected_repos,
             } => {
                 self.start_project_creation(
                     &template,
                     &project,
                     agent_override.as_deref(),
                     prompt.as_deref(),
+                    selected_repos,
                 );
             }
             DashboardAction::Destroy(project) => {
@@ -1044,6 +1048,7 @@ impl TuiApp {
         project_name: &str,
         agent_override: Option<&str>,
         prompt: Option<&str>,
+        selected_repos: Vec<String>,
     ) {
         let _ = self.reload_config();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1082,6 +1087,7 @@ impl TuiApp {
                 cwd,
                 viewport_size,
                 tx,
+                selected_repos,
             );
         });
     }
@@ -1480,6 +1486,35 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::fs;
 
+    fn toml_path(p: &std::path::Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
+    fn create_mock_git_repo(path: &std::path::Path) {
+        fs::create_dir_all(path).unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(path)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Botai Test"])
+            .current_dir(path)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "test@botai.dev"])
+            .current_dir(path)
+            .status();
+        fs::write(path.join("README.md"), "# Test Repo\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(path)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(path)
+            .status();
+    }
+
     #[test]
     fn test_tui_app_creation_and_quit() {
         let registry = SessionRegistry::new();
@@ -1622,6 +1657,8 @@ repos = []
     fn test_tui_app_creation_modal_submit_lifecycle() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        let repo_dir = tmp.path().join("repo_backend");
+        create_mock_git_repo(&repo_dir);
 
         #[cfg(windows)]
         let (cmd, args) = ("cmd.exe", r#"["/c", "exit 0"]"#);
@@ -1631,15 +1668,17 @@ repos = []
         let config_toml = format!(
             r#"
 default_agent = "mock"
-repos_dir = "/tmp/repos"
+repos_dir = "{}"
 
 [agents.mock]
 command = "{cmd}"
 args = {args}
 
 [templates.backend]
-repos = []
-"#
+repos = ['{}']
+"#,
+            toml_path(tmp.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&config_toml).unwrap();
         let registry = SessionRegistry::new();
@@ -1911,6 +1950,8 @@ repos = ["custom_repo"]
     fn test_tui_app_viewport_size_applied_to_new_project_sessions() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        let repo_dir = tmp.path().join("repo_backend");
+        create_mock_git_repo(&repo_dir);
 
         #[cfg(windows)]
         let (cmd, args) = ("cmd.exe", r#"["/c", "exit 0"]"#);
@@ -1920,15 +1961,17 @@ repos = ["custom_repo"]
         let config_toml = format!(
             r#"
 default_agent = "mock"
-repos_dir = "/tmp/repos"
+repos_dir = "{}"
 
 [agents.mock]
 command = "{cmd}"
 args = {args}
 
 [templates.backend]
-repos = []
-"#
+repos = ['{}']
+"#,
+            toml_path(tmp.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&config_toml).unwrap();
         let registry = SessionRegistry::new();
@@ -2734,6 +2777,8 @@ repos = []
     fn test_tui_app_start_project_creation_success() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        let repo_dir = tmp.path().join("repo_test");
+        create_mock_git_repo(&repo_dir);
 
         #[cfg(windows)]
         let shell_cmd = "cmd.exe";
@@ -2750,10 +2795,11 @@ command = "{}"
 args = []
 
 [templates.test_ws]
-repos = []
+repos = ['{}']
 "#,
-            cwd.display().to_string().replace('\\', "/"),
-            shell_cmd
+            toml_path(&cwd),
+            shell_cmd,
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&config_toml).unwrap();
 
@@ -2762,7 +2808,13 @@ repos = []
             .with_config(config)
             .with_cwd(cwd.clone());
 
-        app.start_project_creation("test_ws", "async-proj", None, Some("Initial prompt"));
+        app.start_project_creation(
+            "test_ws",
+            "async-proj",
+            None,
+            Some("Initial prompt"),
+            vec!["repo_test".to_string()],
+        );
         assert!(app.setup_modal.is_some());
 
         // Wait up to 5 seconds for worker thread to finish
@@ -2787,6 +2839,8 @@ repos = []
     fn test_tui_app_start_project_creation_with_agent_override() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        let repo_dir = tmp.path().join("repo_test");
+        create_mock_git_repo(&repo_dir);
 
         #[cfg(windows)]
         let shell_cmd = "cmd.exe";
@@ -2807,11 +2861,12 @@ command = "{}"
 args = []
 
 [templates.test_ws]
-repos = []
+repos = ['{}']
 "#,
-            cwd.display().to_string().replace('\\', "/"),
+            toml_path(&cwd),
             shell_cmd,
-            shell_cmd
+            shell_cmd,
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&config_toml).unwrap();
 
@@ -2825,6 +2880,7 @@ repos = []
             "override-proj",
             Some("mock_override"),
             Some("Task instructions"),
+            vec!["repo_test".to_string()],
         );
         assert!(app.setup_modal.is_some());
 
@@ -2862,7 +2918,7 @@ repos = []
         let mut app = TuiApp::new(registry).with_cwd(cwd.clone());
 
         // Try creating project with name that already exists in registry
-        app.start_project_creation("ws", "active-proj", None, None);
+        app.start_project_creation("ws", "active-proj", None, None, vec![]);
         assert!(app.setup_modal.is_some());
         let modal = app.setup_modal.as_ref().unwrap();
         assert!(modal.error.is_some());

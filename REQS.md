@@ -25,12 +25,19 @@
     - `url`: (Optional) Remote Git clone URL or local directory path.
     - `setup`: (Optional) List of setup commands to execute in the repository's worktree upon creation (e.g. `setup = [ ["npm", "install"], ["npm", "run", "codegen"] ]` or `setup = ["npm install", "cargo check"]`).
     - `env`: (Optional) Per-repository environment variables applied during setup hook execution.
-- **Hybrid Repository Declarations**:
+- **Hybrid Repository Declarations & Selective Inclusion**:
   - Repositories in `templates.<name>.repos` support:
     - **Registered repo keys** (e.g., `"web-frontend"`): Resolves to the matching `[repos.web-frontend]` entry, inheriting its clone URL, setup hooks, and environment.
     - **Remote Git URLs** (`https://...`, `git@...`, `ssh://...`): Automatically cloned into `<repos_dir>/<repo_name>`.
     - **Relative repo names** (e.g., `"ecommerce-api"`): Resolved relative to `repos_dir` (`<repos_dir>/ecommerce-api`).
     - **Absolute local paths** (e.g., `/home/user/code/my-repo`): Direct reference to existing local repository.
+  - **Repository Entry Formats & Default Inclusion (`default`)**:
+    - Repository entries in a template's `repos` list support two syntactic forms:
+      - **Simple Strings**: e.g., `"ecommerce-api"` or `"https://github.com/example/api.git"`. Treated as enabled by default (`default = true`).
+      - **Inline Tables**: e.g., `{ repo = "docs", default = false }` or `{ name = "docs", default = false }`. Supports either `repo` or `name` field alias for the repository identifier.
+    - **`default` (Optional Boolean)**: Controls whether the repository is included by default during project creation. Defaults to `true` when omitted.
+      - When `default = true` (or when specified as a simple string), the repository is pre-selected by default in the TUI creation modal checklist and included automatically by CLI `botai create`.
+      - When `default = false`, the repository is marked optional (opt-in) and is unselected by default in the TUI creation modal checklist and omitted by CLI `botai create` unless explicitly requested via `--include <repo>` or `--all`.
   - Sanitized flat naming inside `repos_dir` based on the repository basename.
   - Conflict detection: Errors if two different remote URLs resolve to the same folder name.
 - **Templates / Project Templates**:
@@ -38,7 +45,7 @@
     - `description`: Optional summary of the template.
     - `default_agent`: Optional agent override specific to this template.
     - `agents_md_append`: Optional custom markdown instructions appended to `AGENTS.md`.
-    - `repos`: List of registered repo keys, Git URLs, relative names in `repos_dir`, or local paths.
+    - `repos`: List of repository entries (simple strings or inline tables with `default = true|false`).
     - `env`: Environment variables injected into the agent session and workspace hooks.
     - `post_create`: (Optional) List of commands executed at the project root after worktrees and setup hooks finish.
     - `pre_destroy`: (Optional) List of commands executed at the project root before destroying worktrees.
@@ -99,7 +106,12 @@ args = ["--no-auto-commits"]
 # ------------------------------------------------------------------------------
 # Reusable Repository Definitions (Optional)
 # ------------------------------------------------------------------------------
-# Define canonical repository URLs and multi-command setup pipelines once.
+# Define canonical repository URLs, multi-command setup pipelines, and environment
+# variables once for reuse across multiple project templates.
+# Each repository entry supports:
+# - url: (Optional) Remote Git clone URL or local directory path.
+# - setup: (Optional) Lifecycle commands executed in the worktree after checkout.
+# - env: (Optional) Per-repository environment variables applied during setup hooks.
 
 [repos.web-frontend]
 url = "https://github.com/example/ecommerce-web.git"
@@ -107,12 +119,20 @@ setup = [
   ["npm", "install"],
   ["npm", "run", "codegen"]
 ]
+env = { NODE_ENV = "development" }
 
 [repos.ecommerce-api]
 url = "https://github.com/example/ecommerce-api.git"
 setup = [
   ["cargo", "check"]
 ]
+
+[repos.ecommerce-docs]
+url = "https://github.com/example/ecommerce-docs.git"
+setup = [
+  ["npm", "run", "docs:build"]
+]
+env = { DOCS_ENV = "local" }
 
 # ------------------------------------------------------------------------------
 # Project Templates
@@ -121,7 +141,7 @@ setup = [
 # - description: Optional summary of the template.
 # - default_agent: Optional agent override specific to this template.
 # - agents_md_append: (Optional) Custom markdown instructions appended to AGENTS.md.
-# - repos: List of registered repo keys, Git URLs, or local paths.
+# - repos: List of repository entries (simple strings or inline tables with `default = true|false`).
 # - env: Environment variables injected into the agent session.
 # - post_create: (Optional) Commands executed at project root after setup.
 # - pre_destroy: (Optional) Commands executed at project root before cleanup.
@@ -134,9 +154,10 @@ agents_md_append = """
 - Follow coding standards documented in the template.
 """
 repos = [
-  "ecommerce-api",
-  "web-frontend",
-  "/home/user/code/ecommerce-shared"
+  "ecommerce-api",                               # Simple registered repo key (included by default)
+  { repo = "web-frontend", default = true },     # Inline table explicitly included by default
+  { name = "ecommerce-docs", default = false },  # Opt-in / optional repo (unselected by default in TUI/CLI)
+  "/home/user/code/ecommerce-shared"             # Local filesystem repository path
 ]
 post_create = [
   ["docker", "compose", "up", "-d"]
@@ -151,13 +172,20 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 3. Project Creation & Git Worktree Lifecycle
 - **Project Structure**: When starting a project for a template, `botai` creates a project root directory in the current working directory (`CWD/<project_name>`).
+- **Selective Repository Orchestration**:
+  - **Selective Provisioning**: When creating a project workspace, only the actively selected/included repositories are cloned, fetched, checked out into worktrees, and have setup hooks executed.
+    - Repositories omitted or unselected (e.g. optional repositories with `default = false` not explicitly included, or repositories excluded via CLI `--exclude` or unchecked in the TUI modal) are skipped entirely: no directory is created in the project workspace, no worktree is checked out, no upstream git fetch is performed, and no per-repo setup hooks are run.
+    - Synthesized context (`AGENTS.md`) only documents and references the repositories that were actively selected and provisioned into the project.
+  - **Zero-Repository Validation Rule**:
+    - At least one repository must be selected when creating a project.
+    - Attempting to initialize a project with zero selected repositories fails with an immediate validation error (`"At least one repository must be selected for project creation"`) and cleanly aborts initialization before creating any project directories, worktrees, or branches.
 - **Automatic On-Demand Cloning**:
-  - Missing repositories in `repos_dir` are automatically cloned on-demand before worktree creation.
+  - Missing repositories in `repos_dir` are automatically cloned on-demand before worktree creation (only for selected repositories).
   - If a clone fails (e.g. invalid URL, authentication failure), project initialization cleanly rolls back partially created directories.
 - **Best-Effort Upstream Fetching**:
-  - Performs a best-effort `git fetch origin` for cached repositories to discover upstream default branch changes.
+  - Performs a best-effort `git fetch origin` for cached selected repositories to discover upstream default branch changes.
   - Branches worktrees off `origin/<default_branch>` when available, or falls back to local default branch if offline.
-- **Worktrees & Metadata Lifecycle**: For every repository defined in the template:
+- **Worktrees & Metadata Lifecycle**: For every selected repository in the project:
   - Executes `git worktree prune` prior to creating new worktrees to automatically clear stale worktree metadata from manually deleted directories.
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
   - Checks out a new branch named `<project_name>`.
@@ -359,14 +387,26 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 7. CLI Commands & Lifecycle Operations
 - **Default (No Arguments)**: Launching `botai` without arguments opens the interactive TUI project switcher / dashboard.
-- **`botai create <template> <project> [--agent <agent> / -A <agent>] [--prompt <prompt> / -p <prompt>] [--attach / -a]`**:
+- **`botai create <template> <project> [--agent <agent> / -A <agent>] [--prompt <prompt> / -p <prompt>] [--include <repos>] [--exclude <repos>] [--all] [--attach / -a]`**:
   - Creates a new multi-repo workspace project under `CWD/<project>` from the specified template.
   - **Arguments & Flags**:
     - `template`: (Positional required String) Name of the project template defined in `config.toml`.
     - `project`: (Positional required String) Name of the project directory and git branch to create.
     - `--agent` / `-A`: (Optional String) Override the AI agent CLI tool (e.g. `claude`, `agy`, `copilot`, `aider`).
     - `--prompt` / `-p`: (Optional String) Initial task description or prompt to pass to the agent (requires `--attach` / `-a`).
+    - `--include <repos>`: (Optional String, comma-separated or repeatable) Explicitly select repositories to include in the project, opting into repositories even if declared with `default = false` in the template configuration.
+    - `--exclude <repos>`: (Optional String, comma-separated or repeatable) Explicitly deselect repositories to exclude from the project, opting out of repositories even if declared with `default = true` in the template configuration.
+    - `--all`: (Optional Flag) Include all repositories configured in the template, overriding any `default = false` settings.
     - `--attach` / `-a`: (Flag) Launch interactive TUI multiplexer immediately after project creation.
+  - **Repository Selection Precedence & Conflict Validation (`resolve_cli_selected_repos`)**:
+    - Evaluated upfront via `resolve_cli_selected_repos(&all_template_repos, include, exclude, all)` before initializing `ProjectBuilder` or launching TUI sessions.
+    - **Conflict Validation**: Specifying the same repository in both `--include` and `--exclude` is rejected as an invalid conflicting argument (`Cannot both include and exclude repository '<repo>'`).
+    - **Repository Existence Validation**: Any repository specified in `--include` or `--exclude` must match a configured repository in the template (by directory name or entry string); unrecognized names fail immediately with an error listing available template repositories (`Repository '<repo>' not found in template. Available repositories: ...`).
+    - **Evaluation Precedence**:
+      1. Baseline: If `--all` is specified, all template repositories are initially included. Otherwise, only repositories marked with `default = true` (or simple strings) are initially included.
+      2. Inclusions: Any repositories specified via `--include` are added to the active selection (deduplicating if already included).
+      3. Exclusions: Any repositories specified via `--exclude` are removed from the active selection.
+    - **Zero-Repository Guard**: If applying exclusions results in zero selected repositories, creation fails with an immediate error: at least one repository must be selected (`Cannot create project: at least one repository must be selected.`).
   - **Non-Attached Mode (Default, without `--attach`)**:
     - Executes workspace initialization steps 1-4 via `ProjectBuilder::create_workspace`.
     - Validates inputs, auto-clones missing repositories to `repos_dir`, fetches upstream branches, provisions git worktrees on branch `<project>`, and synthesizes `AGENTS.md`.
@@ -424,15 +464,18 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Unified Backend Engine (`ProjectBuilder`)**:
   - Single, centralized project initialization pipeline in `src/project/` used across CLI `botai create` (both non-attached and attached modes), the TUI Dashboard, and In-Session project creation.
   - **Sequential Pipeline Steps**:
-    1. **Pre-Validation**: Multi-tier validation with `validate_fast` (immediate 0ms local validation of project name, template existence, and CWD directory collision) and `check_branch_collisions` / `validate_detailed` (git branch collision verification across constituent template repositories).
-    2. **Repository Resolution & Cloning**: Clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch for existing repos.
-    3. **Worktree Checkout**: Creates a git worktree for each repository checked out to branch `<project_name>` at `<project_dir>/<repo_name>`.
-    4. **Per-Repository Setup Hooks Execution**: Concurrently executes configured repository `setup` commands in parallel across active worktrees (sequential command execution per worktree), capturing logs and proceeding under the Warn and Continue policy upon failures.
-    5. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md`.
+    1. **Pre-Validation**: Multi-tier validation with `validate_fast` (immediate 0ms local validation of project name, template existence, empty selected repos, and CWD directory collision) and `check_branch_collisions` / `validate_detailed` (effective repository resolution and git branch collision verification strictly across effective repositories).
+    2. **Repository Resolution & Cloning**: Resolves effective repositories (`resolve_effective_repos`), clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch only for effective repositories.
+    3. **Worktree Checkout**: Creates a git worktree checked out to branch `<project_name>` at `<project_dir>/<repo_name>` strictly for effective repositories.
+    4. **Per-Repository Setup Hooks Execution**: Concurrently executes configured repository `setup` commands in parallel across active effective worktrees (sequential command execution per worktree), capturing logs and proceeding under the Warn and Continue policy upon failures.
+    5. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md` documenting only effective repositories in the Repository Layout table.
     6. **Workspace Post-Creation Hooks Execution**: Runs configured template `post_create` commands sequentially at the project root directory.
     7. **PTY Process Spawning**: Spawns the agent CLI process inside a master/slave pseudo-terminal attached to a virtual terminal screen buffer.
   - **Modular Execution**:
-    - `ProjectBuilder::create_workspace`: Executes steps 1-6 without spawning PTY, returning the canonical project path and repository mappings.
+    - `resolve_cli_selected_repos`: Standalone helper resolving and validating `--include`, `--exclude`, and `--all` CLI flags against template repositories.
+    - `ProjectBuilder::with_selected_repos`: Builder method configuring explicit repository selection subsets.
+    - `ProjectBuilder::resolve_effective_repos`: Resolves effective repositories based on explicit selection or `default_include` flags, returning `ProjectError::NoRepositoriesSelected` if empty or `ProjectError::RepositoryNotInTemplate` if a selected repository is not declared in the template.
+    - `ProjectBuilder::create_workspace`: Executes steps 1-6 without spawning PTY, returning the canonical project path and repository mappings for effective repositories.
     - `ProjectBuilder::build`: Executes steps 1-6 via `create_workspace` and proceeds with step 7 PTY spawning for attached session workflows.
   - **Event & Progress Streaming**: Emits structured `ProjectSetupEvent` (Steps, Logs, Success, Error) consumed by CLI stdout or the TUI setup modal.
   - **Atomic Rollback**: On any core initialization error (e.g. branch collision, clone failure, worktree creation failure, agent spawn failure), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory. (Note: Non-zero exit codes from user setup/post-create hooks log warnings and do not trigger destructive rollback).
@@ -441,6 +484,26 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Dynamic Configuration & Template Reloading on Modal Activation**:
     - Opening the creation modal (via `n`/`c` on the dashboard or `RawAction::OpenLauncher` within an active session) triggers configuration reloading from disk using filesystem modification time (`mtime`) and file size (`len`) caching.
     - While `Config` remains a pure data structure, `TuiApp` and `DashboardState` track `config_path`, `config_last_modified` (`mtime`), and `config_file_len` (`len`), checking both filesystem modification time and file size to ensure robust cross-platform change detection even within coarse timestamp intervals (e.g. Windows NTFS ~15ms granularity). Unnecessary reloads are skipped when both attributes remain unchanged, and newly configured templates or modified repository references are immediately reflected in Step 1 template selection when the file has been modified.
+  - **Modal Geometry & Responsive Viewport Sizing**:
+    - Standard modal dimensions defined by constants `MODAL_WIDTH = 76` and `MODAL_HEIGHT = 24`.
+    - Computed via helper `modal_area(area: Rect) -> Option<Rect>`:
+      - Width: `MODAL_WIDTH.min(area.width.saturating_sub(4))`
+      - Height: `MODAL_HEIGHT.min(area.height.saturating_sub(2))`
+      - Graceful minimum dimensions guard: Returns `None` if `width < 25` or `height < 10`.
+      - Horizontally and vertically centered in the parent terminal viewport.
+  - **Unified 5-Part Layout Architecture**:
+    - Both Step 1 and Step 2 adhere to an identical 5-part vertical layout structure (`[Rect; 5]`):
+      1. **Top Area (`Constraint::Length(1)` or `Constraint::Length(top_len)`)**:
+         - *Step 1 (`step1_layout`)*: Search filter input row (`Filter: <query>`).
+         - *Step 2 (`step2_layout`)*: Template summary row (`Template: <name> | Repos (<count>): <repos>`) and optional description row (`top_len = 2` if description is present and `inner.height >= 16`, otherwise `1`).
+      2. **Top Divider (`Constraint::Length(1)`)**: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
+      3. **Body Area (`Constraint::Min(4)`)**:
+         - *Step 1*: Master-detail horizontal split (left matching templates list, right template details preview).
+         - *Step 2*: Form area rendering Project Name, Agent CLI selector, Repositories checklist, and Initial Prompt box, cleanly ending after the prompt input.
+      4. **Bottom Divider (`Constraint::Length(1)`)**:
+         - *Step 1*: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
+         - *Step 2*: Horizontal divider embedding the live pre-validation status message (`── ✗ <message> ────`, `── ℹ <message> ────`, or `── ✓ Ready to create project ────`), keeping the form body clean and anchoring validation feedback immediately above the bottom shortcuts row.
+      5. **Footer Shortcuts Hint Bar (`Constraint::Length(1)`)**: Bottom-anchored key navigation hints (`theme.key_hint`, bold) consistently anchored to the base of the modal across both steps.
   - **Asynchronous Non-Blocking Pre-Validation**:
     - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
     - Git branch collisions are checked asynchronously in background worker threads with generation counters to prevent stale results and UI freezing.
@@ -451,10 +514,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
        - **Comprehensive Matching Criteria**: Case-insensitive substring matching against template names, descriptions, and constituent repository names/sources.
        - **Master-Detail Split Layout**:
          - *Left Panel*: Filtered template list with active selection indicator (` > `) and matching template count.
-         - *Right Preview Pane*: Live preview of the highlighted template (description, repository count, repository names and clone URLs, default agent CLI, and custom instructions).
-       - **Controls**: `Up`/`Down` and `Ctrl+P`/`Ctrl+N` (navigate template list), text typing and readline shortcuts (edit search query), `Enter` selects template and advances to Step 2, `Esc` cancels/closes modal.
-       - **Consistent Template Selection & Preview (No Single-Template Bypass)**: Regardless of template count (even when only one template is configured), the creation modal always begins in Step 1 (`CreationStep::SelectTemplate`) to ensure uniform visibility of template descriptions, repository sources, and configuration. When only a single template exists, it is automatically highlighted and pre-selected so the user can immediately review its preview and press `Enter` to advance.
-       - **Empty-State Presentation**: If zero templates are configured in `config.toml`, Step 1 renders a helpful empty-state preview card: `"No templates found in config.toml. Run 'botai edit' to configure templates."` with `Esc` to cancel.
+          - *Right Preview Pane*: Live preview of the highlighted template:
+            - Description, repository count, default agent CLI, and custom instructions.
+            - **Default vs Optional Repositories Preview**: Lists constituent repositories indicating inclusion status: default repositories are rendered normally (e.g. `• <name>`), while optional opt-in repositories (`default = false`) are explicitly badged with `[optional]`.
+        - **Controls**: `Up`/`Down` and `Ctrl+P`/`Ctrl+N` (navigate template list), text typing and readline shortcuts (edit search query), `Enter` selects template and advances to Step 2, `Esc` cancels/closes modal.
+        - **Consistent Template Selection & Preview (No Single-Template Bypass)**: Regardless of template count (even when only one template is configured), the creation modal always begins in Step 1 (`CreationStep::SelectTemplate`) to ensure uniform visibility of template descriptions, repository sources, and configuration. When only a single template exists, it is automatically highlighted and pre-selected so the user can immediately review its preview and press `Enter` to advance.
+        - **Empty-State Presentation**: If zero templates are configured in `config.toml`, Step 1 renders a helpful empty-state preview card: `"No templates found in config.toml. Run 'botai edit' to configure templates."` with `Esc` to cancel.
     2. **Step 2: Project Details & Configuration (`CreationStep::ConfigureDetails`)**:
        - **Modal Header**: Displays step progress and selected template name (`Create New Project (Template: <name>)`).
         - **Form Fields**:
@@ -475,17 +540,33 @@ env = { PORT = "8080", NODE_ENV = "development" }
             - **Accurate Terminal Hardware Cursor**: Positions the terminal cursor at the exact column offset matching the current cursor position.
             - **Real-Time Pre-Validation Badges**: Dynamically displays `[✓ Ready]`, `[✗ Collision]`, or `[Required]`.
           - `Agent CLI:` Interactive tool selector (`claude`, `agy`, `copilot`, `aider`, etc. cycled via `Left`/`Right`).
-         - `Initial Prompt:` Optional task instruction prompt rendered in a dedicated multi-line box (3–4 visible lines) with:
-           - **Word Wrapping & Sizing**: Automatic line wrapping according to available modal width, preserving line breaks.
-           - **Internal Vertical Scrolling**: Automatic vertical scrolling keeping the active line and cursor in view when text exceeds visible lines.
-           - **In-Line Cursor Navigation**: Full cursor positioning (`Left`/`Right` character movement, `Home`/`End` to line/prompt boundaries, `Backspace`/`Delete` at cursor position).
-           - **Vertical Navigation**: `Up`/`Down` arrows move the cursor vertically across lines within the prompt (with top-line `Up` / bottom-line `Down` transitioning focus between form fields).
-           - **Newline Insertion**: `Shift+Enter` or `Alt+Enter` inserts a newline (`\n`) at the cursor position without triggering submission.
-           - **Bracketed / Multi-line Paste**: Pasting multi-line content preserves newlines cleanly without premature form submission.
-           - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
-         - Live pre-validation status banner at the bottom.
-       - **Back-Navigation**: Pressing `Esc` in Step 2 returns to Step 1 without losing configuration. Pressing `Backspace` inside editable text fields strictly performs character deletion (no-op when empty or at cursor offset 0) and never navigates away from the step.
-       - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, and optional initial prompt. The selected agent override is plumbed through `DashboardAction::CreateProject` and `CreationModalAction::Submit` directly into `start_project_creation` and `run_setup_worker` to instantiate the chosen agent CLI.
+          - `Repositories:` Interactive repository selection checklist:
+            - **Header & Counter**: Displays `Repositories (<selected_count>/<total_count> selected):` with dynamic scroll indicator badges (`▲` if scrolled down, `▼` if more items exist below).
+            - **Item Presentation**: Each repository item displays an active pointer indicator (`▶ ` for the highlighted item, `  ` otherwise), checkbox state (`[x]` for included/selected, `[ ]` for excluded/unselected), repository name (bold when selected, dimmed when unselected), and an ` (optional)` tag for repositories configured with `default = false`.
+            - **Initial State**: Automatically pre-populated when selecting or changing templates based on template repository configurations: repositories with `default = true` (or string syntax) are pre-checked `[x]`, and repositories with `default = false` are pre-unchecked `[ ]`.
+            - **Navigation & Focus Cycle**: Integrated into the Step 2 field focus cycle (`Project Name` -> `Agent CLI` -> `Repositories` -> `Initial Prompt`), navigated using `Tab` / `Shift+Tab`. When `Repositories` is focused:
+              - `Up` / `Down` arrows or `k` / `j` move the highlighted item up and down through the checklist.
+              - Navigating `Up` / `k` past the top repository transitions focus to `Agent CLI`.
+              - Navigating `Down` / `j` past the bottom repository transitions focus to `Initial Prompt`.
+              - Mouse wheel scrolling up and down inside the repository list scrolls the checklist item selection.
+            - **Selection Controls**:
+              - `Space`: Toggles the inclusion state of the currently highlighted repository.
+              - `a` / `A`: Bulk toggles all repositories (deselects all if all are currently selected; otherwise selects all).
+            - **Scrollable Viewport**: Constrained to a visible height of up to 3 items (`REPOS_VISIBLE_ROWS = 3`). When repository count exceeds 3, the viewport scrolls smoothly to keep the active item visible, accompanied by `▲` / `▼` indicators.
+            - **Real-Time Pre-Validation**: Continuously validates repository selection:
+              - Fast synchronous validation: If zero repositories are selected, immediately marks the modal invalid with `"At least one repository must be selected"` and blocks form submission (`Enter`).
+              - Asynchronous branch collision validation: Passes only currently selected repositories (`with_selected_repos(selected_repos)`) to `ProjectBuilder::pre_validate()`, ensuring that branch collisions in unselected/deselected repositories do not block project creation.
+          - `Initial Prompt:` Optional task instruction prompt rendered in a dedicated multi-line box (3–4 visible lines) with:
+            - **Word Wrapping & Sizing**: Automatic line wrapping according to available modal width, preserving line breaks.
+            - **Internal Vertical Scrolling**: Automatic vertical scrolling keeping the active line and cursor in view when text exceeds visible lines.
+            - **In-Line Cursor Navigation**: Full cursor positioning (`Left`/`Right` character movement, `Home`/`End` to line/prompt boundaries, `Backspace`/`Delete` at cursor position).
+            - **Vertical Navigation**: `Up`/`Down` arrows move the cursor vertically across lines within the prompt (with top-line `Up` / bottom-line `Down` transitioning focus between form fields).
+            - **Newline Insertion**: `Shift+Enter` or `Alt+Enter` inserts a newline (`\n`) at the cursor position without triggering submission.
+            - **Bracketed / Multi-line Paste**: Pasting multi-line content preserves newlines cleanly without premature form submission.
+            - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
+          - **Embedded Validation Status in Bottom Divider**: Validation feedback is embedded directly into the bottom horizontal divider line (`── ✗ <message> ────`, `── ℹ <message> ────`, or `── ✓ Ready to create project ────`) immediately above the footer hints row. The message is truncated with an ellipsis (`...`) if the available divider width is constrained, keeping the form body uncluttered and cleanly separated from the footer shortcuts.
+        - **Back-Navigation**: Pressing `Esc` in Step 2 returns to Step 1 without losing configuration. Pressing `Backspace` inside editable text fields strictly performs character deletion (no-op when empty or at cursor offset 0) and never navigates away from the step.
+        - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, explicit list of selected repositories (`with_selected_repos(selected_repos)`), and optional initial prompt. The selected agent override and repository list are plumbed through `DashboardAction::CreateProject` and `CreationModalAction::Submit` directly into `start_project_creation` and `run_setup_worker` to initialize the project with exactly the chosen repositories.
 
 ---
 

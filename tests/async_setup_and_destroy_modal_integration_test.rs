@@ -17,6 +17,31 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn create_mock_git_repo(path: &std::path::Path) {
+    fs::create_dir_all(path).unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Botai Test"])
+        .current_dir(path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "test@botai.dev"])
+        .current_dir(path)
+        .status();
+    fs::write(path.join("README.md"), "# Test Repo\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(path)
+        .status();
+}
+
 #[test]
 fn test_integration_destroy_confirmation_modal_lifecycle() {
     let tmp = tempdir().expect("tempdir");
@@ -202,6 +227,8 @@ fn test_integration_destroy_project_with_git_worktrees_cleans_central_repo() {
 fn test_integration_async_project_setup_progress_streaming_and_success() {
     let tmp = tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
+    let repo_dir = cwd.join("repos").join("cloud_service");
+    create_mock_git_repo(&repo_dir);
 
     #[cfg(windows)]
     let shell_cmd = "cmd.exe";
@@ -218,7 +245,7 @@ command = "{}"
 args = []
 
 [templates.cloud_ws]
-repos = []
+repos = ["cloud_service"]
 "#,
         cwd.display().to_string().replace('\\', "/"),
         shell_cmd
@@ -238,6 +265,7 @@ repos = []
         project: "microservice-alpha".to_string(),
         agent_override: Some("mock_agent".to_string()),
         prompt: Some("Initialize API endpoints".to_string()),
+        selected_repos: vec!["cloud_service".to_string()],
     });
 
     assert!(app.setup_modal.is_some());
@@ -277,6 +305,8 @@ repos = []
 fn test_integration_async_project_setup_agent_override_applied() {
     let tmp = tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
+    let repo_dir = cwd.join("repos").join("cloud_service");
+    create_mock_git_repo(&repo_dir);
 
     #[cfg(windows)]
     let shell_cmd = "cmd.exe";
@@ -297,7 +327,7 @@ command = "{}"
 args = []
 
 [templates.cloud_ws]
-repos = []
+repos = ["cloud_service"]
 "#,
         cwd.display().to_string().replace('\\', "/"),
         shell_cmd,
@@ -318,6 +348,7 @@ repos = []
         project: "custom-agent-proj".to_string(),
         agent_override: Some("mock_custom".to_string()),
         prompt: None,
+        selected_repos: vec!["cloud_service".to_string()],
     });
 
     let start = std::time::Instant::now();
@@ -360,7 +391,13 @@ repos = ["nonexistent-repo-that-does-not-exist"]
         .with_config(config)
         .with_cwd(cwd.clone());
 
-    app.start_project_creation("bad_ws", "failing-proj", None, None);
+    app.start_project_creation(
+        "bad_ws",
+        "failing-proj",
+        None,
+        None,
+        vec!["nonexistent-repo-that-does-not-exist".to_string()],
+    );
     assert!(app.setup_modal.is_some());
 
     // Wait for worker to encounter error and stream failure event

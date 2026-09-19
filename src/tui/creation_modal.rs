@@ -29,7 +29,16 @@ pub enum CreationFocus {
     Template,
     ProjectName,
     Agent,
+    Repositories,
     Prompt,
+}
+
+/// Item in the interactive repository selection checklist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoSelectionItem {
+    pub name: String,
+    pub default_included: bool,
+    pub selected: bool,
 }
 
 /// Actions emitted by user interactions with the Project Creation Modal.
@@ -41,11 +50,57 @@ pub enum CreationModalAction {
         project: String,
         agent_override: Option<String>,
         prompt: Option<String>,
+        selected_repos: Vec<String>,
     },
     Cancel,
 }
 
+pub const MODAL_WIDTH: u16 = 76;
+pub const MODAL_HEIGHT: u16 = 24;
+
+/// Calculates the centered modal bounding rectangle, ensuring minimum dimensions.
+pub fn modal_area(area: Rect) -> Option<Rect> {
+    let width = MODAL_WIDTH.min(area.width.saturating_sub(4));
+    let height = MODAL_HEIGHT.min(area.height.saturating_sub(2));
+
+    if width < 25 || height < 10 {
+        return None;
+    }
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Some(Rect::new(x, y, width, height))
+}
+
+pub fn step1_layout(inner: Rect) -> [Rect; 5] {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Top filter row
+            Constraint::Length(1), // Top Divider
+            Constraint::Min(4),    // Body (Left: template list, Right: preview)
+            Constraint::Length(1), // Bottom Divider
+            Constraint::Length(1), // Footer hint
+        ])
+        .areas(inner)
+}
+
+pub fn step2_layout(inner: Rect, has_desc: bool) -> [Rect; 5] {
+    let top_len = if has_desc && inner.height >= 16 { 2 } else { 1 };
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top_len), // Top template summary & description
+            Constraint::Length(1),       // Top Divider
+            Constraint::Min(4),          // Body form area
+            Constraint::Length(1),       // Bottom Divider
+            Constraint::Length(1),       // Footer hints
+        ])
+        .areas(inner)
+}
+
 pub const PROMPT_VISIBLE_LINES: usize = 3;
+pub const REPOS_VISIBLE_ROWS: usize = 3;
 
 /// A wrapped line of prompt text with its character offsets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +129,9 @@ pub struct ProjectCreationModal {
     pub project_name_cursor: usize,
     pub agent_list: Vec<String>,
     pub selected_agent_idx: usize,
+    pub repo_items: Vec<RepoSelectionItem>,
+    pub selected_repo_idx: usize,
+    pub repo_scroll_offset: usize,
     pub prompt_input: String,
     pub prompt_cursor: usize,
     pub prompt_scroll_offset: usize,
@@ -98,6 +156,9 @@ impl Clone for ProjectCreationModal {
             project_name_cursor: self.project_name_cursor,
             agent_list: self.agent_list.clone(),
             selected_agent_idx: self.selected_agent_idx,
+            repo_items: self.repo_items.clone(),
+            selected_repo_idx: self.selected_repo_idx,
+            repo_scroll_offset: self.repo_scroll_offset,
             prompt_input: self.prompt_input.clone(),
             prompt_cursor: self.prompt_cursor,
             prompt_scroll_offset: self.prompt_scroll_offset,
@@ -122,6 +183,9 @@ impl PartialEq for ProjectCreationModal {
             && self.project_name_cursor == other.project_name_cursor
             && self.agent_list == other.agent_list
             && self.selected_agent_idx == other.selected_agent_idx
+            && self.repo_items == other.repo_items
+            && self.selected_repo_idx == other.selected_repo_idx
+            && self.repo_scroll_offset == other.repo_scroll_offset
             && self.prompt_input == other.prompt_input
             && self.prompt_cursor == other.prompt_cursor
             && self.prompt_scroll_offset == other.prompt_scroll_offset
@@ -184,6 +248,9 @@ impl ProjectCreationModal {
             project_name_cursor: 0,
             agent_list,
             selected_agent_idx,
+            repo_items: Vec::new(),
+            selected_repo_idx: 0,
+            repo_scroll_offset: 0,
             prompt_input: String::new(),
             prompt_cursor: 0,
             prompt_scroll_offset: 0,
@@ -194,6 +261,7 @@ impl ProjectCreationModal {
             validation_rx: Arc::new(Mutex::new(validation_rx)),
         };
 
+        modal.sync_repos_with_template();
         modal.revalidate();
         modal
     }
@@ -242,10 +310,11 @@ impl ProjectCreationModal {
                         }
                     }
                     for repo in &tpl.repos {
-                        if repo.to_lowercase().contains(&query) {
+                        let repo_str = repo.entry_str();
+                        if repo_str.to_lowercase().contains(&query) {
                             return true;
                         }
-                        let derived = crate::config::derive_repo_name(repo);
+                        let derived = crate::config::derive_repo_name(repo_str);
                         if derived.to_lowercase().contains(&query) {
                             return true;
                         }
@@ -297,7 +366,7 @@ impl ProjectCreationModal {
         }
     }
 
-    /// Cycles to the next available template and updates default agent override if appropriate.
+    /// Cycles to the next available template and updates default agent override and repository selection.
     pub fn cycle_template_next(&mut self) {
         match self.step {
             CreationStep::SelectTemplate => {
@@ -305,6 +374,7 @@ impl ProjectCreationModal {
                 if !matching.is_empty() {
                     self.selected_template_idx = (self.selected_template_idx + 1) % matching.len();
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
@@ -313,13 +383,14 @@ impl ProjectCreationModal {
                     self.selected_template_idx =
                         (self.selected_template_idx + 1) % self.templates.len();
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
         }
     }
 
-    /// Cycles to the previous available template and updates default agent override if appropriate.
+    /// Cycles to the previous available template and updates default agent override and repository selection.
     pub fn cycle_template_prev(&mut self) {
         match self.step {
             CreationStep::SelectTemplate => {
@@ -328,6 +399,7 @@ impl ProjectCreationModal {
                     self.selected_template_idx =
                         (self.selected_template_idx + matching.len() - 1) % matching.len();
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
@@ -337,6 +409,7 @@ impl ProjectCreationModal {
                         (self.selected_template_idx + self.templates.len() - 1)
                             % self.templates.len();
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
@@ -375,11 +448,104 @@ impl ProjectCreationModal {
         }
     }
 
+    /// Synchronizes repository selection items with the newly selected template's declared repositories.
+    pub fn sync_repos_with_template(&mut self) {
+        if let Some(tpl_name) = self.selected_template() {
+            if let Ok(resolved) = self.config.resolve_template_repos(tpl_name) {
+                self.repo_items = resolved
+                    .into_iter()
+                    .map(|r| RepoSelectionItem {
+                        name: r.name,
+                        default_included: r.default_include,
+                        selected: r.default_include,
+                    })
+                    .collect();
+            } else {
+                self.repo_items.clear();
+            }
+        } else {
+            self.repo_items.clear();
+        }
+        self.selected_repo_idx = 0;
+        self.repo_scroll_offset = 0;
+    }
+
+    /// Returns the names of all currently selected repositories in the checklist.
+    pub fn selected_repo_names(&self) -> Vec<String> {
+        self.repo_items
+            .iter()
+            .filter(|item| item.selected)
+            .map(|item| item.name.clone())
+            .collect()
+    }
+
+    /// Toggles the inclusion state of the highlighted repository item and triggers revalidation.
+    pub fn toggle_selected_repo(&mut self) {
+        if !self.repo_items.is_empty() && self.selected_repo_idx < self.repo_items.len() {
+            self.repo_items[self.selected_repo_idx].selected =
+                !self.repo_items[self.selected_repo_idx].selected;
+            self.revalidate();
+        }
+    }
+
+    /// Toggles all repository items: if all are currently selected, unselects all; otherwise selects all.
+    pub fn toggle_all_repos(&mut self) {
+        if self.repo_items.is_empty() {
+            return;
+        }
+        let all_selected = self.repo_items.iter().all(|r| r.selected);
+        let new_state = !all_selected;
+        for item in &mut self.repo_items {
+            item.selected = new_state;
+        }
+        self.revalidate();
+    }
+
+    /// Cycles to the previous repository in the checklist, scrolling up if necessary.
+    /// Returns `true` if moved, `false` if already at the top (idx 0).
+    pub fn cycle_repo_prev(&mut self) -> bool {
+        if self.repo_items.is_empty() || self.selected_repo_idx == 0 {
+            false
+        } else {
+            self.selected_repo_idx -= 1;
+            if self.selected_repo_idx < self.repo_scroll_offset {
+                self.repo_scroll_offset = self.selected_repo_idx;
+            }
+            true
+        }
+    }
+
+    /// Cycles to the next repository in the checklist, scrolling down if necessary.
+    /// Returns `true` if moved, `false` if already at the bottom.
+    pub fn cycle_repo_next(&mut self) -> bool {
+        if self.repo_items.is_empty() || self.selected_repo_idx + 1 >= self.repo_items.len() {
+            false
+        } else {
+            self.selected_repo_idx += 1;
+            if self.selected_repo_idx >= self.repo_scroll_offset + REPOS_VISIBLE_ROWS {
+                self.repo_scroll_offset = self
+                    .selected_repo_idx
+                    .saturating_sub(REPOS_VISIBLE_ROWS.saturating_sub(1));
+            }
+            true
+        }
+    }
+
+    /// Returns the number of visible repository checklist rows to render in Step 2.
+    pub fn repos_rendered_rows(&self) -> usize {
+        if self.repo_items.is_empty() {
+            1
+        } else {
+            self.repo_items.len().min(REPOS_VISIBLE_ROWS)
+        }
+    }
+
     /// Moves focus to the next input field.
     pub fn next_focus(&mut self) {
         self.focus = match self.focus {
             CreationFocus::ProjectName => CreationFocus::Agent,
-            CreationFocus::Agent => CreationFocus::Prompt,
+            CreationFocus::Agent => CreationFocus::Repositories,
+            CreationFocus::Repositories => CreationFocus::Prompt,
             CreationFocus::Prompt => CreationFocus::ProjectName,
             CreationFocus::Template => CreationFocus::ProjectName,
         };
@@ -390,7 +556,8 @@ impl ProjectCreationModal {
         self.focus = match self.focus {
             CreationFocus::ProjectName => CreationFocus::Prompt,
             CreationFocus::Agent => CreationFocus::ProjectName,
-            CreationFocus::Prompt => CreationFocus::Agent,
+            CreationFocus::Repositories => CreationFocus::Agent,
+            CreationFocus::Prompt => CreationFocus::Repositories,
             CreationFocus::Template => CreationFocus::Prompt,
         };
     }
@@ -399,15 +566,22 @@ impl ProjectCreationModal {
     /// git branch collision checks across template repositories if fast checks pass.
     pub fn revalidate(&mut self) {
         let tpl_name = self.selected_template().unwrap_or("");
+        let selected_repos = self.selected_repo_names();
         let builder = ProjectBuilder::new(
             self.config.clone(),
             tpl_name,
             self.project_name_input.value(),
         )
         .with_cwd(&self.cwd)
-        .with_agent(self.selected_agent());
+        .with_agent(self.selected_agent())
+        .with_selected_repos(selected_repos.clone());
 
         self.validation = builder.validate_fast();
+        if !self.repo_items.is_empty() && selected_repos.is_empty() {
+            self.validation.is_valid = false;
+            self.validation
+                .add_error("At least one repository must be selected");
+        }
         self.validation_generation = self.validation_generation.wrapping_add(1);
 
         if self.validation.is_valid && !self.project_name_input.trim().is_empty() {
@@ -909,16 +1083,7 @@ impl ProjectCreationModal {
 
     /// Calculates the hardware cursor position within the modal area when an editable text input is focused.
     pub fn cursor_position(&self, area: Rect) -> Option<Position> {
-        let width = 76.min(area.width.saturating_sub(4));
-        let height = 18.min(area.height.saturating_sub(2));
-
-        if width < 25 || height < 10 {
-            return None;
-        }
-
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let modal_area = Rect::new(x, y, width, height);
+        let modal_area = modal_area(area)?;
 
         let block = Block::default().borders(Borders::ALL);
         let inner = block.inner(modal_area);
@@ -926,8 +1091,9 @@ impl ProjectCreationModal {
         match self.step {
             CreationStep::SelectTemplate => {
                 let prefix_len = 8u16; // "Filter: "
-                let cursor_x = inner.x + prefix_len + self.template_search_query.cursor as u16;
-                let cursor_y = inner.y;
+                let chunks = step1_layout(inner);
+                let cursor_x = chunks[0].x + prefix_len + self.template_search_query.cursor as u16;
+                let cursor_y = chunks[0].y;
                 if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                     Some(Position::new(cursor_x, cursor_y))
                 } else {
@@ -937,44 +1103,57 @@ impl ProjectCreationModal {
                     ))
                 }
             }
-            CreationStep::ConfigureDetails => match self.focus {
-                CreationFocus::ProjectName => {
-                    let prefix_len = 16u16; // "▶ Project Name: "
-                    let total_chars = self.project_name_input.chars().count();
-                    let cursor_offset = self.project_name_cursor.min(total_chars) as u16;
-                    let cursor_x = inner.x + prefix_len + cursor_offset;
-                    let cursor_y = inner.y + 3;
-                    if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
-                        Some(Position::new(cursor_x, cursor_y))
-                    } else {
-                        Some(Position::new(
-                            cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                            cursor_y,
-                        ))
-                    }
-                }
-                CreationFocus::Prompt => {
-                    let prompt_text_width = (inner.width.saturating_sub(18) as usize).max(10);
-                    let (line_idx, col_idx) = self.cursor_to_line_col(prompt_text_width);
-                    let scroll_offset = self.prompt_scroll_offset.min(line_idx);
-                    let visible_line = line_idx.saturating_sub(scroll_offset);
-                    if visible_line < PROMPT_VISIBLE_LINES {
-                        let cursor_x = inner.x + 18 + col_idx as u16;
-                        let cursor_y = inner.y + 5 + visible_line as u16;
+            CreationStep::ConfigureDetails => {
+                let has_desc = self
+                    .selected_template()
+                    .and_then(|t| self.config.get_template(t))
+                    .and_then(|t| t.description.as_deref())
+                    .is_some_and(|d| !d.is_empty());
+                let chunks = step2_layout(inner, has_desc);
+                let body_area = chunks[2];
+
+                match self.focus {
+                    CreationFocus::ProjectName => {
+                        let prefix_len = 16u16; // "▶ Project Name: "
+                        let total_chars = self.project_name_input.chars().count();
+                        let cursor_offset = self.project_name_cursor.min(total_chars) as u16;
+                        let cursor_x = body_area.x + prefix_len + cursor_offset;
+                        let cursor_y = body_area.y;
                         if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                             Some(Position::new(cursor_x, cursor_y))
                         } else {
                             Some(Position::new(
                                 cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                                cursor_y.min(inner.y + inner.height.saturating_sub(1)),
+                                cursor_y,
                             ))
                         }
-                    } else {
-                        None
                     }
+                    CreationFocus::Prompt => {
+                        let prompt_text_width =
+                            (body_area.width.saturating_sub(18) as usize).max(10);
+                        let (line_idx, col_idx) = self.cursor_to_line_col(prompt_text_width);
+                        let scroll_offset = self.prompt_scroll_offset.min(line_idx);
+                        let visible_line = line_idx.saturating_sub(scroll_offset);
+                        if visible_line < PROMPT_VISIBLE_LINES {
+                            let repos_rows = 1 + self.repos_rendered_rows() as u16;
+                            let cursor_x = body_area.x + 18 + col_idx as u16;
+                            let cursor_y = body_area.y + 2 + repos_rows + visible_line as u16;
+                            if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height
+                            {
+                                Some(Position::new(cursor_x, cursor_y))
+                            } else {
+                                Some(Position::new(
+                                    cursor_x.min(inner.x + inner.width.saturating_sub(1)),
+                                    cursor_y.min(inner.y + inner.height.saturating_sub(1)),
+                                ))
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
         }
     }
 
@@ -1025,6 +1204,7 @@ impl ProjectCreationModal {
                             matching[self.selected_template_idx.min(matching.len() - 1)];
                         self.selected_template_idx = target_idx;
                         self.sync_agent_with_template();
+                        self.sync_repos_with_template();
                         self.revalidate();
                         self.step = CreationStep::ConfigureDetails;
                         self.focus = CreationFocus::ProjectName;
@@ -1041,6 +1221,7 @@ impl ProjectCreationModal {
                     }
                     if modified {
                         self.sync_agent_with_template();
+                        self.sync_repos_with_template();
                         self.revalidate();
                     }
                     CreationModalAction::None
@@ -1199,6 +1380,52 @@ impl ProjectCreationModal {
                         }
                         _ => CreationModalAction::None,
                     }
+                } else if self.focus == CreationFocus::Repositories {
+                    match key.code {
+                        KeyCode::Esc => self.handle_back_or_cancel(),
+                        KeyCode::Tab => {
+                            self.next_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::BackTab => {
+                            self.prev_focus();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Up => {
+                            if !self.cycle_repo_prev() {
+                                self.prev_focus();
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Down => {
+                            if !self.cycle_repo_next() {
+                                self.next_focus();
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char('k') if !has_ctrl && !has_alt => {
+                            if !self.cycle_repo_prev() {
+                                self.prev_focus();
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char('j') if !has_ctrl && !has_alt => {
+                            if !self.cycle_repo_next() {
+                                self.next_focus();
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char(' ') => {
+                            self.toggle_selected_repo();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('A') if !has_ctrl && !has_alt => {
+                            self.toggle_all_repos();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Enter => self.try_submit(),
+                        _ => CreationModalAction::None,
+                    }
                 } else {
                     match key.code {
                         KeyCode::Esc => self.handle_back_or_cancel(),
@@ -1251,6 +1478,7 @@ impl ProjectCreationModal {
     /// Attempts to validate and submit the project creation modal.
     pub fn try_submit(&mut self) -> CreationModalAction {
         self.poll_validation();
+        let selected_repos = self.selected_repo_names();
         if self.validation.is_valid {
             let tpl_name = self.selected_template().unwrap_or("");
             let builder = ProjectBuilder::new(
@@ -1259,8 +1487,14 @@ impl ProjectCreationModal {
                 self.project_name_input.value(),
             )
             .with_cwd(&self.cwd)
-            .with_agent(self.selected_agent());
+            .with_agent(self.selected_agent())
+            .with_selected_repos(selected_repos.clone());
             self.validation = builder.validate_detailed();
+            if !self.repo_items.is_empty() && selected_repos.is_empty() {
+                self.validation.is_valid = false;
+                self.validation
+                    .add_error("At least one repository must be selected");
+            }
         }
         if self.validation.is_valid {
             let trimmed = self.project_name_input.trim();
@@ -1275,6 +1509,7 @@ impl ProjectCreationModal {
                     project: trimmed.to_string(),
                     agent_override: Some(self.selected_agent().to_string()),
                     prompt,
+                    selected_repos,
                 }
             } else {
                 CreationModalAction::None
@@ -1312,6 +1547,7 @@ impl ProjectCreationModal {
                         self.selected_template_idx = matching.len() - 1;
                     }
                     self.sync_agent_with_template();
+                    self.sync_repos_with_template();
                     self.revalidate();
                 }
             }
@@ -1326,7 +1562,7 @@ impl ProjectCreationModal {
                 CreationFocus::Prompt => {
                     self.insert_str_prompt(text);
                 }
-                CreationFocus::Agent | CreationFocus::Template => {}
+                CreationFocus::Agent | CreationFocus::Repositories | CreationFocus::Template => {}
             },
         }
     }
@@ -1342,6 +1578,8 @@ impl ProjectCreationModal {
                     CreationStep::ConfigureDetails => {
                         if self.focus == CreationFocus::Agent {
                             self.cycle_agent_prev();
+                        } else if self.focus == CreationFocus::Repositories {
+                            self.cycle_repo_prev();
                         } else if self.focus == CreationFocus::Prompt {
                             if !self.move_prompt_cursor_up() {
                                 self.prev_focus();
@@ -1361,6 +1599,8 @@ impl ProjectCreationModal {
                     CreationStep::ConfigureDetails => {
                         if self.focus == CreationFocus::Agent {
                             self.cycle_agent_next();
+                        } else if self.focus == CreationFocus::Repositories {
+                            self.cycle_repo_next();
                         } else if self.focus == CreationFocus::Prompt {
                             if !self.move_prompt_cursor_down() {
                                 self.next_focus();
@@ -1378,16 +1618,10 @@ impl ProjectCreationModal {
 
     /// Renders the unified Project Creation Modal into the given `Buffer`.
     pub fn render_modal(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
-        let width = 76.min(area.width.saturating_sub(4));
-        let height = 18.min(area.height.saturating_sub(2));
-
-        if width < 25 || height < 10 {
-            return;
-        }
-
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let modal_area = Rect::new(x, y, width, height);
+        let modal_area = match modal_area(area) {
+            Some(a) => a,
+            None => return,
+        };
 
         Clear.render(modal_area, buf);
 
@@ -1419,16 +1653,7 @@ impl ProjectCreationModal {
             return;
         }
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // Top filter row
-                Constraint::Length(1), // Divider
-                Constraint::Min(4),    // Body (Left: template list, Right: preview)
-                Constraint::Length(1), // Divider
-                Constraint::Length(1), // Footer hint
-            ])
-            .split(inner);
+        let chunks = step1_layout(inner);
 
         let filter_area = chunks[0];
         let top_divider_area = chunks[1];
@@ -1614,9 +1839,17 @@ impl ProjectCreationModal {
                     )));
                 } else {
                     for repo in &tpl.repos {
-                        let name = crate::config::derive_repo_name(repo);
-                        let display_str = if repo != &name {
-                            format!("  • {name} ({repo})")
+                        let repo_str = repo.entry_str();
+                        let name = crate::config::derive_repo_name(repo_str);
+                        let is_default = repo.is_default_included();
+                        let display_str = if !is_default {
+                            if repo_str != name {
+                                format!("  • {name} ({repo_str}) [optional]")
+                            } else {
+                                format!("  • {name} [optional]")
+                            }
+                        } else if repo_str != name {
+                            format!("  • {name} ({repo_str})")
                         } else {
                             format!("  • {name}")
                         };
@@ -1719,6 +1952,7 @@ impl ProjectCreationModal {
 
         let proj_focused = self.focus == CreationFocus::ProjectName;
         let agent_focused = self.focus == CreationFocus::Agent;
+        let repos_focused = self.focus == CreationFocus::Repositories;
         let prompt_focused = self.focus == CreationFocus::Prompt;
 
         let proj_label_style = if proj_focused {
@@ -1737,6 +1971,14 @@ impl ProjectCreationModal {
             Style::default().fg(theme.status_bar_fg)
         };
 
+        let repos_label_style = if repos_focused {
+            Style::default()
+                .fg(theme.modal_label)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.status_bar_fg)
+        };
+
         let prompt_label_style = if prompt_focused {
             Style::default()
                 .fg(theme.modal_label)
@@ -1747,6 +1989,7 @@ impl ProjectCreationModal {
 
         let proj_prefix = if proj_focused { "▶ " } else { "  " };
         let agent_prefix = if agent_focused { "▶ " } else { "  " };
+        let repos_prefix = if repos_focused { "▶ " } else { "  " };
         let prompt_prefix = if prompt_focused { "▶ " } else { "  " };
 
         // 1. Template summary info
@@ -1756,7 +1999,7 @@ impl ProjectCreationModal {
             let repo_names = tpl
                 .repos
                 .iter()
-                .map(|r| crate::config::derive_repo_name(r))
+                .map(|r| crate::config::derive_repo_name(r.entry_str()))
                 .collect::<Vec<_>>()
                 .join(", ");
             let r_str = format!(
@@ -1831,7 +2074,97 @@ impl ProjectCreationModal {
                 .add_modifier(Modifier::BOLD),
         );
 
-        // 4. Initial Prompt (multi-line box with visible lines)
+        // 4. Repositories Selection Checklist
+        let selected_count = self.selected_repo_names().len();
+        let total_count = self.repo_items.len();
+        let mut repos_header_spans = vec![Span::styled(
+            format!("{repos_prefix}Repositories ({selected_count}/{total_count} selected):"),
+            repos_label_style,
+        )];
+
+        if total_count > REPOS_VISIBLE_ROWS {
+            let mut indicators = Vec::new();
+            if self.repo_scroll_offset > 0 {
+                indicators.push("▲");
+            }
+            if self.repo_scroll_offset + REPOS_VISIBLE_ROWS < total_count {
+                indicators.push("▼");
+            }
+            if !indicators.is_empty() {
+                repos_header_spans.push(Span::raw(" "));
+                repos_header_spans.push(Span::styled(
+                    indicators.join(" "),
+                    Style::default()
+                        .fg(theme.key_hint)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+
+        let mut repo_row_lines = Vec::new();
+        if self.repo_items.is_empty() {
+            repo_row_lines.push(Line::from(vec![
+                Span::raw("      "),
+                Span::styled("(none)", Style::default().fg(theme.input_placeholder)),
+            ]));
+        } else {
+            let start = self
+                .repo_scroll_offset
+                .min(self.repo_items.len().saturating_sub(1));
+            let end = (start + REPOS_VISIBLE_ROWS).min(self.repo_items.len());
+            for idx in start..end {
+                let item = &self.repo_items[idx];
+                let is_highlighted = repos_focused && idx == self.selected_repo_idx;
+                let item_indicator = if is_highlighted { "▶ " } else { "  " };
+                let check_box = if item.selected { "[x] " } else { "[ ] " };
+
+                let indicator_style = if is_highlighted {
+                    Style::default()
+                        .fg(theme.selection_indicator)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.modal_label)
+                };
+
+                let check_style = if item.selected {
+                    Style::default()
+                        .fg(theme.status_done)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.input_placeholder)
+                };
+
+                let name_style = if is_highlighted {
+                    Style::default()
+                        .fg(theme.selection_indicator)
+                        .add_modifier(Modifier::BOLD)
+                } else if item.selected {
+                    Style::default()
+                        .fg(theme.input_text)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.input_text)
+                };
+
+                let mut row_spans = vec![
+                    Span::raw("    "),
+                    Span::styled(item_indicator, indicator_style),
+                    Span::styled(check_box, check_style),
+                    Span::styled(&item.name, name_style),
+                ];
+
+                if !item.default_included {
+                    row_spans.push(Span::styled(
+                        " (optional)",
+                        Style::default().fg(theme.input_placeholder),
+                    ));
+                }
+
+                repo_row_lines.push(Line::from(row_spans));
+            }
+        }
+
+        // 5. Initial Prompt (multi-line box with visible lines)
         let prompt_text_width = (inner.width.saturating_sub(18) as usize).max(10);
         let prompt_lines = self.compute_wrapped_prompt_lines(prompt_text_width);
         let visible_count = PROMPT_VISIBLE_LINES;
@@ -1882,53 +2215,10 @@ impl ProjectCreationModal {
             }
         }
 
-        // 5. Validation Status Banner
-        let banner_line = if let Some(msg) = self.validation.primary_message() {
-            if self.validation.is_valid {
-                Line::from(vec![
-                    Span::styled(
-                        " ✓ ",
-                        Style::default()
-                            .fg(theme.status_done)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(msg, Style::default().fg(theme.status_done)),
-                ])
-            } else if self.project_name_input.trim().is_empty() {
-                Line::from(vec![
-                    Span::styled(" ℹ ", Style::default().fg(theme.modal_label)),
-                    Span::styled(msg, Style::default().fg(theme.input_placeholder)),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled(
-                        " ✗ ",
-                        Style::default()
-                            .fg(theme.status_error)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(msg, Style::default().fg(theme.status_error)),
-                ])
-            }
-        } else if self.validation.is_valid {
-            Line::from(vec![
-                Span::styled(
-                    " ✓ ",
-                    Style::default()
-                        .fg(theme.status_done)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "Ready to initialize project worktrees and spawn agent",
-                    Style::default().fg(theme.status_done),
-                ),
-            ])
-        } else {
-            Line::from("")
-        };
-
         // 6. Footer Hints
-        let footer_text = if self.templates.len() > 1 {
+        let footer_text = if repos_focused {
+            " [Tab] Next | [Space] Toggle | [A] All | [Enter] Create Project | [Esc] Back "
+        } else if self.templates.len() > 1 {
             " [Tab] Next | [←/→] Agent | [Enter] Create Project | [Esc/Bksp] Back "
         } else {
             " [Tab] Next | [←/→] Agent | [Enter] Create Project | [Esc] Cancel "
@@ -1940,50 +2230,167 @@ impl ProjectCreationModal {
                 .add_modifier(Modifier::BOLD),
         ));
 
-        let mut lines = vec![
-            // Row 0: Template summary
-            Line::from(Span::styled(
-                repo_preview_str,
-                Style::default().fg(theme.input_placeholder),
-            )),
-        ];
+        let has_desc = !tpl_desc_str.is_empty();
+        let chunks = step2_layout(inner, has_desc);
 
-        if !tpl_desc_str.is_empty() && inner.height >= 14 {
-            lines.push(Line::from(Span::styled(
+        let top_area = chunks[0];
+        let top_divider_area = chunks[1];
+        let body_area = chunks[2];
+        let bottom_divider_area = chunks[3];
+        let footer_area = chunks[4];
+
+        // 1. Top template summary & description
+        let top_line = Line::from(Span::styled(
+            repo_preview_str,
+            Style::default().fg(theme.input_placeholder),
+        ));
+        buf.set_line(top_area.x, top_area.y, &top_line, top_area.width);
+        if top_area.height >= 2 && has_desc {
+            let desc_line = Line::from(Span::styled(
                 tpl_desc_str,
                 Style::default().fg(theme.input_placeholder),
-            )));
-        } else {
-            lines.push(Line::from(""));
+            ));
+            buf.set_line(top_area.x, top_area.y + 1, &desc_line, top_area.width);
         }
 
-        // Row 2: Empty
-        lines.push(Line::from(""));
+        // 2. Top Divider
+        let top_divider_str = "─".repeat(top_divider_area.width as usize);
+        let top_divider_line = Line::from(Span::styled(
+            top_divider_str,
+            Style::default().fg(theme.border_unfocused),
+        ));
+        buf.set_line(
+            top_divider_area.x,
+            top_divider_area.y,
+            &top_divider_line,
+            top_divider_area.width,
+        );
 
-        // Row 3: Project Name
-        lines.push(Line::from(vec![
-            Span::styled(format!("{proj_prefix}Project Name: "), proj_label_style),
-            proj_display,
-            Span::raw(" "),
-            badge_span,
-        ]));
+        // 3. Body form lines
+        let mut body_lines = vec![
+            // Line 0: Project Name
+            Line::from(vec![
+                Span::styled(format!("{proj_prefix}Project Name: "), proj_label_style),
+                proj_display,
+                Span::raw(" "),
+                badge_span,
+            ]),
+            // Line 1: Agent CLI
+            Line::from(vec![
+                Span::styled(format!("{agent_prefix}Agent CLI: "), agent_label_style),
+                agent_display,
+            ]),
+            // Line 2: Repositories header
+            Line::from(repos_header_spans),
+        ];
 
-        // Row 4: Agent
-        lines.push(Line::from(vec![
-            Span::styled(format!("{agent_prefix}Agent CLI: "), agent_label_style),
-            agent_display,
-        ]));
+        // Lines 3..: repo_row_lines (checklist items)
+        body_lines.extend(repo_row_lines);
 
-        // Rows 5..=7: Prompt
-        lines.extend(prompt_row_spans);
+        // Lines prompt: prompt_row_spans
+        body_lines.extend(prompt_row_spans);
 
-        lines.push(Line::from(""));
-        lines.push(banner_line);
-        lines.push(Line::from(""));
-        lines.push(footer_line);
+        let paragraph = Paragraph::new(body_lines);
+        paragraph.render(body_area, buf);
 
-        let paragraph = Paragraph::new(lines);
-        paragraph.render(inner, buf);
+        // 4. Bottom Divider with embedded validation status
+        let divider_line = if let Some(msg) = self.validation.primary_message() {
+            let (icon, icon_style, text_style) =
+                if !self.validation.is_valid && !self.project_name_input.trim().is_empty() {
+                    (
+                        " ✗ ",
+                        Style::default()
+                            .fg(theme.status_error)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.status_error),
+                    )
+                } else if self.project_name_input.trim().is_empty() {
+                    (
+                        " ℹ ",
+                        Style::default().fg(theme.modal_label),
+                        Style::default().fg(theme.input_placeholder),
+                    )
+                } else {
+                    (
+                        " ✓ ",
+                        Style::default()
+                            .fg(theme.status_done)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.status_done),
+                    )
+                };
+
+            // Calculate available width for message so it doesn't overflow
+            let prefix = "──";
+            let prefix_len = 2;
+            let icon_len = icon.chars().count();
+            let overhead = prefix_len + icon_len + 3; // prefix + icon + space + trailing dashes
+            let max_msg_len = (bottom_divider_area.width as usize).saturating_sub(overhead);
+            let display_msg = if msg.chars().count() > max_msg_len && max_msg_len > 3 {
+                format!(
+                    "{}...",
+                    msg.chars()
+                        .take(max_msg_len.saturating_sub(3))
+                        .collect::<String>()
+                )
+            } else {
+                msg.to_string()
+            };
+
+            let used_len = prefix_len + icon_len + display_msg.chars().count() + 1;
+            let remaining_dashes = (bottom_divider_area.width as usize).saturating_sub(used_len);
+            let suffix = "─".repeat(remaining_dashes);
+
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(theme.border_unfocused)),
+                Span::styled(icon, icon_style),
+                Span::styled(display_msg, text_style),
+                Span::raw(" "),
+                Span::styled(suffix, Style::default().fg(theme.border_unfocused)),
+            ])
+        } else if self.validation.is_valid && !self.project_name_input.trim().is_empty() {
+            let prefix = "──";
+            let icon = " ✓ ";
+            let text = "Ready to create project";
+            let overhead = 2 + 3 + text.len() + 1;
+            let remaining = (bottom_divider_area.width as usize).saturating_sub(overhead);
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(theme.border_unfocused)),
+                Span::styled(
+                    icon,
+                    Style::default()
+                        .fg(theme.status_done)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(text, Style::default().fg(theme.status_done)),
+                Span::raw(" "),
+                Span::styled(
+                    "─".repeat(remaining),
+                    Style::default().fg(theme.border_unfocused),
+                ),
+            ])
+        } else {
+            let divider_str = "─".repeat(bottom_divider_area.width as usize);
+            Line::from(Span::styled(
+                divider_str,
+                Style::default().fg(theme.border_unfocused),
+            ))
+        };
+
+        buf.set_line(
+            bottom_divider_area.x,
+            bottom_divider_area.y,
+            &divider_line,
+            bottom_divider_area.width,
+        );
+
+        // 5. Footer Hints
+        buf.set_line(
+            footer_area.x,
+            footer_area.y,
+            &footer_line,
+            footer_area.width,
+        );
     }
 }
 
@@ -2098,6 +2505,10 @@ mod tests {
         modal.handle_key(key(KeyCode::Right));
         assert_ne!(modal.selected_agent(), &initial_agent);
 
+        // Tab to Repositories
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
         // Tab to Prompt
         modal.handle_key(key(KeyCode::Tab));
         assert_eq!(modal.focus, CreationFocus::Prompt);
@@ -2116,11 +2527,13 @@ mod tests {
                 project,
                 agent_override,
                 prompt,
+                selected_repos,
             } => {
                 assert_eq!(template, "ecommerce");
                 assert_eq!(project, "feat-pay");
                 assert!(agent_override.is_some());
                 assert_eq!(prompt.as_deref(), Some("Do task"));
+                assert!(!selected_repos.is_empty());
             }
             other => panic!("Expected Submit action, got: {other:?}"),
         }
@@ -2304,20 +2717,20 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         let pos = modal.cursor_position(area);
-        // inner.x = 13, prefix_len = 8 ("Filter: "), query len = 0 -> 21, inner.y = 7
-        assert_eq!(pos, Some(Position::new(21, 7)));
+        // inner.x = 13, prefix_len = 8 ("Filter: "), query len = 0 -> 21, inner.y = 4
+        assert_eq!(pos, Some(Position::new(21, 4)));
 
         modal.template_search_query = TextInput::new().with_value("xyz");
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(24, 7)));
+        assert_eq!(pos, Some(Position::new(24, 4)));
 
         modal.template_search_query.move_cursor_left();
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(23, 7)));
+        assert_eq!(pos, Some(Position::new(23, 4)));
 
         modal.template_search_query.move_cursor_home();
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(21, 7)));
+        assert_eq!(pos, Some(Position::new(21, 4)));
     }
 
     #[test]
@@ -2379,6 +2792,213 @@ mod tests {
         assert!(text2.contains("Agent CLI:"));
         assert!(text2.contains("Initial Prompt:"));
         assert!(text2.contains("[Enter] Create Project"));
+
+        let m = modal_area(area).unwrap();
+        let block = Block::default().borders(Borders::ALL);
+        let inner = block.inner(m);
+        let chunks = step2_layout(inner, true);
+        let bottom_divider_area = chunks[3];
+        let mut divider_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_text.push_str(buf2[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_text.contains("Project name cannot be empty"));
+    }
+
+    #[test]
+    fn test_modal_area_geometry_and_bounds() {
+        assert_eq!(MODAL_WIDTH, 76);
+        assert_eq!(MODAL_HEIGHT, 24);
+
+        // Standard terminal: 100x30
+        let area = Rect::new(0, 0, 100, 30);
+        let m = modal_area(area).unwrap();
+        assert_eq!(m, Rect::new(12, 3, 76, 24));
+
+        // Slightly constrained terminal: 70x20
+        let area_constrained = Rect::new(0, 0, 70, 20);
+        let m2 = modal_area(area_constrained).unwrap();
+        // width = min(76, 66) = 66; height = min(24, 18) = 18
+        // x = (70 - 66) / 2 = 2; y = (20 - 18) / 2 = 1
+        assert_eq!(m2, Rect::new(2, 1, 66, 18));
+
+        // Too small: returns None
+        assert_eq!(modal_area(Rect::new(0, 0, 24, 30)), None);
+        assert_eq!(modal_area(Rect::new(0, 0, 100, 9)), None);
+    }
+
+    #[test]
+    fn test_step1_and_step2_layout_structure() {
+        let inner = Rect::new(10, 5, 74, 22);
+
+        // Step 1 layout
+        let s1_chunks = step1_layout(inner);
+        assert_eq!(s1_chunks.len(), 5);
+        assert_eq!(s1_chunks[0], Rect::new(10, 5, 74, 1)); // Filter row
+        assert_eq!(s1_chunks[1], Rect::new(10, 6, 74, 1)); // Top divider
+        assert_eq!(s1_chunks[2], Rect::new(10, 7, 74, 18)); // Body area
+        assert_eq!(s1_chunks[3], Rect::new(10, 25, 74, 1)); // Bottom divider
+        assert_eq!(s1_chunks[4], Rect::new(10, 26, 74, 1)); // Footer hint
+
+        // Step 2 layout without description (top_len = 1)
+        let s2_no_desc = step2_layout(inner, false);
+        assert_eq!(s2_no_desc.len(), 5);
+        assert_eq!(s2_no_desc[0], Rect::new(10, 5, 74, 1)); // Top area
+        assert_eq!(s2_no_desc[1], Rect::new(10, 6, 74, 1)); // Top divider
+        assert_eq!(s2_no_desc[2], Rect::new(10, 7, 74, 18)); // Body area
+        assert_eq!(s2_no_desc[3], Rect::new(10, 25, 74, 1)); // Bottom divider
+        assert_eq!(s2_no_desc[4], Rect::new(10, 26, 74, 1)); // Footer hint
+
+        // Step 2 layout with description and ample height (top_len = 2)
+        let s2_with_desc = step2_layout(inner, true);
+        assert_eq!(s2_with_desc.len(), 5);
+        assert_eq!(s2_with_desc[0], Rect::new(10, 5, 74, 2)); // Top area (summary + desc)
+        assert_eq!(s2_with_desc[1], Rect::new(10, 7, 74, 1)); // Top divider
+        assert_eq!(s2_with_desc[2], Rect::new(10, 8, 74, 17)); // Body area
+        assert_eq!(s2_with_desc[3], Rect::new(10, 25, 74, 1)); // Bottom divider
+        assert_eq!(s2_with_desc[4], Rect::new(10, 26, 74, 1)); // Footer hint
+
+        // Step 2 layout with description but height < 16 (top_len = 1)
+        let small_inner = Rect::new(10, 5, 74, 14);
+        let s2_small = step2_layout(small_inner, true);
+        assert_eq!(s2_small[0].height, 1);
+    }
+
+    #[test]
+    fn test_step2_footer_anchored_to_bottom() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.billing]
+            description = "Billing & Payments"
+            repos = ["billing-api"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("billing"));
+        modal.step = CreationStep::ConfigureDetails;
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+        modal.render_modal(area, &mut buf, &theme);
+
+        let m = modal_area(area).unwrap();
+        let block = Block::default().borders(Borders::ALL);
+        let inner = block.inner(m);
+        let chunks = step2_layout(inner, true);
+        let footer_area = chunks[4];
+        let bottom_divider_area = chunks[3];
+
+        // Verify bottom divider row contains border characters and embedded status
+        let mut divider_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_text.push_str(buf[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_text.contains('─'));
+        assert!(divider_text.contains('ℹ'));
+        assert!(divider_text.contains("Project name cannot be empty"));
+
+        // Verify body lines do not contain the validation message
+        let body_area = chunks[2];
+        let mut body_text = String::new();
+        for y in body_area.y..body_area.y + body_area.height {
+            for x in body_area.x..body_area.x + body_area.width {
+                body_text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(!body_text.contains("Project name cannot be empty"));
+
+        // Verify footer row contains key shortcuts
+        let mut footer_text = String::new();
+        for x in footer_area.x..footer_area.x + footer_area.width {
+            footer_text.push_str(buf[(x, footer_area.y)].symbol());
+        }
+        assert!(footer_text.contains("[Enter] Create Project"));
+        assert!(footer_text.contains("[Tab] Next"));
+    }
+
+    #[test]
+    fn test_step2_bottom_divider_embedded_validation_status() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.billing]
+            description = "Billing & Payments"
+            repos = ["billing-api"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("billing"));
+        modal.step = CreationStep::ConfigureDetails;
+
+        let area = Rect::new(0, 0, 100, 30);
+        let theme = Theme::default();
+        let m = modal_area(area).unwrap();
+        let block = Block::default().borders(Borders::ALL);
+        let inner = block.inner(m);
+        let chunks = step2_layout(inner, true);
+        let bottom_divider_area = chunks[3];
+
+        // 1. Empty project name: info icon and placeholder message embedded in bottom divider
+        let mut buf = Buffer::empty(area);
+        modal.render_modal(area, &mut buf, &theme);
+
+        let mut divider_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_text.push_str(buf[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_text.contains("── ℹ Project name cannot be empty ─"));
+
+        // 2. Non-empty project name with validation error (e.g. deselect all repos)
+        modal.set_project_name("valid-name");
+        modal.toggle_all_repos(); // No repos selected
+        assert!(!modal.validation.is_valid);
+
+        let mut buf_err = Buffer::empty(area);
+        modal.render_modal(area, &mut buf_err, &theme);
+
+        let mut divider_err_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_err_text.push_str(buf_err[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_err_text.contains("── ✗ At least one repository must be selected ─"));
+
+        // 3. Valid project name and valid repos selection: ready icon and message embedded
+        modal.toggle_all_repos(); // Re-select all repos
+        assert!(modal.validation.is_valid);
+
+        let mut buf_valid = Buffer::empty(area);
+        modal.render_modal(area, &mut buf_valid, &theme);
+
+        let mut divider_valid_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_valid_text.push_str(buf_valid[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_valid_text.contains("── ✓ Ready to create project ─"));
+
+        // 4. Message truncation on narrow width
+        let narrow_area = Rect::new(0, 0, 35, 15);
+        let narrow_m = modal_area(narrow_area).unwrap();
+        let narrow_inner = block.inner(narrow_m);
+        let narrow_chunks = step2_layout(narrow_inner, false);
+        let narrow_divider_area = narrow_chunks[3];
+
+        modal.validation.is_valid = false;
+        modal.validation.errors = vec![
+            "This is a very long error message that should definitely be truncated because the divider width is constrained"
+                .to_string(),
+        ];
+
+        let mut buf_narrow = Buffer::empty(narrow_area);
+        modal.render_modal(narrow_area, &mut buf_narrow, &theme);
+
+        let mut narrow_divider_text = String::new();
+        for x in narrow_divider_area.x..narrow_divider_area.x + narrow_divider_area.width {
+            narrow_divider_text.push_str(buf_narrow[(x, narrow_divider_area.y)].symbol());
+        }
+        assert!(narrow_divider_text.contains("..."));
+        assert!(narrow_divider_text.contains('✗'));
     }
 
     #[test]
@@ -2513,17 +3133,17 @@ mod tests {
         modal.set_project_name("my-proj");
 
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(36, 10)));
+        assert_eq!(pos, Some(Position::new(36, 6)));
 
         modal.focus = CreationFocus::Prompt;
         modal.prompt_input = "fix bug".to_string();
         modal.prompt_cursor = 7;
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(38, 12)));
+        assert_eq!(pos, Some(Position::new(38, 10)));
 
         modal.prompt_cursor = 0;
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(31, 12)));
+        assert_eq!(pos, Some(Position::new(31, 10)));
 
         modal.focus = CreationFocus::Template;
         assert_eq!(modal.cursor_position(area), None);
@@ -2661,11 +3281,11 @@ mod tests {
         // On top line, move_prompt_cursor_up returns false
         assert!(!modal.move_prompt_cursor_up());
 
-        // Pressing Up when on top line transitions focus to prev field (Agent)
+        // Pressing Up when on top line transitions focus to prev field (Repositories)
         modal.handle_key(key(KeyCode::Up));
-        assert_eq!(modal.focus, CreationFocus::Agent);
+        assert_eq!(modal.focus, CreationFocus::Repositories);
 
-        // Down from Agent returns to Prompt
+        // Down from Repositories returns to Prompt
         modal.handle_key(key(KeyCode::Down));
         assert_eq!(modal.focus, CreationFocus::Prompt);
 
@@ -3006,17 +3626,17 @@ mod tests {
         modal.focus = CreationFocus::ProjectName;
 
         let area = Rect::new(0, 0, 100, 30);
-        // inner.x = 13, prefix_len = 16 -> start x = 29, inner.y = 7 -> y = 10
-        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 10)));
+        // inner.x = 13, prefix_len = 16 -> start x = 29, body_area.y = 6
+        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 6)));
 
         modal.set_project_name("test-project");
-        assert_eq!(modal.cursor_position(area), Some(Position::new(41, 10)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(41, 6)));
 
         modal.move_project_name_cursor_home();
-        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 10)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 6)));
 
         modal.project_name_cursor = 5;
-        assert_eq!(modal.cursor_position(area), Some(Position::new(34, 10)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(34, 6)));
     }
 
     #[test]
@@ -3143,7 +3763,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         // Initial cursor at prefix_len (8): inner.x (13) + 8 = 21
-        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 4)));
 
         // 1. Typing characters filters list, updates cursor and hardware cursor position
         for c in "beta".chars() {
@@ -3153,39 +3773,39 @@ mod tests {
         assert_eq!(modal.template_search_query.cursor(), 4);
         assert_eq!(modal.matching_templates(), vec!["beta".to_string()]);
         assert_eq!(modal.selected_template(), Some("beta"));
-        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 4)));
 
         // 2. Left and Right arrows move cursor within the filter query without changing template selection
         modal.handle_key(key(KeyCode::Left));
         assert_eq!(modal.template_search_query.cursor(), 3);
         assert_eq!(modal.selected_template(), Some("beta"));
-        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 4)));
 
         modal.handle_key(key(KeyCode::Left));
         assert_eq!(modal.template_search_query.cursor(), 2);
         assert_eq!(modal.selected_template(), Some("beta"));
-        assert_eq!(modal.cursor_position(area), Some(Position::new(23, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(23, 4)));
 
         modal.handle_key(key(KeyCode::Right));
         assert_eq!(modal.template_search_query.cursor(), 3);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 4)));
 
         // 3. Home / End and Ctrl+A / Ctrl+E move cursor to boundaries
         modal.handle_key(key(KeyCode::Home));
         assert_eq!(modal.template_search_query.cursor(), 0);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 4)));
 
         modal.handle_key(key(KeyCode::End));
         assert_eq!(modal.template_search_query.cursor(), 4);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 4)));
 
         modal.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(modal.template_search_query.cursor(), 0);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 4)));
 
         modal.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         assert_eq!(modal.template_search_query.cursor(), 4);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 4)));
 
         // 4. Ctrl+U clears to start
         modal.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
@@ -3258,5 +3878,386 @@ mod tests {
         modal.handle_paste("lp\r\nha-\x07test");
         assert_eq!(modal.template_search_query.value(), "alpha-test");
         assert_eq!(modal.template_search_query.cursor(), 10);
+    }
+
+    #[test]
+    fn test_repo_items_initialization_with_template_defaults() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.multi_repo]
+            repos = [
+                "repo_a",
+                { repo = "repo_b", default = false },
+                { repo = "repo_c", default = true }
+            ]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("multi_repo"));
+
+        assert_eq!(modal.repo_items.len(), 3);
+
+        assert_eq!(modal.repo_items[0].name, "repo_a");
+        assert!(modal.repo_items[0].default_included);
+        assert!(modal.repo_items[0].selected);
+
+        assert_eq!(modal.repo_items[1].name, "repo_b");
+        assert!(!modal.repo_items[1].default_included);
+        assert!(!modal.repo_items[1].selected);
+
+        assert_eq!(modal.repo_items[2].name, "repo_c");
+        assert!(modal.repo_items[2].default_included);
+        assert!(modal.repo_items[2].selected);
+
+        assert_eq!(
+            modal.selected_repo_names(),
+            vec!["repo_a".to_string(), "repo_c".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_focus_navigation_across_all_fields_tab_and_backtab() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = ["repo1", "repo2"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+
+        // Forward tab cycle: ProjectName -> Agent -> Repositories -> Prompt -> ProjectName
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::Prompt);
+
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+
+        // Backward backtab cycle: ProjectName -> Prompt -> Repositories -> Agent -> ProjectName
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::Prompt);
+
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+
+        // Arrow navigation: Down from ProjectName -> Agent -> Repositories -> Prompt
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // In Repositories with 2 items (idx 0 -> idx 1 -> Prompt)
+        assert_eq!(modal.selected_repo_idx, 0);
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.selected_repo_idx, 1);
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // At bottom of repo list, Down moves to Prompt
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Prompt);
+
+        // Up at top line of prompt moves back to Repositories
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // In Repositories, Up moves to top item (idx 1 -> idx 0)
+        assert_eq!(modal.selected_repo_idx, 1);
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.selected_repo_idx, 0);
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // At top of Repositories, Up moves to Agent
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::Agent);
+
+        // From Agent, Up moves to ProjectName
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+    }
+
+    #[test]
+    fn test_repositories_focus_navigation_and_space_toggle() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = [
+                "repo_alpha",
+                { repo = "repo_beta", default = false },
+                "repo_gamma"
+            ]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::Repositories;
+
+        // Initially alpha and gamma are selected, beta is not
+        assert_eq!(
+            modal.selected_repo_names(),
+            vec!["repo_alpha".to_string(), "repo_gamma".to_string()]
+        );
+        assert_eq!(modal.selected_repo_idx, 0);
+
+        // Space toggles repo_alpha off
+        modal.handle_key(key(KeyCode::Char(' ')));
+        assert!(!modal.repo_items[0].selected);
+        assert_eq!(modal.selected_repo_names(), vec!["repo_gamma".to_string()]);
+
+        // 'j' moves down to repo_beta
+        modal.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(modal.selected_repo_idx, 1);
+
+        // Space toggles repo_beta on
+        modal.handle_key(key(KeyCode::Char(' ')));
+        assert!(modal.repo_items[1].selected);
+        assert_eq!(
+            modal.selected_repo_names(),
+            vec!["repo_beta".to_string(), "repo_gamma".to_string()]
+        );
+
+        // 'k' moves back up to repo_alpha
+        modal.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(modal.selected_repo_idx, 0);
+
+        // 'a' toggles all repos: not all selected -> selects all
+        modal.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            modal.selected_repo_names(),
+            vec![
+                "repo_alpha".to_string(),
+                "repo_beta".to_string(),
+                "repo_gamma".to_string()
+            ]
+        );
+
+        // 'a' again toggles all repos: all selected -> unselects all
+        modal.handle_key(key(KeyCode::Char('A')));
+        assert!(modal.selected_repo_names().is_empty());
+    }
+
+    #[test]
+    fn test_deselecting_all_repos_invalidates_modal() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = ["repo1", "repo2"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.set_project_name("valid-project");
+        assert!(modal.validation.is_valid);
+
+        // Toggle all off
+        modal.toggle_all_repos();
+        assert!(modal.selected_repo_names().is_empty());
+        assert!(!modal.validation.is_valid);
+        assert!(modal
+            .validation
+            .errors
+            .iter()
+            .any(|e| e.contains("At least one repository must be selected")));
+
+        // try_submit fails when invalid
+        let act = modal.try_submit();
+        assert_eq!(act, CreationModalAction::None);
+
+        // Select one repo back
+        modal.selected_repo_idx = 0;
+        modal.toggle_selected_repo();
+        assert_eq!(modal.selected_repo_names(), vec!["repo1".to_string()]);
+        assert!(modal.validation.is_valid);
+
+        // try_submit succeeds
+        let act = modal.try_submit();
+        match act {
+            CreationModalAction::Submit {
+                template,
+                project,
+                selected_repos,
+                ..
+            } => {
+                assert_eq!(template, "tpl");
+                assert_eq!(project, "valid-project");
+                assert_eq!(selected_repos, vec!["repo1".to_string()]);
+            }
+            other => panic!("Expected Submit, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_deselecting_repo_ignores_branch_collision_on_that_repo() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_a_dir = temp_dir.path().join("repo_a");
+        let repo_b_dir = temp_dir.path().join("repo_b");
+        init_mock_repo(&repo_a_dir);
+        init_mock_repo(&repo_b_dir);
+
+        // Create a collision branch strictly in repo_b
+        let _ = std::process::Command::new("git")
+            .args(["branch", "collision-branch"])
+            .current_dir(&repo_b_dir)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.collision_tpl]
+            repos = ['{}', '{}']
+            "#,
+            toml_path(temp_dir.path()),
+            toml_path(&repo_a_dir),
+            toml_path(&repo_b_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("collision_tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.set_project_name("collision-branch");
+
+        // Wait for background validation to detect collision
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(300) {
+            modal.poll_validation();
+            if !modal.validation.is_valid {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            !modal.validation.is_valid,
+            "Validation should fail due to branch collision in repo_b"
+        );
+        assert!(modal
+            .validation
+            .errors
+            .iter()
+            .any(|e| e.contains("repo_b") && e.contains("collision-branch")));
+
+        // Deselect repo_b (repo_items[1])
+        modal.selected_repo_idx = 1;
+        assert_eq!(modal.repo_items[1].name, "repo_b");
+        modal.toggle_selected_repo();
+        assert_eq!(modal.selected_repo_names(), vec!["repo_a".to_string()]);
+
+        // Wait for revalidation without repo_b
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(300) {
+            modal.poll_validation();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            modal.validation.is_valid,
+            "Validation should be valid once repo_b with collision is deselected: {:?}",
+            modal.validation.errors
+        );
+
+        let act = modal.try_submit();
+        match act {
+            CreationModalAction::Submit {
+                project,
+                selected_repos,
+                ..
+            } => {
+                assert_eq!(project, "collision-branch");
+                assert_eq!(selected_repos, vec!["repo_a".to_string()]);
+            }
+            other => panic!("Expected Submit, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_repositories_scrolling_and_rendering() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.many_repos]
+            repos = ["repo1", "repo2", "repo3", "repo4", "repo5"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("many_repos"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::Repositories;
+
+        assert_eq!(modal.repo_items.len(), 5);
+        assert_eq!(modal.selected_repo_idx, 0);
+        assert_eq!(modal.repo_scroll_offset, 0);
+
+        // Move down past REPOS_VISIBLE_ROWS (3)
+        modal.handle_key(key(KeyCode::Down)); // idx 1, scroll 0
+        assert_eq!(modal.selected_repo_idx, 1);
+        assert_eq!(modal.repo_scroll_offset, 0);
+
+        modal.handle_key(key(KeyCode::Down)); // idx 2, scroll 0
+        assert_eq!(modal.selected_repo_idx, 2);
+        assert_eq!(modal.repo_scroll_offset, 0);
+
+        modal.handle_key(key(KeyCode::Down)); // idx 3, scroll 1 (visible: idx 1, 2, 3)
+        assert_eq!(modal.selected_repo_idx, 3);
+        assert_eq!(modal.repo_scroll_offset, 1);
+
+        modal.handle_key(key(KeyCode::Down)); // idx 4, scroll 2 (visible: idx 2, 3, 4)
+        assert_eq!(modal.selected_repo_idx, 4);
+        assert_eq!(modal.repo_scroll_offset, 2);
+
+        // Render in buffer and verify content and scroll indicator
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+        modal.render_modal(area, &mut buf, &theme);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("Repositories (5/5 selected):"));
+        assert!(rendered.contains("repo3"));
+        assert!(rendered.contains("repo4"));
+        assert!(rendered.contains("repo5"));
+        assert!(rendered.contains("▲")); // Indicates items above can be scrolled to
+
+        // Move back up
+        modal.handle_key(key(KeyCode::Up)); // idx 3, scroll 2
+        assert_eq!(modal.selected_repo_idx, 3);
+        assert_eq!(modal.repo_scroll_offset, 2);
+
+        modal.handle_key(key(KeyCode::Up)); // idx 2, scroll 2
+        assert_eq!(modal.selected_repo_idx, 2);
+        assert_eq!(modal.repo_scroll_offset, 2);
+
+        modal.handle_key(key(KeyCode::Up)); // idx 1, scroll 1
+        assert_eq!(modal.selected_repo_idx, 1);
+        assert_eq!(modal.repo_scroll_offset, 1);
+
+        modal.handle_key(key(KeyCode::Up)); // idx 0, scroll 0
+        assert_eq!(modal.selected_repo_idx, 0);
+        assert_eq!(modal.repo_scroll_offset, 0);
     }
 }
