@@ -472,6 +472,24 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Dynamic Configuration & Template Reloading on Modal Activation**:
     - Opening the creation modal (via `n`/`c` on the dashboard or `RawAction::OpenLauncher` within an active session) triggers configuration reloading from disk using filesystem modification time (`mtime`) and file size (`len`) caching.
     - While `Config` remains a pure data structure, `TuiApp` and `DashboardState` track `config_path`, `config_last_modified` (`mtime`), and `config_file_len` (`len`), checking both filesystem modification time and file size to ensure robust cross-platform change detection even within coarse timestamp intervals (e.g. Windows NTFS ~15ms granularity). Unnecessary reloads are skipped when both attributes remain unchanged, and newly configured templates or modified repository references are immediately reflected in Step 1 template selection when the file has been modified.
+  - **Modal Geometry & Responsive Viewport Sizing**:
+    - Standard modal dimensions defined by constants `MODAL_WIDTH = 76` and `MODAL_HEIGHT = 24`.
+    - Computed via helper `modal_area(area: Rect) -> Option<Rect>`:
+      - Width: `MODAL_WIDTH.min(area.width.saturating_sub(4))`
+      - Height: `MODAL_HEIGHT.min(area.height.saturating_sub(2))`
+      - Graceful minimum dimensions guard: Returns `None` if `width < 25` or `height < 10`.
+      - Horizontally and vertically centered in the parent terminal viewport.
+  - **Unified 5-Part Layout Architecture**:
+    - Both Step 1 and Step 2 adhere to an identical 5-part vertical layout structure (`[Rect; 5]`):
+      1. **Top Area (`Constraint::Length(1)` or `Constraint::Length(top_len)`)**:
+         - *Step 1 (`step1_layout`)*: Search filter input row (`Filter: <query>`).
+         - *Step 2 (`step2_layout`)*: Template summary row (`Template: <name> | Repos (<count>): <repos>`) and optional description row (`top_len = 2` if description is present and `inner.height >= 16`, otherwise `1`).
+      2. **Top Divider (`Constraint::Length(1)`)**: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
+      3. **Body Area (`Constraint::Min(4)`)**:
+         - *Step 1*: Master-detail horizontal split (left matching templates list, right template details preview).
+         - *Step 2*: Form area rendering Project Name, Agent CLI selector, Repositories checklist, Initial Prompt box, and pre-validation status banner.
+      4. **Bottom Divider (`Constraint::Length(1)`)**: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
+      5. **Footer Shortcuts Hint Bar (`Constraint::Length(1)`)**: Bottom-anchored key navigation hints (`theme.key_hint`, bold) consistently anchored to the base of the modal across both steps.
   - **Asynchronous Non-Blocking Pre-Validation**:
     - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
     - Git branch collisions are checked asynchronously in background worker threads with generation counters to prevent stale results and UI freezing.

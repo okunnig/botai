@@ -55,6 +55,50 @@ pub enum CreationModalAction {
     Cancel,
 }
 
+pub const MODAL_WIDTH: u16 = 76;
+pub const MODAL_HEIGHT: u16 = 24;
+
+/// Calculates the centered modal bounding rectangle, ensuring minimum dimensions.
+pub fn modal_area(area: Rect) -> Option<Rect> {
+    let width = MODAL_WIDTH.min(area.width.saturating_sub(4));
+    let height = MODAL_HEIGHT.min(area.height.saturating_sub(2));
+
+    if width < 25 || height < 10 {
+        return None;
+    }
+
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Some(Rect::new(x, y, width, height))
+}
+
+pub fn step1_layout(inner: Rect) -> [Rect; 5] {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Top filter row
+            Constraint::Length(1), // Top Divider
+            Constraint::Min(4),    // Body (Left: template list, Right: preview)
+            Constraint::Length(1), // Bottom Divider
+            Constraint::Length(1), // Footer hint
+        ])
+        .areas(inner)
+}
+
+pub fn step2_layout(inner: Rect, has_desc: bool) -> [Rect; 5] {
+    let top_len = if has_desc && inner.height >= 16 { 2 } else { 1 };
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top_len), // Top template summary & description
+            Constraint::Length(1),       // Top Divider
+            Constraint::Min(4),          // Body form area
+            Constraint::Length(1),       // Bottom Divider
+            Constraint::Length(1),       // Footer hints
+        ])
+        .areas(inner)
+}
+
 pub const PROMPT_VISIBLE_LINES: usize = 3;
 pub const REPOS_VISIBLE_ROWS: usize = 3;
 
@@ -1039,16 +1083,7 @@ impl ProjectCreationModal {
 
     /// Calculates the hardware cursor position within the modal area when an editable text input is focused.
     pub fn cursor_position(&self, area: Rect) -> Option<Position> {
-        let width = 76.min(area.width.saturating_sub(4));
-        let height = 18.min(area.height.saturating_sub(2));
-
-        if width < 25 || height < 10 {
-            return None;
-        }
-
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let modal_area = Rect::new(x, y, width, height);
+        let modal_area = modal_area(area)?;
 
         let block = Block::default().borders(Borders::ALL);
         let inner = block.inner(modal_area);
@@ -1056,8 +1091,9 @@ impl ProjectCreationModal {
         match self.step {
             CreationStep::SelectTemplate => {
                 let prefix_len = 8u16; // "Filter: "
-                let cursor_x = inner.x + prefix_len + self.template_search_query.cursor as u16;
-                let cursor_y = inner.y;
+                let chunks = step1_layout(inner);
+                let cursor_x = chunks[0].x + prefix_len + self.template_search_query.cursor as u16;
+                let cursor_y = chunks[0].y;
                 if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                     Some(Position::new(cursor_x, cursor_y))
                 } else {
@@ -1067,45 +1103,57 @@ impl ProjectCreationModal {
                     ))
                 }
             }
-            CreationStep::ConfigureDetails => match self.focus {
-                CreationFocus::ProjectName => {
-                    let prefix_len = 16u16; // "▶ Project Name: "
-                    let total_chars = self.project_name_input.chars().count();
-                    let cursor_offset = self.project_name_cursor.min(total_chars) as u16;
-                    let cursor_x = inner.x + prefix_len + cursor_offset;
-                    let cursor_y = inner.y + 3;
-                    if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
-                        Some(Position::new(cursor_x, cursor_y))
-                    } else {
-                        Some(Position::new(
-                            cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                            cursor_y,
-                        ))
-                    }
-                }
-                CreationFocus::Prompt => {
-                    let prompt_text_width = (inner.width.saturating_sub(18) as usize).max(10);
-                    let (line_idx, col_idx) = self.cursor_to_line_col(prompt_text_width);
-                    let scroll_offset = self.prompt_scroll_offset.min(line_idx);
-                    let visible_line = line_idx.saturating_sub(scroll_offset);
-                    if visible_line < PROMPT_VISIBLE_LINES {
-                        let repos_rows = 1 + self.repos_rendered_rows() as u16;
-                        let cursor_x = inner.x + 18 + col_idx as u16;
-                        let cursor_y = inner.y + 5 + repos_rows + visible_line as u16;
+            CreationStep::ConfigureDetails => {
+                let has_desc = self
+                    .selected_template()
+                    .and_then(|t| self.config.get_template(t))
+                    .and_then(|t| t.description.as_deref())
+                    .is_some_and(|d| !d.is_empty());
+                let chunks = step2_layout(inner, has_desc);
+                let body_area = chunks[2];
+
+                match self.focus {
+                    CreationFocus::ProjectName => {
+                        let prefix_len = 16u16; // "▶ Project Name: "
+                        let total_chars = self.project_name_input.chars().count();
+                        let cursor_offset = self.project_name_cursor.min(total_chars) as u16;
+                        let cursor_x = body_area.x + prefix_len + cursor_offset;
+                        let cursor_y = body_area.y;
                         if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
                             Some(Position::new(cursor_x, cursor_y))
                         } else {
                             Some(Position::new(
                                 cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                                cursor_y.min(inner.y + inner.height.saturating_sub(1)),
+                                cursor_y,
                             ))
                         }
-                    } else {
-                        None
                     }
+                    CreationFocus::Prompt => {
+                        let prompt_text_width =
+                            (body_area.width.saturating_sub(18) as usize).max(10);
+                        let (line_idx, col_idx) = self.cursor_to_line_col(prompt_text_width);
+                        let scroll_offset = self.prompt_scroll_offset.min(line_idx);
+                        let visible_line = line_idx.saturating_sub(scroll_offset);
+                        if visible_line < PROMPT_VISIBLE_LINES {
+                            let repos_rows = 1 + self.repos_rendered_rows() as u16;
+                            let cursor_x = body_area.x + 18 + col_idx as u16;
+                            let cursor_y = body_area.y + 2 + repos_rows + visible_line as u16;
+                            if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height
+                            {
+                                Some(Position::new(cursor_x, cursor_y))
+                            } else {
+                                Some(Position::new(
+                                    cursor_x.min(inner.x + inner.width.saturating_sub(1)),
+                                    cursor_y.min(inner.y + inner.height.saturating_sub(1)),
+                                ))
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
         }
     }
 
@@ -1570,16 +1618,10 @@ impl ProjectCreationModal {
 
     /// Renders the unified Project Creation Modal into the given `Buffer`.
     pub fn render_modal(&self, area: Rect, buf: &mut Buffer, theme: &Theme) {
-        let width = 76.min(area.width.saturating_sub(4));
-        let height = 18.min(area.height.saturating_sub(2));
-
-        if width < 25 || height < 10 {
-            return;
-        }
-
-        let x = area.x + (area.width.saturating_sub(width)) / 2;
-        let y = area.y + (area.height.saturating_sub(height)) / 2;
-        let modal_area = Rect::new(x, y, width, height);
+        let modal_area = match modal_area(area) {
+            Some(a) => a,
+            None => return,
+        };
 
         Clear.render(modal_area, buf);
 
@@ -1611,16 +1653,7 @@ impl ProjectCreationModal {
             return;
         }
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // Top filter row
-                Constraint::Length(1), // Divider
-                Constraint::Min(4),    // Body (Left: template list, Right: preview)
-                Constraint::Length(1), // Divider
-                Constraint::Length(1), // Footer hint
-            ])
-            .split(inner);
+        let chunks = step1_layout(inner);
 
         let filter_area = chunks[0];
         let top_divider_area = chunks[1];
@@ -2242,54 +2275,95 @@ impl ProjectCreationModal {
                 .add_modifier(Modifier::BOLD),
         ));
 
-        let mut lines = vec![
-            // Row 0: Template summary
-            Line::from(Span::styled(
-                repo_preview_str,
-                Style::default().fg(theme.input_placeholder),
-            )),
-        ];
+        let has_desc = !tpl_desc_str.is_empty();
+        let chunks = step2_layout(inner, has_desc);
 
-        if !tpl_desc_str.is_empty() && inner.height >= 14 {
-            lines.push(Line::from(Span::styled(
+        let top_area = chunks[0];
+        let top_divider_area = chunks[1];
+        let body_area = chunks[2];
+        let bottom_divider_area = chunks[3];
+        let footer_area = chunks[4];
+
+        // 1. Top template summary & description
+        let top_line = Line::from(Span::styled(
+            repo_preview_str,
+            Style::default().fg(theme.input_placeholder),
+        ));
+        buf.set_line(top_area.x, top_area.y, &top_line, top_area.width);
+        if top_area.height >= 2 && has_desc {
+            let desc_line = Line::from(Span::styled(
                 tpl_desc_str,
                 Style::default().fg(theme.input_placeholder),
-            )));
-        } else {
-            lines.push(Line::from(""));
+            ));
+            buf.set_line(top_area.x, top_area.y + 1, &desc_line, top_area.width);
         }
 
-        // Row 2: Empty
-        lines.push(Line::from(""));
+        // 2. Top Divider
+        let top_divider_str = "─".repeat(top_divider_area.width as usize);
+        let top_divider_line = Line::from(Span::styled(
+            top_divider_str,
+            Style::default().fg(theme.border_unfocused),
+        ));
+        buf.set_line(
+            top_divider_area.x,
+            top_divider_area.y,
+            &top_divider_line,
+            top_divider_area.width,
+        );
 
-        // Row 3: Project Name
-        lines.push(Line::from(vec![
-            Span::styled(format!("{proj_prefix}Project Name: "), proj_label_style),
-            proj_display,
-            Span::raw(" "),
-            badge_span,
-        ]));
+        // 3. Body form lines
+        let mut body_lines = vec![
+            // Line 0: Project Name
+            Line::from(vec![
+                Span::styled(format!("{proj_prefix}Project Name: "), proj_label_style),
+                proj_display,
+                Span::raw(" "),
+                badge_span,
+            ]),
+            // Line 1: Agent CLI
+            Line::from(vec![
+                Span::styled(format!("{agent_prefix}Agent CLI: "), agent_label_style),
+                agent_display,
+            ]),
+            // Line 2: Repositories header
+            Line::from(repos_header_spans),
+        ];
 
-        // Row 4: Agent
-        lines.push(Line::from(vec![
-            Span::styled(format!("{agent_prefix}Agent CLI: "), agent_label_style),
-            agent_display,
-        ]));
+        // Lines 3..: repo_row_lines (checklist items)
+        body_lines.extend(repo_row_lines);
 
-        // Repositories section (header + item rows)
-        lines.push(Line::from(repos_header_spans));
-        lines.extend(repo_row_lines);
+        // Lines prompt: prompt_row_spans
+        body_lines.extend(prompt_row_spans);
 
-        // Rows Prompt
-        lines.extend(prompt_row_spans);
+        // Line empty spacing
+        body_lines.push(Line::from(""));
 
-        lines.push(Line::from(""));
-        lines.push(banner_line);
-        lines.push(Line::from(""));
-        lines.push(footer_line);
+        // Line validation status banner
+        body_lines.push(banner_line);
 
-        let paragraph = Paragraph::new(lines);
-        paragraph.render(inner, buf);
+        let paragraph = Paragraph::new(body_lines);
+        paragraph.render(body_area, buf);
+
+        // 4. Bottom Divider
+        let bottom_divider_str = "─".repeat(bottom_divider_area.width as usize);
+        let bottom_divider_line = Line::from(Span::styled(
+            bottom_divider_str,
+            Style::default().fg(theme.border_unfocused),
+        ));
+        buf.set_line(
+            bottom_divider_area.x,
+            bottom_divider_area.y,
+            &bottom_divider_line,
+            bottom_divider_area.width,
+        );
+
+        // 5. Footer Hints
+        buf.set_line(
+            footer_area.x,
+            footer_area.y,
+            &footer_line,
+            footer_area.width,
+        );
     }
 }
 
@@ -2616,20 +2690,20 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         let pos = modal.cursor_position(area);
-        // inner.x = 13, prefix_len = 8 ("Filter: "), query len = 0 -> 21, inner.y = 7
-        assert_eq!(pos, Some(Position::new(21, 7)));
+        // inner.x = 13, prefix_len = 8 ("Filter: "), query len = 0 -> 21, inner.y = 4
+        assert_eq!(pos, Some(Position::new(21, 4)));
 
         modal.template_search_query = TextInput::new().with_value("xyz");
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(24, 7)));
+        assert_eq!(pos, Some(Position::new(24, 4)));
 
         modal.template_search_query.move_cursor_left();
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(23, 7)));
+        assert_eq!(pos, Some(Position::new(23, 4)));
 
         modal.template_search_query.move_cursor_home();
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(21, 7)));
+        assert_eq!(pos, Some(Position::new(21, 4)));
     }
 
     #[test]
@@ -2691,6 +2765,107 @@ mod tests {
         assert!(text2.contains("Agent CLI:"));
         assert!(text2.contains("Initial Prompt:"));
         assert!(text2.contains("[Enter] Create Project"));
+    }
+
+    #[test]
+    fn test_modal_area_geometry_and_bounds() {
+        assert_eq!(MODAL_WIDTH, 76);
+        assert_eq!(MODAL_HEIGHT, 24);
+
+        // Standard terminal: 100x30
+        let area = Rect::new(0, 0, 100, 30);
+        let m = modal_area(area).unwrap();
+        assert_eq!(m, Rect::new(12, 3, 76, 24));
+
+        // Slightly constrained terminal: 70x20
+        let area_constrained = Rect::new(0, 0, 70, 20);
+        let m2 = modal_area(area_constrained).unwrap();
+        // width = min(76, 66) = 66; height = min(24, 18) = 18
+        // x = (70 - 66) / 2 = 2; y = (20 - 18) / 2 = 1
+        assert_eq!(m2, Rect::new(2, 1, 66, 18));
+
+        // Too small: returns None
+        assert_eq!(modal_area(Rect::new(0, 0, 24, 30)), None);
+        assert_eq!(modal_area(Rect::new(0, 0, 100, 9)), None);
+    }
+
+    #[test]
+    fn test_step1_and_step2_layout_structure() {
+        let inner = Rect::new(10, 5, 74, 22);
+
+        // Step 1 layout
+        let s1_chunks = step1_layout(inner);
+        assert_eq!(s1_chunks.len(), 5);
+        assert_eq!(s1_chunks[0], Rect::new(10, 5, 74, 1)); // Filter row
+        assert_eq!(s1_chunks[1], Rect::new(10, 6, 74, 1)); // Top divider
+        assert_eq!(s1_chunks[2], Rect::new(10, 7, 74, 18)); // Body area
+        assert_eq!(s1_chunks[3], Rect::new(10, 25, 74, 1)); // Bottom divider
+        assert_eq!(s1_chunks[4], Rect::new(10, 26, 74, 1)); // Footer hint
+
+        // Step 2 layout without description (top_len = 1)
+        let s2_no_desc = step2_layout(inner, false);
+        assert_eq!(s2_no_desc.len(), 5);
+        assert_eq!(s2_no_desc[0], Rect::new(10, 5, 74, 1)); // Top area
+        assert_eq!(s2_no_desc[1], Rect::new(10, 6, 74, 1)); // Top divider
+        assert_eq!(s2_no_desc[2], Rect::new(10, 7, 74, 18)); // Body area
+        assert_eq!(s2_no_desc[3], Rect::new(10, 25, 74, 1)); // Bottom divider
+        assert_eq!(s2_no_desc[4], Rect::new(10, 26, 74, 1)); // Footer hint
+
+        // Step 2 layout with description and ample height (top_len = 2)
+        let s2_with_desc = step2_layout(inner, true);
+        assert_eq!(s2_with_desc.len(), 5);
+        assert_eq!(s2_with_desc[0], Rect::new(10, 5, 74, 2)); // Top area (summary + desc)
+        assert_eq!(s2_with_desc[1], Rect::new(10, 7, 74, 1)); // Top divider
+        assert_eq!(s2_with_desc[2], Rect::new(10, 8, 74, 17)); // Body area
+        assert_eq!(s2_with_desc[3], Rect::new(10, 25, 74, 1)); // Bottom divider
+        assert_eq!(s2_with_desc[4], Rect::new(10, 26, 74, 1)); // Footer hint
+
+        // Step 2 layout with description but height < 16 (top_len = 1)
+        let small_inner = Rect::new(10, 5, 74, 14);
+        let s2_small = step2_layout(small_inner, true);
+        assert_eq!(s2_small[0].height, 1);
+    }
+
+    #[test]
+    fn test_step2_footer_anchored_to_bottom() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.billing]
+            description = "Billing & Payments"
+            repos = ["billing-api"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("billing"));
+        modal.step = CreationStep::ConfigureDetails;
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+        modal.render_modal(area, &mut buf, &theme);
+
+        let m = modal_area(area).unwrap();
+        let block = Block::default().borders(Borders::ALL);
+        let inner = block.inner(m);
+        let chunks = step2_layout(inner, true);
+        let footer_area = chunks[4];
+        let bottom_divider_area = chunks[3];
+
+        // Verify bottom divider row contains border characters
+        let mut divider_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_text.push_str(buf[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_text.contains('─'));
+
+        // Verify footer row contains key shortcuts
+        let mut footer_text = String::new();
+        for x in footer_area.x..footer_area.x + footer_area.width {
+            footer_text.push_str(buf[(x, footer_area.y)].symbol());
+        }
+        assert!(footer_text.contains("[Enter] Create Project"));
+        assert!(footer_text.contains("[Tab] Next"));
     }
 
     #[test]
@@ -2825,17 +3000,17 @@ mod tests {
         modal.set_project_name("my-proj");
 
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(36, 10)));
+        assert_eq!(pos, Some(Position::new(36, 6)));
 
         modal.focus = CreationFocus::Prompt;
         modal.prompt_input = "fix bug".to_string();
         modal.prompt_cursor = 7;
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(38, 14)));
+        assert_eq!(pos, Some(Position::new(38, 10)));
 
         modal.prompt_cursor = 0;
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(31, 14)));
+        assert_eq!(pos, Some(Position::new(31, 10)));
 
         modal.focus = CreationFocus::Template;
         assert_eq!(modal.cursor_position(area), None);
@@ -3318,17 +3493,17 @@ mod tests {
         modal.focus = CreationFocus::ProjectName;
 
         let area = Rect::new(0, 0, 100, 30);
-        // inner.x = 13, prefix_len = 16 -> start x = 29, inner.y = 7 -> y = 10
-        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 10)));
+        // inner.x = 13, prefix_len = 16 -> start x = 29, body_area.y = 6
+        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 6)));
 
         modal.set_project_name("test-project");
-        assert_eq!(modal.cursor_position(area), Some(Position::new(41, 10)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(41, 6)));
 
         modal.move_project_name_cursor_home();
-        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 10)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(29, 6)));
 
         modal.project_name_cursor = 5;
-        assert_eq!(modal.cursor_position(area), Some(Position::new(34, 10)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(34, 6)));
     }
 
     #[test]
@@ -3455,7 +3630,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 100, 30);
         // Initial cursor at prefix_len (8): inner.x (13) + 8 = 21
-        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 4)));
 
         // 1. Typing characters filters list, updates cursor and hardware cursor position
         for c in "beta".chars() {
@@ -3465,39 +3640,39 @@ mod tests {
         assert_eq!(modal.template_search_query.cursor(), 4);
         assert_eq!(modal.matching_templates(), vec!["beta".to_string()]);
         assert_eq!(modal.selected_template(), Some("beta"));
-        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 4)));
 
         // 2. Left and Right arrows move cursor within the filter query without changing template selection
         modal.handle_key(key(KeyCode::Left));
         assert_eq!(modal.template_search_query.cursor(), 3);
         assert_eq!(modal.selected_template(), Some("beta"));
-        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 4)));
 
         modal.handle_key(key(KeyCode::Left));
         assert_eq!(modal.template_search_query.cursor(), 2);
         assert_eq!(modal.selected_template(), Some("beta"));
-        assert_eq!(modal.cursor_position(area), Some(Position::new(23, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(23, 4)));
 
         modal.handle_key(key(KeyCode::Right));
         assert_eq!(modal.template_search_query.cursor(), 3);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(24, 4)));
 
         // 3. Home / End and Ctrl+A / Ctrl+E move cursor to boundaries
         modal.handle_key(key(KeyCode::Home));
         assert_eq!(modal.template_search_query.cursor(), 0);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 4)));
 
         modal.handle_key(key(KeyCode::End));
         assert_eq!(modal.template_search_query.cursor(), 4);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 4)));
 
         modal.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert_eq!(modal.template_search_query.cursor(), 0);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(21, 4)));
 
         modal.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         assert_eq!(modal.template_search_query.cursor(), 4);
-        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 7)));
+        assert_eq!(modal.cursor_position(area), Some(Position::new(25, 4)));
 
         // 4. Ctrl+U clears to start
         modal.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
