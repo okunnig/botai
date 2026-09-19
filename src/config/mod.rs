@@ -106,7 +106,12 @@ args = ["--no-auto-commits"]
 # ------------------------------------------------------------------------------
 # Reusable Repository Definitions (Optional)
 # ------------------------------------------------------------------------------
-# Define canonical repository URLs and multi-command setup pipelines once.
+# Define canonical repository URLs, multi-command setup pipelines, and environment
+# variables once for reuse across multiple project templates.
+# Each repository entry supports:
+# - url: (Optional) Remote Git clone URL or local directory path.
+# - setup: (Optional) Lifecycle commands executed in the worktree after checkout.
+# - env: (Optional) Per-repository environment variables applied during setup hooks.
 
 [repos.web-frontend]
 url = "https://github.com/example/ecommerce-web.git"
@@ -114,12 +119,20 @@ setup = [
   ["npm", "install"],
   ["npm", "run", "codegen"]
 ]
+env = { NODE_ENV = "development" }
 
 [repos.ecommerce-api]
 url = "https://github.com/example/ecommerce-api.git"
 setup = [
   ["cargo", "check"]
 ]
+
+[repos.ecommerce-docs]
+url = "https://github.com/example/ecommerce-docs.git"
+setup = [
+  ["npm", "run", "docs:build"]
+]
+env = { DOCS_ENV = "local" }
 
 # ------------------------------------------------------------------------------
 # Project Templates
@@ -143,9 +156,10 @@ agents_md_append = """
 - Follow coding standards documented in the template.
 """
 repos = [
-    "ecommerce-api",
-    "web-frontend",
-    "/home/user/code/ecommerce-shared"
+    "ecommerce-api",                               # Simple registered repo key (included by default)
+    { repo = "web-frontend", default = true },     # Inline table explicitly included by default
+    { name = "ecommerce-docs", default = false },  # Opt-in / optional repo (unselected by default in TUI/CLI)
+    "/home/user/code/ecommerce-shared"             # Local filesystem repository path
 ]
 post_create = [
     ["docker", "compose", "up", "-d"]
@@ -1516,6 +1530,10 @@ env = { GREETING = "こんにちは" }
             template.contains("[templates.ecommerce]"),
             "Template must define sample template"
         );
+        assert!(
+            template.contains("[repos.ecommerce-docs]"),
+            "Template must define ecommerce-docs repo"
+        );
 
         let parsed = Config::load_from_str(template)
             .expect("Default template must parse cleanly into Config struct");
@@ -1533,6 +1551,26 @@ env = { GREETING = "こんにちは" }
         assert!(parsed.get_agent("copilot").is_some());
         assert!(parsed.get_agent("aider").is_some());
 
+        let web_frontend = parsed
+            .repos
+            .get("web-frontend")
+            .expect("web-frontend repo should exist");
+        assert!(web_frontend.env.contains_key("NODE_ENV"));
+        assert_eq!(
+            web_frontend.env.get("NODE_ENV"),
+            Some(&"development".to_string())
+        );
+
+        let ecommerce_docs = parsed
+            .repos
+            .get("ecommerce-docs")
+            .expect("ecommerce-docs repo should exist");
+        assert!(ecommerce_docs.env.contains_key("DOCS_ENV"));
+        assert_eq!(
+            ecommerce_docs.env.get("DOCS_ENV"),
+            Some(&"local".to_string())
+        );
+
         let ws = parsed
             .get_template("ecommerce")
             .expect("ecommerce template must exist in template");
@@ -1543,7 +1581,15 @@ env = { GREETING = "こんにちは" }
             .as_deref()
             .unwrap()
             .contains("cargo test --workspace"));
-        assert_eq!(ws.repos.len(), 3);
+        assert_eq!(ws.repos.len(), 4);
+        assert_eq!(ws.repos[0], "ecommerce-api");
+        assert!(ws.repos[0].is_default_included());
+        assert_eq!(ws.repos[1], "web-frontend");
+        assert!(ws.repos[1].is_default_included());
+        assert_eq!(ws.repos[2], "ecommerce-docs");
+        assert!(!ws.repos[2].is_default_included());
+        assert_eq!(ws.repos[3], "/home/user/code/ecommerce-shared");
+        assert!(ws.repos[3].is_default_included());
         assert_eq!(ws.env.get("PORT"), Some(&"8080".to_string()));
     }
 

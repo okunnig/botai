@@ -106,7 +106,12 @@ args = ["--no-auto-commits"]
 # ------------------------------------------------------------------------------
 # Reusable Repository Definitions (Optional)
 # ------------------------------------------------------------------------------
-# Define canonical repository URLs and multi-command setup pipelines once.
+# Define canonical repository URLs, multi-command setup pipelines, and environment
+# variables once for reuse across multiple project templates.
+# Each repository entry supports:
+# - url: (Optional) Remote Git clone URL or local directory path.
+# - setup: (Optional) Lifecycle commands executed in the worktree after checkout.
+# - env: (Optional) Per-repository environment variables applied during setup hooks.
 
 [repos.web-frontend]
 url = "https://github.com/example/ecommerce-web.git"
@@ -114,12 +119,20 @@ setup = [
   ["npm", "install"],
   ["npm", "run", "codegen"]
 ]
+env = { NODE_ENV = "development" }
 
 [repos.ecommerce-api]
 url = "https://github.com/example/ecommerce-api.git"
 setup = [
   ["cargo", "check"]
 ]
+
+[repos.ecommerce-docs]
+url = "https://github.com/example/ecommerce-docs.git"
+setup = [
+  ["npm", "run", "docs:build"]
+]
+env = { DOCS_ENV = "local" }
 
 # ------------------------------------------------------------------------------
 # Project Templates
@@ -140,12 +153,11 @@ agents_md_append = """
 - Run integration tests with `cargo test --workspace`.
 - Follow coding standards documented in the template.
 """
-# Repositories can be simple strings or inline tables with `default = true|false`:
 repos = [
-  "ecommerce-api",                                # Simple string (included by default)
-  { repo = "web-frontend", default = true },      # Inline table using 'repo' key (default = true)
-  { name = "docs", default = false },             # Inline table using 'name' key (optional opt-in)
-  "/home/user/code/ecommerce-shared"              # Local path (included by default)
+  "ecommerce-api",                               # Simple registered repo key (included by default)
+  { repo = "web-frontend", default = true },     # Inline table explicitly included by default
+  { name = "ecommerce-docs", default = false },  # Opt-in / optional repo (unselected by default in TUI/CLI)
+  "/home/user/code/ecommerce-shared"             # Local filesystem repository path
 ]
 post_create = [
   ["docker", "compose", "up", "-d"]
