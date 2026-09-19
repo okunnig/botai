@@ -129,6 +129,8 @@ setup = [
 # - default_agent: (Optional) Specific agent override for this template.
 # - agents_md_append: (Optional) Custom instructions appended to AGENTS.md.
 # - repos: (Required) List of registered repo keys, Git URLs, or local paths.
+#   Entries can be simple strings (included by default) or inline tables:
+#   e.g. { repo = "...", default = true|false } or { name = "...", default = false }
 # - env: (Optional) Per-template environment variables injected into the agent.
 # - post_create: (Optional) Commands executed at project root after setup.
 # - pre_destroy: (Optional) Commands executed at project root before cleanup.
@@ -329,6 +331,96 @@ where
     Ok(parse_command_hooks_from_value(&value))
 }
 
+/// Represents an entry in a template's `repos` list.
+///
+/// Can either be a simple string (e.g., `"ecommerce-api"`) which defaults to included,
+/// or an inline table specifying `{ name = "...", default = false }` or `{ repo = "...", default = false }`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TemplateRepoEntry {
+    Simple(String),
+    Detailed {
+        #[serde(alias = "name")]
+        repo: String,
+        #[serde(default = "default_repo_included")]
+        default: bool,
+    },
+}
+
+pub fn default_repo_included() -> bool {
+    true
+}
+
+impl TemplateRepoEntry {
+    pub fn entry_str(&self) -> &str {
+        match self {
+            Self::Simple(s) => s.as_str(),
+            Self::Detailed { repo, .. } => repo.as_str(),
+        }
+    }
+
+    pub fn is_default_included(&self) -> bool {
+        match self {
+            Self::Simple(_) => true,
+            Self::Detailed { default, .. } => *default,
+        }
+    }
+}
+
+impl From<&str> for TemplateRepoEntry {
+    fn from(s: &str) -> Self {
+        Self::Simple(s.to_string())
+    }
+}
+
+impl From<String> for TemplateRepoEntry {
+    fn from(s: String) -> Self {
+        Self::Simple(s)
+    }
+}
+
+impl AsRef<str> for TemplateRepoEntry {
+    fn as_ref(&self) -> &str {
+        self.entry_str()
+    }
+}
+
+impl std::fmt::Display for TemplateRepoEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.entry_str())
+    }
+}
+
+impl PartialEq<str> for TemplateRepoEntry {
+    fn eq(&self, other: &str) -> bool {
+        self.entry_str() == other
+    }
+}
+
+impl PartialEq<&str> for TemplateRepoEntry {
+    fn eq(&self, other: &&str) -> bool {
+        self.entry_str() == *other
+    }
+}
+
+impl PartialEq<String> for TemplateRepoEntry {
+    fn eq(&self, other: &String) -> bool {
+        self.entry_str() == other.as_str()
+    }
+}
+
+impl PartialEq<TemplateRepoEntry> for String {
+    fn eq(&self, other: &TemplateRepoEntry) -> bool {
+        self.as_str() == other.entry_str()
+    }
+}
+
+impl PartialEq<TemplateRepoEntry> for &str {
+    fn eq(&self, other: &TemplateRepoEntry) -> bool {
+        *self == other.entry_str()
+    }
+}
+
 /// Information about a resolved repository within a template.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedRepo {
@@ -346,6 +438,9 @@ pub struct ResolvedRepo {
     /// Per-repository environment variables applied during setup hook execution.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Whether this repository is included/selected by default during project creation.
+    #[serde(default = "default_repo_included")]
+    pub default_include: bool,
 }
 
 impl ResolvedRepo {
@@ -394,8 +489,8 @@ pub struct TemplateConfig {
     /// Optional custom template instructions appended to AGENTS.md.
     #[serde(default)]
     pub agents_md_append: Option<String>,
-    /// List of Git URLs, relative repo names, or local repository paths.
-    pub repos: Vec<String>,
+    /// List of Git URLs, relative repo names, or local repository paths (strings or inline tables).
+    pub repos: Vec<TemplateRepoEntry>,
     /// Per-template environment variables injected into the agent environment.
     #[serde(default)]
     pub env: HashMap<String, String>,
@@ -405,6 +500,25 @@ pub struct TemplateConfig {
     /// Pre-destruction lifecycle commands executed at the project root before removing worktrees.
     #[serde(default, deserialize_with = "deserialize_command_hooks")]
     pub pre_destroy: Vec<Vec<String>>,
+}
+
+impl TemplateConfig {
+    /// Returns the list of repository entry strings (URLs, keys, or paths) configured for this template.
+    pub fn repo_names(&self) -> Vec<String> {
+        self.repos
+            .iter()
+            .map(|entry| entry.entry_str().to_string())
+            .collect()
+    }
+
+    /// Returns the list of default-included repository entry strings for this template.
+    pub fn default_repo_names(&self) -> Vec<String> {
+        self.repos
+            .iter()
+            .filter(|entry| entry.is_default_included())
+            .map(|entry| entry.entry_str().to_string())
+            .collect()
+    }
 }
 
 /// Backward compatibility alias for `TemplateConfig`.
@@ -523,6 +637,7 @@ impl Config {
                         original_entry,
                         setup_hooks,
                         env,
+                        default_include: true,
                     }
                 } else {
                     let path_obj = Path::new(url_trimmed);
@@ -540,6 +655,7 @@ impl Config {
                         original_entry,
                         setup_hooks,
                         env,
+                        default_include: true,
                     }
                 }
             } else {
@@ -550,6 +666,7 @@ impl Config {
                     original_entry,
                     setup_hooks,
                     env,
+                    default_include: true,
                 }
             }
         } else {
@@ -563,6 +680,7 @@ impl Config {
                     original_entry: trimmed.to_string(),
                     setup_hooks: Vec::new(),
                     env: HashMap::new(),
+                    default_include: true,
                 }
             } else {
                 let path_obj = Path::new(trimmed);
@@ -580,6 +698,7 @@ impl Config {
                     original_entry: trimmed.to_string(),
                     setup_hooks: Vec::new(),
                     env: HashMap::new(),
+                    default_include: true,
                 }
             }
         }
@@ -598,18 +717,20 @@ impl Config {
         let mut seen_names: HashMap<String, String> = HashMap::new();
 
         for repo_entry in &tpl.repos {
-            let res = self.resolve_repo(repo_entry);
+            let mut res = self.resolve_repo(repo_entry.entry_str());
+            res.default_include = repo_entry.is_default_included();
+            let entry_str = repo_entry.entry_str();
             if let Some(prev_entry) = seen_names.get(&res.name) {
-                if prev_entry != repo_entry {
+                if prev_entry != entry_str {
                     return Err(ConfigError::RepoCollision {
                         template: template_name.to_string(),
                         name: res.name.clone(),
                         source1: prev_entry.clone(),
-                        source2: repo_entry.clone(),
+                        source2: entry_str.to_string(),
                     });
                 }
             } else {
-                seen_names.insert(res.name.clone(), repo_entry.clone());
+                seen_names.insert(res.name.clone(), entry_str.to_string());
             }
             resolved.push(res);
         }
@@ -1864,5 +1985,214 @@ repos = [
         assert_eq!(r5.clone_url, None);
         assert_eq!(r5.local_path, PathBuf::from("/absolute/unregistered"));
         assert!(r5.setup_hooks.is_empty());
+    }
+
+    #[test]
+    fn test_template_repo_entry_string_array_backward_compatibility() {
+        let toml_str = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.simple]
+description = "Simple string array"
+repos = ["service-a", "service-b"]
+"#;
+        let config = Config::load_from_str(toml_str).expect("Valid string array config should parse");
+        let tpl = config.get_template("simple").expect("Template must exist");
+        assert_eq!(tpl.repos.len(), 2);
+        assert_eq!(tpl.repos[0], TemplateRepoEntry::Simple("service-a".to_string()));
+        assert_eq!(tpl.repos[1], TemplateRepoEntry::Simple("service-b".to_string()));
+        assert_eq!(tpl.repos[0].entry_str(), "service-a");
+        assert_eq!(tpl.repos[1].entry_str(), "service-b");
+        assert!(tpl.repos[0].is_default_included());
+        assert!(tpl.repos[1].is_default_included());
+        assert_eq!(tpl.repo_names(), vec!["service-a", "service-b"]);
+        assert_eq!(tpl.default_repo_names(), vec!["service-a", "service-b"]);
+    }
+
+    #[test]
+    fn test_template_repo_entry_inline_table_default_false() {
+        let toml_str = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.optional_repo]
+description = "Template with optional repository"
+repos = [
+    { repo = "docs", default = false }
+]
+"#;
+        let config = Config::load_from_str(toml_str).expect("Inline table with default = false should parse");
+        let tpl = config.get_template("optional_repo").expect("Template must exist");
+        assert_eq!(tpl.repos.len(), 1);
+        match &tpl.repos[0] {
+            TemplateRepoEntry::Detailed { repo, default } => {
+                assert_eq!(repo, "docs");
+                assert!(!default);
+            }
+            _ => panic!("Expected Detailed variant"),
+        }
+        assert_eq!(tpl.repos[0].entry_str(), "docs");
+        assert!(!tpl.repos[0].is_default_included());
+        assert_eq!(tpl.repo_names(), vec!["docs"]);
+        assert!(tpl.default_repo_names().is_empty());
+    }
+
+    #[test]
+    fn test_template_repo_entry_name_and_repo_aliases() {
+        let toml_str = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.aliased]
+repos = [
+    { name = "billing-service", default = false },
+    { repo = "auth-service", default = false }
+]
+"#;
+        let config = Config::load_from_str(toml_str).expect("Aliases 'name' and 'repo' should parse cleanly");
+        let tpl = config.get_template("aliased").expect("Template must exist");
+        assert_eq!(tpl.repos.len(), 2);
+        assert_eq!(tpl.repos[0].entry_str(), "billing-service");
+        assert!(!tpl.repos[0].is_default_included());
+        assert_eq!(tpl.repos[1].entry_str(), "auth-service");
+        assert!(!tpl.repos[1].is_default_included());
+        assert_eq!(tpl.repo_names(), vec!["billing-service", "auth-service"]);
+        assert!(tpl.default_repo_names().is_empty());
+    }
+
+    #[test]
+    fn test_template_repo_entry_omitted_default_defaults_to_true() {
+        let toml_str = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.implicit_default]
+repos = [
+    { repo = "core-api" },
+    { name = "frontend" }
+]
+"#;
+        let config = Config::load_from_str(toml_str).expect("Omitted default field should parse as true");
+        let tpl = config.get_template("implicit_default").expect("Template must exist");
+        assert_eq!(tpl.repos.len(), 2);
+        assert_eq!(tpl.repos[0].entry_str(), "core-api");
+        assert!(tpl.repos[0].is_default_included());
+        assert_eq!(tpl.repos[1].entry_str(), "frontend");
+        assert!(tpl.repos[1].is_default_included());
+        assert_eq!(tpl.default_repo_names(), vec!["core-api", "frontend"]);
+    }
+
+    #[test]
+    fn test_template_repo_entry_mixed_array() {
+        let toml_str = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[templates.mixed]
+repos = [
+    "service-api",
+    { repo = "web-frontend", default = true },
+    { name = "docs-site", default = false },
+    "/local/shared-lib",
+    { repo = "extra-tools", default = false }
+]
+"#;
+        let config = Config::load_from_str(toml_str).expect("Mixed array of strings and tables should parse");
+        let tpl = config.get_template("mixed").expect("Template must exist");
+        assert_eq!(tpl.repos.len(), 5);
+
+        assert_eq!(tpl.repos[0].entry_str(), "service-api");
+        assert!(tpl.repos[0].is_default_included());
+
+        assert_eq!(tpl.repos[1].entry_str(), "web-frontend");
+        assert!(tpl.repos[1].is_default_included());
+
+        assert_eq!(tpl.repos[2].entry_str(), "docs-site");
+        assert!(!tpl.repos[2].is_default_included());
+
+        assert_eq!(tpl.repos[3].entry_str(), "/local/shared-lib");
+        assert!(tpl.repos[3].is_default_included());
+
+        assert_eq!(tpl.repos[4].entry_str(), "extra-tools");
+        assert!(!tpl.repos[4].is_default_included());
+
+        assert_eq!(
+            tpl.repo_names(),
+            vec![
+                "service-api",
+                "web-frontend",
+                "docs-site",
+                "/local/shared-lib",
+                "extra-tools"
+            ]
+        );
+        assert_eq!(
+            tpl.default_repo_names(),
+            vec!["service-api", "web-frontend", "/local/shared-lib"]
+        );
+    }
+
+    #[test]
+    fn test_resolve_template_repos_with_default_inclusion() {
+        let toml_str = r#"
+default_agent = "claude"
+repos_dir = "/tmp/repos"
+
+[repos.registered-service]
+url = "https://github.com/example/registered-service.git"
+
+[templates.multi]
+repos = [
+    "registered-service",
+    { repo = "docs", default = false },
+    { name = "analytics", default = true },
+    { repo = "https://github.com/example/extra.git", default = false }
+]
+"#;
+        let config = Config::load_from_str(toml_str).expect("Config should parse");
+        let resolved = config
+            .resolve_template_repos("multi")
+            .expect("Template repos should resolve cleanly");
+
+        assert_eq!(resolved.len(), 4);
+
+        assert_eq!(resolved[0].name, "registered-service");
+        assert!(resolved[0].default_include);
+
+        assert_eq!(resolved[1].name, "docs");
+        assert!(!resolved[1].default_include);
+
+        assert_eq!(resolved[2].name, "analytics");
+        assert!(resolved[2].default_include);
+
+        assert_eq!(resolved[3].name, "extra");
+        assert!(!resolved[3].default_include);
+    }
+
+    #[test]
+    fn test_template_repo_entry_conversions_and_display() {
+        let entry1: TemplateRepoEntry = "my-repo".into();
+        assert_eq!(entry1.entry_str(), "my-repo");
+        assert!(entry1.is_default_included());
+        assert_eq!(format!("{entry1}"), "my-repo");
+        assert_eq!(entry1.as_ref(), "my-repo");
+        assert_eq!(entry1, "my-repo");
+        assert_eq!("my-repo", entry1);
+        assert_eq!(entry1, "my-repo".to_string());
+        assert_eq!("my-repo".to_string(), entry1);
+
+        let entry2: TemplateRepoEntry = "another-repo".to_string().into();
+        assert_eq!(entry2.entry_str(), "another-repo");
+        assert_eq!(entry2, "another-repo");
+
+        let entry3 = TemplateRepoEntry::Detailed {
+            repo: "opt-in".to_string(),
+            default: false,
+        };
+        assert_eq!(entry3.entry_str(), "opt-in");
+        assert!(!entry3.is_default_included());
+        assert_eq!(format!("{entry3}"), "opt-in");
+        assert_eq!(entry3, "opt-in");
     }
 }

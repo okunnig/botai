@@ -242,10 +242,11 @@ impl ProjectCreationModal {
                         }
                     }
                     for repo in &tpl.repos {
-                        if repo.to_lowercase().contains(&query) {
+                        let repo_str = repo.entry_str();
+                        if repo_str.to_lowercase().contains(&query) {
                             return true;
                         }
-                        let derived = crate::config::derive_repo_name(repo);
+                        let derived = crate::config::derive_repo_name(repo_str);
                         if derived.to_lowercase().contains(&query) {
                             return true;
                         }
@@ -1614,9 +1615,17 @@ impl ProjectCreationModal {
                     )));
                 } else {
                     for repo in &tpl.repos {
-                        let name = crate::config::derive_repo_name(repo);
-                        let display_str = if repo != &name {
-                            format!("  • {name} ({repo})")
+                        let repo_str = repo.entry_str();
+                        let name = crate::config::derive_repo_name(repo_str);
+                        let is_default = repo.is_default_included();
+                        let display_str = if !is_default {
+                            if repo_str != name {
+                                format!("  • {name} ({repo_str}) [optional]")
+                            } else {
+                                format!("  • {name} [optional]")
+                            }
+                        } else if repo_str != name {
+                            format!("  • {name} ({repo_str})")
                         } else {
                             format!("  • {name}")
                         };
@@ -1756,7 +1765,7 @@ impl ProjectCreationModal {
             let repo_names = tpl
                 .repos
                 .iter()
-                .map(|r| crate::config::derive_repo_name(r))
+                .map(|r| crate::config::derive_repo_name(r.entry_str()))
                 .collect::<Vec<_>>()
                 .join(", ");
             let r_str = format!(
