@@ -263,6 +263,7 @@ impl ProjectBuilder {
     /// - Returns `NoRepositoriesSelected` if the effective list is empty.
     pub fn resolve_effective_repos(&self) -> Result<Vec<ResolvedRepo>, ProjectError> {
         let all_repos = self.config.resolve_template_repos(&self.template_name)?;
+        let has_configured_repos = !all_repos.is_empty();
         let effective: Vec<ResolvedRepo> = if let Some(ref selected) = self.selected_repos {
             for name in selected {
                 if !all_repos.iter().any(|r| &r.name == name) {
@@ -283,7 +284,7 @@ impl ProjectBuilder {
                 .collect()
         };
 
-        if effective.is_empty() {
+        if has_configured_repos && effective.is_empty() {
             return Err(ProjectError::NoRepositoriesSelected);
         }
 
@@ -361,9 +362,11 @@ impl ProjectBuilder {
             return validation;
         }
 
-        if self.selected_repos.as_ref().is_some_and(|r| r.is_empty()) {
-            validation.add_error("At least one repository must be selected");
-            return validation;
+        if let Some(tpl) = self.config.get_template(&self.template_name) {
+            if !tpl.repos.is_empty() && self.selected_repos.as_ref().is_some_and(|r| r.is_empty()) {
+                validation.add_error("At least one repository must be selected");
+                return validation;
+            }
         }
 
         validation

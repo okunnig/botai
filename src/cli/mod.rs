@@ -180,7 +180,7 @@ pub fn resolve_cli_selected_repos(
     }
 
     // 4. Non-empty check
-    if selected_names.is_empty() {
+    if !all_template_repos.is_empty() && selected_names.is_empty() {
         anyhow::bail!("Cannot create project: at least one repository must be selected.");
     }
 

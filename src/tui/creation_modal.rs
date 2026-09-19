@@ -577,7 +577,7 @@ impl ProjectCreationModal {
         .with_selected_repos(selected_repos.clone());
 
         self.validation = builder.validate_fast();
-        if selected_repos.is_empty() {
+        if !self.repo_items.is_empty() && selected_repos.is_empty() {
             self.validation.is_valid = false;
             self.validation
                 .add_error("At least one repository must be selected");
@@ -1490,7 +1490,7 @@ impl ProjectCreationModal {
             .with_agent(self.selected_agent())
             .with_selected_repos(selected_repos.clone());
             self.validation = builder.validate_detailed();
-            if selected_repos.is_empty() {
+            if !self.repo_items.is_empty() && selected_repos.is_empty() {
                 self.validation.is_valid = false;
                 self.validation
                     .add_error("At least one repository must be selected");
