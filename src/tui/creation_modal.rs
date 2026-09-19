@@ -2215,52 +2215,7 @@ impl ProjectCreationModal {
             }
         }
 
-        // 6. Validation Status Banner
-        let banner_line = if let Some(msg) = self.validation.primary_message() {
-            if self.validation.is_valid {
-                Line::from(vec![
-                    Span::styled(
-                        " ✓ ",
-                        Style::default()
-                            .fg(theme.status_done)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(msg, Style::default().fg(theme.status_done)),
-                ])
-            } else if self.project_name_input.trim().is_empty() {
-                Line::from(vec![
-                    Span::styled(" ℹ ", Style::default().fg(theme.modal_label)),
-                    Span::styled(msg, Style::default().fg(theme.input_placeholder)),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled(
-                        " ✗ ",
-                        Style::default()
-                            .fg(theme.status_error)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(msg, Style::default().fg(theme.status_error)),
-                ])
-            }
-        } else if self.validation.is_valid {
-            Line::from(vec![
-                Span::styled(
-                    " ✓ ",
-                    Style::default()
-                        .fg(theme.status_done)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "Ready to initialize project worktrees and spawn agent",
-                    Style::default().fg(theme.status_done),
-                ),
-            ])
-        } else {
-            Line::from("")
-        };
-
-        // 7. Footer Hints
+        // 6. Footer Hints
         let footer_text = if repos_focused {
             " [Tab] Next | [Space] Toggle | [A] All | [Enter] Create Project | [Esc] Back "
         } else if self.templates.len() > 1 {
@@ -2335,25 +2290,97 @@ impl ProjectCreationModal {
         // Lines prompt: prompt_row_spans
         body_lines.extend(prompt_row_spans);
 
-        // Line empty spacing
-        body_lines.push(Line::from(""));
-
-        // Line validation status banner
-        body_lines.push(banner_line);
-
         let paragraph = Paragraph::new(body_lines);
         paragraph.render(body_area, buf);
 
-        // 4. Bottom Divider
-        let bottom_divider_str = "─".repeat(bottom_divider_area.width as usize);
-        let bottom_divider_line = Line::from(Span::styled(
-            bottom_divider_str,
-            Style::default().fg(theme.border_unfocused),
-        ));
+        // 4. Bottom Divider with embedded validation status
+        let divider_line = if let Some(msg) = self.validation.primary_message() {
+            let (icon, icon_style, text_style) =
+                if !self.validation.is_valid && !self.project_name_input.trim().is_empty() {
+                    (
+                        " ✗ ",
+                        Style::default()
+                            .fg(theme.status_error)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.status_error),
+                    )
+                } else if self.project_name_input.trim().is_empty() {
+                    (
+                        " ℹ ",
+                        Style::default().fg(theme.modal_label),
+                        Style::default().fg(theme.input_placeholder),
+                    )
+                } else {
+                    (
+                        " ✓ ",
+                        Style::default()
+                            .fg(theme.status_done)
+                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.status_done),
+                    )
+                };
+
+            // Calculate available width for message so it doesn't overflow
+            let prefix = "──";
+            let prefix_len = 2;
+            let icon_len = icon.chars().count();
+            let overhead = prefix_len + icon_len + 3; // prefix + icon + space + trailing dashes
+            let max_msg_len = (bottom_divider_area.width as usize).saturating_sub(overhead);
+            let display_msg = if msg.chars().count() > max_msg_len && max_msg_len > 3 {
+                format!(
+                    "{}...",
+                    msg.chars()
+                        .take(max_msg_len.saturating_sub(3))
+                        .collect::<String>()
+                )
+            } else {
+                msg.to_string()
+            };
+
+            let used_len = prefix_len + icon_len + display_msg.chars().count() + 1;
+            let remaining_dashes = (bottom_divider_area.width as usize).saturating_sub(used_len);
+            let suffix = "─".repeat(remaining_dashes);
+
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(theme.border_unfocused)),
+                Span::styled(icon, icon_style),
+                Span::styled(display_msg, text_style),
+                Span::raw(" "),
+                Span::styled(suffix, Style::default().fg(theme.border_unfocused)),
+            ])
+        } else if self.validation.is_valid && !self.project_name_input.trim().is_empty() {
+            let prefix = "──";
+            let icon = " ✓ ";
+            let text = "Ready to create project";
+            let overhead = 2 + 3 + text.len() + 1;
+            let remaining = (bottom_divider_area.width as usize).saturating_sub(overhead);
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(theme.border_unfocused)),
+                Span::styled(
+                    icon,
+                    Style::default()
+                        .fg(theme.status_done)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(text, Style::default().fg(theme.status_done)),
+                Span::raw(" "),
+                Span::styled(
+                    "─".repeat(remaining),
+                    Style::default().fg(theme.border_unfocused),
+                ),
+            ])
+        } else {
+            let divider_str = "─".repeat(bottom_divider_area.width as usize);
+            Line::from(Span::styled(
+                divider_str,
+                Style::default().fg(theme.border_unfocused),
+            ))
+        };
+
         buf.set_line(
             bottom_divider_area.x,
             bottom_divider_area.y,
-            &bottom_divider_line,
+            &divider_line,
             bottom_divider_area.width,
         );
 
@@ -2765,6 +2792,17 @@ mod tests {
         assert!(text2.contains("Agent CLI:"));
         assert!(text2.contains("Initial Prompt:"));
         assert!(text2.contains("[Enter] Create Project"));
+
+        let m = modal_area(area).unwrap();
+        let block = Block::default().borders(Borders::ALL);
+        let inner = block.inner(m);
+        let chunks = step2_layout(inner, true);
+        let bottom_divider_area = chunks[3];
+        let mut divider_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_text.push_str(buf2[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_text.contains("Project name cannot be empty"));
     }
 
     #[test]
@@ -2852,12 +2890,24 @@ mod tests {
         let footer_area = chunks[4];
         let bottom_divider_area = chunks[3];
 
-        // Verify bottom divider row contains border characters
+        // Verify bottom divider row contains border characters and embedded status
         let mut divider_text = String::new();
         for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
             divider_text.push_str(buf[(x, bottom_divider_area.y)].symbol());
         }
         assert!(divider_text.contains('─'));
+        assert!(divider_text.contains('ℹ'));
+        assert!(divider_text.contains("Project name cannot be empty"));
+
+        // Verify body lines do not contain the validation message
+        let body_area = chunks[2];
+        let mut body_text = String::new();
+        for y in body_area.y..body_area.y + body_area.height {
+            for x in body_area.x..body_area.x + body_area.width {
+                body_text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(!body_text.contains("Project name cannot be empty"));
 
         // Verify footer row contains key shortcuts
         let mut footer_text = String::new();
@@ -2866,6 +2916,89 @@ mod tests {
         }
         assert!(footer_text.contains("[Enter] Create Project"));
         assert!(footer_text.contains("[Tab] Next"));
+    }
+
+    #[test]
+    fn test_step2_bottom_divider_embedded_validation_status() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.billing]
+            description = "Billing & Payments"
+            repos = ["billing-api"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("billing"));
+        modal.step = CreationStep::ConfigureDetails;
+
+        let area = Rect::new(0, 0, 100, 30);
+        let theme = Theme::default();
+        let m = modal_area(area).unwrap();
+        let block = Block::default().borders(Borders::ALL);
+        let inner = block.inner(m);
+        let chunks = step2_layout(inner, true);
+        let bottom_divider_area = chunks[3];
+
+        // 1. Empty project name: info icon and placeholder message embedded in bottom divider
+        let mut buf = Buffer::empty(area);
+        modal.render_modal(area, &mut buf, &theme);
+
+        let mut divider_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_text.push_str(buf[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_text.contains("── ℹ Project name cannot be empty ─"));
+
+        // 2. Non-empty project name with validation error (e.g. deselect all repos)
+        modal.set_project_name("valid-name");
+        modal.toggle_all_repos(); // No repos selected
+        assert!(!modal.validation.is_valid);
+
+        let mut buf_err = Buffer::empty(area);
+        modal.render_modal(area, &mut buf_err, &theme);
+
+        let mut divider_err_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_err_text.push_str(buf_err[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_err_text.contains("── ✗ At least one repository must be selected ─"));
+
+        // 3. Valid project name and valid repos selection: ready icon and message embedded
+        modal.toggle_all_repos(); // Re-select all repos
+        assert!(modal.validation.is_valid);
+
+        let mut buf_valid = Buffer::empty(area);
+        modal.render_modal(area, &mut buf_valid, &theme);
+
+        let mut divider_valid_text = String::new();
+        for x in bottom_divider_area.x..bottom_divider_area.x + bottom_divider_area.width {
+            divider_valid_text.push_str(buf_valid[(x, bottom_divider_area.y)].symbol());
+        }
+        assert!(divider_valid_text.contains("── ✓ Ready to create project ─"));
+
+        // 4. Message truncation on narrow width
+        let narrow_area = Rect::new(0, 0, 35, 15);
+        let narrow_m = modal_area(narrow_area).unwrap();
+        let narrow_inner = block.inner(narrow_m);
+        let narrow_chunks = step2_layout(narrow_inner, false);
+        let narrow_divider_area = narrow_chunks[3];
+
+        modal.validation.is_valid = false;
+        modal.validation.errors = vec![
+            "This is a very long error message that should definitely be truncated because the divider width is constrained"
+                .to_string(),
+        ];
+
+        let mut buf_narrow = Buffer::empty(narrow_area);
+        modal.render_modal(narrow_area, &mut buf_narrow, &theme);
+
+        let mut narrow_divider_text = String::new();
+        for x in narrow_divider_area.x..narrow_divider_area.x + narrow_divider_area.width {
+            narrow_divider_text.push_str(buf_narrow[(x, narrow_divider_area.y)].symbol());
+        }
+        assert!(narrow_divider_text.contains("..."));
+        assert!(narrow_divider_text.contains('✗'));
     }
 
     #[test]

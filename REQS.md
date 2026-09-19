@@ -487,8 +487,10 @@ env = { PORT = "8080", NODE_ENV = "development" }
       2. **Top Divider (`Constraint::Length(1)`)**: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
       3. **Body Area (`Constraint::Min(4)`)**:
          - *Step 1*: Master-detail horizontal split (left matching templates list, right template details preview).
-         - *Step 2*: Form area rendering Project Name, Agent CLI selector, Repositories checklist, Initial Prompt box, and pre-validation status banner.
-      4. **Bottom Divider (`Constraint::Length(1)`)**: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
+         - *Step 2*: Form area rendering Project Name, Agent CLI selector, Repositories checklist, and Initial Prompt box, cleanly ending after the prompt input.
+      4. **Bottom Divider (`Constraint::Length(1)`)**:
+         - *Step 1*: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
+         - *Step 2*: Horizontal divider embedding the live pre-validation status message (`── ✗ <message> ────`, `── ℹ <message> ────`, or `── ✓ Ready to create project ────`), keeping the form body clean and anchoring validation feedback immediately above the bottom shortcuts row.
       5. **Footer Shortcuts Hint Bar (`Constraint::Length(1)`)**: Bottom-anchored key navigation hints (`theme.key_hint`, bold) consistently anchored to the base of the modal across both steps.
   - **Asynchronous Non-Blocking Pre-Validation**:
     - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
@@ -550,7 +552,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
             - **Newline Insertion**: `Shift+Enter` or `Alt+Enter` inserts a newline (`\n`) at the cursor position without triggering submission.
             - **Bracketed / Multi-line Paste**: Pasting multi-line content preserves newlines cleanly without premature form submission.
             - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
-          - Live pre-validation status banner at the bottom.
+          - **Embedded Validation Status in Bottom Divider**: Validation feedback is embedded directly into the bottom horizontal divider line (`── ✗ <message> ────`, `── ℹ <message> ────`, or `── ✓ Ready to create project ────`) immediately above the footer hints row. The message is truncated with an ellipsis (`...`) if the available divider width is constrained, keeping the form body uncluttered and cleanly separated from the footer shortcuts.
         - **Back-Navigation**: Pressing `Esc` in Step 2 returns to Step 1 without losing configuration. Pressing `Backspace` inside editable text fields strictly performs character deletion (no-op when empty or at cursor offset 0) and never navigates away from the step.
         - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, explicit list of selected repositories (`with_selected_repos(selected_repos)`), and optional initial prompt. The selected agent override and repository list are plumbed through `DashboardAction::CreateProject` and `CreationModalAction::Submit` directly into `start_project_creation` and `run_setup_worker` to initialize the project with exactly the chosen repositories.
 
