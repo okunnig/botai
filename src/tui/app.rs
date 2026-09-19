@@ -1480,6 +1480,35 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::fs;
 
+    fn toml_path(p: &std::path::Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
+    fn create_mock_git_repo(path: &std::path::Path) {
+        fs::create_dir_all(path).unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(path)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Botai Test"])
+            .current_dir(path)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "test@botai.dev"])
+            .current_dir(path)
+            .status();
+        fs::write(path.join("README.md"), "# Test Repo\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(path)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "Initial commit"])
+            .current_dir(path)
+            .status();
+    }
+
     #[test]
     fn test_tui_app_creation_and_quit() {
         let registry = SessionRegistry::new();
@@ -1622,6 +1651,8 @@ repos = []
     fn test_tui_app_creation_modal_submit_lifecycle() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        let repo_dir = tmp.path().join("repo_backend");
+        create_mock_git_repo(&repo_dir);
 
         #[cfg(windows)]
         let (cmd, args) = ("cmd.exe", r#"["/c", "exit 0"]"#);
@@ -1631,15 +1662,17 @@ repos = []
         let config_toml = format!(
             r#"
 default_agent = "mock"
-repos_dir = "/tmp/repos"
+repos_dir = "{}"
 
 [agents.mock]
 command = "{cmd}"
 args = {args}
 
 [templates.backend]
-repos = []
-"#
+repos = ['{}']
+"#,
+            toml_path(tmp.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&config_toml).unwrap();
         let registry = SessionRegistry::new();
@@ -1911,6 +1944,8 @@ repos = ["custom_repo"]
     fn test_tui_app_viewport_size_applied_to_new_project_sessions() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        let repo_dir = tmp.path().join("repo_backend");
+        create_mock_git_repo(&repo_dir);
 
         #[cfg(windows)]
         let (cmd, args) = ("cmd.exe", r#"["/c", "exit 0"]"#);
@@ -1920,15 +1955,17 @@ repos = ["custom_repo"]
         let config_toml = format!(
             r#"
 default_agent = "mock"
-repos_dir = "/tmp/repos"
+repos_dir = "{}"
 
 [agents.mock]
 command = "{cmd}"
 args = {args}
 
 [templates.backend]
-repos = []
-"#
+repos = ['{}']
+"#,
+            toml_path(tmp.path()),
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&config_toml).unwrap();
         let registry = SessionRegistry::new();
@@ -2734,6 +2771,8 @@ repos = []
     fn test_tui_app_start_project_creation_success() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        let repo_dir = tmp.path().join("repo_test");
+        create_mock_git_repo(&repo_dir);
 
         #[cfg(windows)]
         let shell_cmd = "cmd.exe";
@@ -2750,10 +2789,11 @@ command = "{}"
 args = []
 
 [templates.test_ws]
-repos = []
+repos = ['{}']
 "#,
-            cwd.display().to_string().replace('\\', "/"),
-            shell_cmd
+            toml_path(&cwd),
+            shell_cmd,
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&config_toml).unwrap();
 
@@ -2787,6 +2827,8 @@ repos = []
     fn test_tui_app_start_project_creation_with_agent_override() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cwd = tmp.path().to_path_buf();
+        let repo_dir = tmp.path().join("repo_test");
+        create_mock_git_repo(&repo_dir);
 
         #[cfg(windows)]
         let shell_cmd = "cmd.exe";
@@ -2807,11 +2849,12 @@ command = "{}"
 args = []
 
 [templates.test_ws]
-repos = []
+repos = ['{}']
 "#,
-            cwd.display().to_string().replace('\\', "/"),
+            toml_path(&cwd),
             shell_cmd,
-            shell_cmd
+            shell_cmd,
+            toml_path(&repo_dir)
         );
         let config = Config::load_from_str(&config_toml).unwrap();
 

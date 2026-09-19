@@ -10,20 +10,48 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn create_mock_git_repo(path: &std::path::Path) {
+    std::fs::create_dir_all(path).unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Botai Test"])
+        .current_dir(path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "test@botai.dev"])
+        .current_dir(path)
+        .status();
+    std::fs::write(path.join("README.md"), "# Test Repo\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(path)
+        .status();
+}
+
 #[test]
 fn test_integration_in_session_creation_modal_lifecycle() {
     let tmp = tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
+    let repo_dir = tmp.path().join("repo_shared");
+    create_mock_git_repo(&repo_dir);
 
     #[cfg(windows)]
     let (cmd, args) = ("cmd.exe", r#"["/c", "exit 0"]"#);
     #[cfg(not(windows))]
     let (cmd, args) = ("sh", r#"["-c", "exit 0"]"#);
 
+    let repo_path_str = repo_dir.to_string_lossy().replace('\\', "/");
     let config_toml = format!(
         r#"
 default_agent = "mock_agent"
-repos_dir = "/tmp/repos"
+repos_dir = "{}/repos"
 
 [agents.mock_agent]
 command = "{cmd}"
@@ -31,12 +59,13 @@ args = {args}
 
 [templates.payments]
 description = "Payment processing services"
-repos = []
+repos = ['{repo_path_str}']
 
 [templates.notifications]
 description = "Notification delivery services"
-repos = []
-"#
+repos = ['{repo_path_str}']
+"#,
+        cwd.display().to_string().replace('\\', "/")
     );
     let config = Config::load_from_str(&config_toml).expect("load config");
 

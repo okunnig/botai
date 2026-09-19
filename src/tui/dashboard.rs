@@ -98,7 +98,7 @@ impl DashboardState {
                     description: None,
                     default_agent: None,
                     agents_md_append: None,
-                    repos: Vec::new(),
+                    repos: vec![format!("{tpl}-repo").into()],
                     env: HashMap::new(),
                     post_create: Vec::new(),
                     pre_destroy: Vec::new(),

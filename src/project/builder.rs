@@ -47,6 +47,12 @@ pub enum ProjectError {
     #[error("Repository '{name}' does not exist locally and has no remote URL configured")]
     MissingRepository { name: String, path: PathBuf },
 
+    #[error("At least one repository must be selected")]
+    NoRepositoriesSelected,
+
+    #[error("Repository '{name}' not found in template '{template}'")]
+    RepositoryNotInTemplate { name: String, template: String },
+
     #[error("General project error: {0}")]
     Other(String),
 }
@@ -131,6 +137,7 @@ pub struct ProjectBuilder {
     pub config: Config,
     pub template_name: String,
     pub project_name: String,
+    pub selected_repos: Option<Vec<String>>,
     pub agent_override: Option<String>,
     pub prompt: Option<String>,
     pub cwd: PathBuf,
@@ -161,11 +168,22 @@ impl ProjectBuilder {
             config,
             template_name: template_name.into(),
             project_name: project_name.into(),
+            selected_repos: None,
             agent_override: None,
             prompt: None,
             cwd,
             viewport_size: (100, 30),
         }
+    }
+
+    /// Sets the list of selected repository names to checkout in the project.
+    pub fn with_selected_repos<I, S>(mut self, repos: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.selected_repos = Some(repos.into_iter().map(Into::into).collect());
+        self
     }
 
     /// Sets the AI agent CLI tool override.
@@ -238,11 +256,42 @@ impl ProjectBuilder {
         (cmd, adapted_args, env)
     }
 
+    /// Resolves the effective repositories to provision for this project:
+    /// - If `selected_repos` is `Some(...)`, validates each name against the template's declared
+    ///   repositories (returning `RepositoryNotInTemplate` if unknown) and filters `all_repos`.
+    /// - If `selected_repos` is `None`, filters `all_repos` keeping only repositories with `default_include = true`.
+    /// - Returns `NoRepositoriesSelected` if the effective list is empty.
+    pub fn resolve_effective_repos(&self) -> Result<Vec<ResolvedRepo>, ProjectError> {
+        let all_repos = self.config.resolve_template_repos(&self.template_name)?;
+        let effective: Vec<ResolvedRepo> = if let Some(ref selected) = self.selected_repos {
+            for name in selected {
+                if !all_repos.iter().any(|r| &r.name == name) {
+                    return Err(ProjectError::RepositoryNotInTemplate {
+                        name: name.clone(),
+                        template: self.template_name.clone(),
+                    });
+                }
+            }
+            all_repos
+                .into_iter()
+                .filter(|r| selected.iter().any(|s| s == &r.name))
+                .collect()
+        } else {
+            all_repos.into_iter().filter(|r| r.default_include).collect()
+        };
+
+        if effective.is_empty() {
+            return Err(ProjectError::NoRepositoriesSelected);
+        }
+
+        Ok(effective)
+    }
+
     /// Validates preconditions for project creation:
     /// - Non-empty project name
     /// - Template existence in configuration
     /// - Project directory does not already exist in CWD
-    /// - Branch `<project_name>` does not collide in any locally existing template repositories
+    /// - Branch `<project_name>` does not collide in any locally existing effective repositories
     pub fn validate(&self) -> Result<(), ProjectError> {
         let trimmed_name = self.project_name.trim();
         if trimmed_name.is_empty() {
@@ -258,7 +307,7 @@ impl ProjectBuilder {
             return Err(ProjectError::DirectoryExists(project_dir));
         }
 
-        let resolved_repos = self.config.resolve_template_repos(&self.template_name)?;
+        let resolved_repos = self.resolve_effective_repos()?;
         let git = GitWorktreeManager::new();
 
         for repo in resolved_repos {
@@ -282,6 +331,7 @@ impl ProjectBuilder {
     /// - Non-empty project name
     /// - Template existence in config
     /// - Project directory collision in CWD
+    /// - Selected repository list is not empty (if explicitly specified)
     pub fn validate_fast(&self) -> ProjectValidation {
         let mut validation = ProjectValidation::valid();
         let trimmed_name = self.project_name.trim();
@@ -308,6 +358,11 @@ impl ProjectBuilder {
             return validation;
         }
 
+        if self.selected_repos.as_ref().is_some_and(|r| r.is_empty()) {
+            validation.add_error("At least one repository must be selected");
+            return validation;
+        }
+
         validation
     }
 
@@ -320,7 +375,7 @@ impl ProjectBuilder {
         }
 
         let mut errors = Vec::new();
-        match self.config.resolve_template_repos(&self.template_name) {
+        match self.resolve_effective_repos() {
             Ok(resolved_repos) => {
                 let git = GitWorktreeManager::new();
                 for repo in resolved_repos {
@@ -351,9 +406,27 @@ impl ProjectBuilder {
             return validation;
         }
 
-        let branch_errors = self.check_branch_collisions();
-        for err in branch_errors {
-            validation.add_error(err);
+        let resolved_repos = match self.resolve_effective_repos() {
+            Ok(repos) => repos,
+            Err(e) => {
+                validation.add_error(e.to_string());
+                return validation;
+            }
+        };
+
+        let trimmed_name = self.project_name.trim();
+        let git = GitWorktreeManager::new();
+        for repo in resolved_repos {
+            if repo.exists_locally() {
+                if let Ok(exists) = git.branch_exists(&repo.local_path, trimmed_name) {
+                    if exists {
+                        validation.add_error(format!(
+                            "Branch '{}' already exists in repository '{}'",
+                            trimmed_name, repo.name
+                        ));
+                    }
+                }
+            }
         }
 
         validation
@@ -397,8 +470,7 @@ impl ProjectBuilder {
                 .get_template(&self.template_name)
                 .ok_or_else(|| ProjectError::TemplateNotFound(self.template_name.clone()))?;
 
-            let resolved_repos: Vec<ResolvedRepo> =
-                self.config.resolve_template_repos(&self.template_name)?;
+            let resolved_repos: Vec<ResolvedRepo> = self.resolve_effective_repos()?;
 
             // Step 2: Auto-cloning missing repos & fetching updates
             progress_sink(ProjectSetupEvent::Step {
@@ -2286,6 +2358,279 @@ mod tests {
         assert!(
             !project_cwd.join("rollback-proj").exists(),
             "rollback must remove the project directory"
+        );
+    }
+
+    #[test]
+    fn test_resolve_effective_repos_none_selection_filters_default_false() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = [
+                "repo_a",
+                { repo = "repo_b", default = true },
+                { repo = "repo_c", default = false }
+            ]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let builder = ProjectBuilder::new(config, "tpl", "proj");
+        assert!(builder.selected_repos.is_none());
+
+        let effective = builder.resolve_effective_repos().unwrap();
+        assert_eq!(effective.len(), 2);
+        assert_eq!(effective[0].name, "repo_a");
+        assert!(effective[0].default_include);
+        assert_eq!(effective[1].name, "repo_b");
+        assert!(effective[1].default_include);
+        assert!(!effective.iter().any(|r| r.name == "repo_c"));
+    }
+
+    #[test]
+    fn test_resolve_effective_repos_with_selected_repos_explicit_subset_including_default_false() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = [
+                "repo_a",
+                { repo = "repo_b", default = true },
+                { repo = "repo_c", default = false }
+            ]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let builder = ProjectBuilder::new(config, "tpl", "proj")
+            .with_selected_repos(vec!["repo_b", "repo_c"]);
+
+        assert_eq!(
+            builder.selected_repos,
+            Some(vec!["repo_b".to_string(), "repo_c".to_string()])
+        );
+
+        let effective = builder.resolve_effective_repos().unwrap();
+        assert_eq!(effective.len(), 2);
+        assert_eq!(effective[0].name, "repo_b");
+        assert_eq!(effective[1].name, "repo_c");
+        assert!(!effective.iter().any(|r| r.name == "repo_a"));
+    }
+
+    #[test]
+    fn test_resolve_effective_repos_nonexistent_repo_returns_error() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = ["repo_a", "repo_b"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let builder = ProjectBuilder::new(config, "tpl", "proj")
+            .with_selected_repos(vec!["repo_a", "repo_missing"]);
+
+        let err = builder.resolve_effective_repos().unwrap_err();
+        match err {
+            ProjectError::RepositoryNotInTemplate { name, template } => {
+                assert_eq!(name, "repo_missing");
+                assert_eq!(template, "tpl");
+            }
+            other => panic!("Expected RepositoryNotInTemplate, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_effective_repos_empty_selection_returns_no_repositories_selected() {
+        // Case A: explicitly selected empty vec
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = ["repo_a", "repo_b"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let builder = ProjectBuilder::new(config, "tpl", "proj")
+            .with_selected_repos(Vec::<String>::new());
+
+        let err = builder.resolve_effective_repos().unwrap_err();
+        assert!(matches!(err, ProjectError::NoRepositoriesSelected));
+
+        // Case B: selected_repos is None, but all template repos have default = false
+        let toml_str_all_false = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = [
+                { repo = "repo_a", default = false },
+                { repo = "repo_b", default = false }
+            ]
+        "#;
+        let config_all_false = Config::load_from_str(toml_str_all_false).unwrap();
+        let builder_all_false = ProjectBuilder::new(config_all_false, "tpl", "proj");
+        let err_all_false = builder_all_false.resolve_effective_repos().unwrap_err();
+        assert!(matches!(err_all_false, ProjectError::NoRepositoriesSelected));
+    }
+
+    #[test]
+    fn test_validate_and_branch_collisions_ignore_excluded_repos() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_included = temp_dir.path().join("repo_inc");
+        create_mock_git_repo(&repo_included);
+
+        let repo_excluded = temp_dir.path().join("repo_exc");
+        create_mock_git_repo(&repo_excluded);
+
+        // Create conflicting branch in repo_excluded ONLY
+        let _ = std::process::Command::new("git")
+            .args(["branch", "feat-collision"])
+            .current_dir(&repo_excluded)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.tpl]
+            repos = [
+                "{}",
+                {{ repo = "{}", default = false }}
+            ]
+            "#,
+            toml_path(temp_dir.path()),
+            toml_path(&repo_included),
+            toml_path(&repo_excluded)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        // 1. With selected_repos = None (repo_exc is default = false, so excluded)
+        let builder = ProjectBuilder::new(config.clone(), "tpl", "feat-collision")
+            .with_cwd(temp_dir.path());
+
+        // Validate succeeds because repo_excluded is ignored!
+        assert!(builder.validate().is_ok());
+
+        // check_branch_collisions returns empty list
+        let collisions = builder.check_branch_collisions();
+        assert!(collisions.is_empty(), "Collisions should be empty: {collisions:?}");
+
+        // validate_detailed succeeds
+        let detailed = builder.validate_detailed();
+        assert!(detailed.is_valid);
+        assert!(detailed.errors.is_empty());
+
+        // 2. When repo_excluded is explicitly selected via with_selected_repos:
+        let builder_with_exc = ProjectBuilder::new(config, "tpl", "feat-collision")
+            .with_cwd(temp_dir.path())
+            .with_selected_repos(vec!["repo_inc", "repo_exc"]);
+
+        // Validate now fails with BranchExists in repo_exc
+        let err = builder_with_exc.validate().unwrap_err();
+        match err {
+            ProjectError::BranchExists { repo, branch } => {
+                assert_eq!(branch, "feat-collision");
+                assert_eq!(repo, repo_excluded);
+            }
+            other => panic!("Expected BranchExists, got: {other:?}"),
+        }
+
+        // check_branch_collisions reports the collision in repo_exc
+        let collisions = builder_with_exc.check_branch_collisions();
+        assert_eq!(collisions.len(), 1);
+        assert!(collisions[0].contains("repo_exc"));
+
+        // validate_detailed fails
+        let detailed = builder_with_exc.validate_detailed();
+        assert!(!detailed.is_valid);
+        assert!(detailed.primary_message().unwrap().contains("repo_exc"));
+    }
+
+    #[test]
+    fn test_create_workspace_only_creates_worktrees_for_effective_repos_and_agents_md() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_backend = temp_dir.path().join("backend");
+        create_mock_git_repo(&repo_backend);
+
+        let repo_frontend = temp_dir.path().join("frontend");
+        create_mock_git_repo(&repo_frontend);
+
+        let repo_docs = temp_dir.path().join("docs");
+        create_mock_git_repo(&repo_docs);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.fullstack]
+            description = "Fullstack application services"
+            repos = [
+                "{}",
+                "{}",
+                {{ repo = "{}", default = false }}
+            ]
+            "#,
+            toml_path(temp_dir.path()),
+            toml_path(&repo_backend),
+            toml_path(&repo_frontend),
+            toml_path(&repo_docs)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        // Select only backend and docs (omitting frontend, and including optional docs)
+        let builder = ProjectBuilder::new(config, "fullstack", "selective-proj")
+            .with_cwd(&project_cwd)
+            .with_selected_repos(vec!["backend", "docs"]);
+
+        let (project_dir, mappings) = builder
+            .create_workspace(|_event| {})
+            .expect("create_workspace should succeed");
+
+        // 1. Check mappings
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].name, "backend");
+        assert_eq!(mappings[1].name, "docs");
+
+        // 2. Check filesystem: backend and docs worktrees exist, frontend does NOT exist
+        assert!(project_dir.join("backend").exists());
+        assert!(project_dir.join("backend").join("README.md").exists());
+        assert!(project_dir.join("docs").exists());
+        assert!(project_dir.join("docs").join("README.md").exists());
+        assert!(
+            !project_dir.join("frontend").exists(),
+            "frontend should NOT be checked out because it was not in selected_repos"
+        );
+
+        // 3. Verify AGENTS.md context orientation file
+        let agents_md_path = project_dir.join("AGENTS.md");
+        assert!(agents_md_path.is_file());
+        let agents_md_content = fs::read_to_string(&agents_md_path).unwrap();
+
+        // Must list backend and docs
+        assert!(agents_md_content.contains("backend"));
+        assert!(agents_md_content.contains("docs"));
+        // Must NOT list frontend
+        assert!(
+            !agents_md_content.contains("frontend"),
+            "AGENTS.md should only list effective repositories"
+        );
+    }
+
+    #[test]
+    fn test_validate_fast_empty_selected_repos() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = ["repo_a"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let builder = ProjectBuilder::new(config, "tpl", "my-project")
+            .with_selected_repos(Vec::<String>::new());
+
+        let fast_val = builder.validate_fast();
+        assert!(!fast_val.is_valid);
+        assert_eq!(
+            fast_val.primary_message(),
+            Some("At least one repository must be selected")
         );
     }
 }

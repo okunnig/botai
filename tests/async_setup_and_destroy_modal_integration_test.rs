@@ -17,6 +17,31 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+fn create_mock_git_repo(path: &std::path::Path) {
+    fs::create_dir_all(path).unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Botai Test"])
+        .current_dir(path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "test@botai.dev"])
+        .current_dir(path)
+        .status();
+    fs::write(path.join("README.md"), "# Test Repo\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(path)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(path)
+        .status();
+}
+
 #[test]
 fn test_integration_destroy_confirmation_modal_lifecycle() {
     let tmp = tempdir().expect("tempdir");
@@ -202,6 +227,8 @@ fn test_integration_destroy_project_with_git_worktrees_cleans_central_repo() {
 fn test_integration_async_project_setup_progress_streaming_and_success() {
     let tmp = tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
+    let repo_dir = cwd.join("repos").join("cloud_service");
+    create_mock_git_repo(&repo_dir);
 
     #[cfg(windows)]
     let shell_cmd = "cmd.exe";
@@ -218,7 +245,7 @@ command = "{}"
 args = []
 
 [templates.cloud_ws]
-repos = []
+repos = ["cloud_service"]
 "#,
         cwd.display().to_string().replace('\\', "/"),
         shell_cmd
@@ -277,6 +304,8 @@ repos = []
 fn test_integration_async_project_setup_agent_override_applied() {
     let tmp = tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
+    let repo_dir = cwd.join("repos").join("cloud_service");
+    create_mock_git_repo(&repo_dir);
 
     #[cfg(windows)]
     let shell_cmd = "cmd.exe";
@@ -297,7 +326,7 @@ command = "{}"
 args = []
 
 [templates.cloud_ws]
-repos = []
+repos = ["cloud_service"]
 "#,
         cwd.display().to_string().replace('\\', "/"),
         shell_cmd,
