@@ -479,8 +479,9 @@ impl ProjectCreationModal {
         } else {
             self.selected_repo_idx += 1;
             if self.selected_repo_idx >= self.repo_scroll_offset + REPOS_VISIBLE_ROWS {
-                self.repo_scroll_offset =
-                    self.selected_repo_idx.saturating_sub(REPOS_VISIBLE_ROWS.saturating_sub(1));
+                self.repo_scroll_offset = self
+                    .selected_repo_idx
+                    .saturating_sub(REPOS_VISIBLE_ROWS.saturating_sub(1));
             }
             true
         }
@@ -534,7 +535,8 @@ impl ProjectCreationModal {
         self.validation = builder.validate_fast();
         if selected_repos.is_empty() {
             self.validation.is_valid = false;
-            self.validation.add_error("At least one repository must be selected");
+            self.validation
+                .add_error("At least one repository must be selected");
         }
         self.validation_generation = self.validation_generation.wrapping_add(1);
 
@@ -1442,7 +1444,8 @@ impl ProjectCreationModal {
             self.validation = builder.validate_detailed();
             if selected_repos.is_empty() {
                 self.validation.is_valid = false;
-                self.validation.add_error("At least one repository must be selected");
+                self.validation
+                    .add_error("At least one repository must be selected");
             }
         }
         if self.validation.is_valid {
@@ -3822,8 +3825,7 @@ mod tests {
         );
         let config = Config::load_from_str(&toml_str).unwrap();
 
-        let mut modal =
-            ProjectCreationModal::new(&config, temp_dir.path(), Some("collision_tpl"));
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("collision_tpl"));
         modal.step = CreationStep::ConfigureDetails;
         modal.set_project_name("collision-branch");
 
