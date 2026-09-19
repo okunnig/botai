@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+use crate::config::ResolvedRepo;
+
 /// botai - Multi-repo workspace orchestrator and session multiplexer for AI agent workflows.
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
 #[command(name = "botai", author, version, about, long_about = None)]
@@ -32,6 +34,18 @@ pub enum Commands {
         /// Initial task description or prompt to pass to the agent (requires --attach).
         #[arg(short, long, requires = "attach")]
         prompt: Option<String>,
+
+        /// Explicitly include repositories (comma-separated or repeatable).
+        #[arg(long, value_delimiter = ',')]
+        include: Option<Vec<String>>,
+
+        /// Explicitly exclude repositories (comma-separated or repeatable).
+        #[arg(long, value_delimiter = ',')]
+        exclude: Option<Vec<String>>,
+
+        /// Include all repositories defined in the template regardless of default settings.
+        #[arg(long)]
+        all: bool,
 
         /// Launch interactive TUI multiplexer immediately after project creation.
         #[arg(short, long)]
@@ -89,6 +103,90 @@ impl Cli {
     }
 }
 
+/// Resolves the effective repository names selected via CLI flags (`--include`, `--exclude`, `--all`)
+/// against the repositories declared in a template.
+///
+/// # Validation & Precedence Rules
+/// 1. A repository cannot appear in both `include` and `exclude`.
+/// 2. Every repository specified in `include` or `exclude` must exist in `all_template_repos`.
+/// 3. If `all` is true, begins with all repositories defined in the template. Otherwise, begins with
+///    repositories where `default_include` is true.
+/// 4. Repositories in `include` are added (deduplicated).
+/// 5. Repositories in `exclude` are removed.
+/// 6. At least one repository must remain selected; otherwise an error is returned.
+pub fn resolve_cli_selected_repos(
+    all_template_repos: &[ResolvedRepo],
+    include: Option<&[String]>,
+    exclude: Option<&[String]>,
+    all: bool,
+) -> anyhow::Result<Vec<String>> {
+    // 1. Conflict check: cannot both include and exclude the same repo
+    if let (Some(inc), Some(exc)) = (include, exclude) {
+        for repo in inc {
+            if exc.iter().any(|e| e == repo) {
+                anyhow::bail!("Cannot both include and exclude repository '{repo}'");
+            }
+        }
+    }
+
+    // 2. Existence check: all repos in include/exclude must exist in template
+    let available_names = all_template_repos
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if let Some(inc) = include {
+        for repo in inc {
+            if !all_template_repos.iter().any(|r| &r.name == repo) {
+                anyhow::bail!(
+                    "Repository '{repo}' not found in template. Available repositories: {available_names}"
+                );
+            }
+        }
+    }
+
+    if let Some(exc) = exclude {
+        for repo in exc {
+            if !all_template_repos.iter().any(|r| &r.name == repo) {
+                anyhow::bail!(
+                    "Repository '{repo}' not found in template. Available repositories: {available_names}"
+                );
+            }
+        }
+    }
+
+    // 3. Selection calculation
+    let mut selected_names: Vec<String> = if all {
+        all_template_repos.iter().map(|r| r.name.clone()).collect()
+    } else {
+        all_template_repos
+            .iter()
+            .filter(|r| r.default_include)
+            .map(|r| r.name.clone())
+            .collect()
+    };
+
+    if let Some(inc) = include {
+        for repo in inc {
+            if !selected_names.iter().any(|s| s == repo) {
+                selected_names.push(repo.clone());
+            }
+        }
+    }
+
+    if let Some(exc) = exclude {
+        selected_names.retain(|s| !exc.iter().any(|e| e == s));
+    }
+
+    // 4. Non-empty check
+    if selected_names.is_empty() {
+        anyhow::bail!("Cannot create project: at least one repository must be selected.");
+    }
+
+    Ok(selected_names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,12 +218,18 @@ mod tests {
                 agent,
                 prompt,
                 attach,
+                include,
+                exclude,
+                all,
             }) => {
                 assert_eq!(template, "ecommerce");
                 assert_eq!(project, "feature-cart");
                 assert_eq!(agent, None);
                 assert_eq!(prompt, None);
                 assert!(!attach);
+                assert_eq!(include, None);
+                assert_eq!(exclude, None);
+                assert!(!all);
             }
             _ => panic!("Expected Create command"),
         }
@@ -206,6 +310,7 @@ mod tests {
                 agent,
                 prompt,
                 attach,
+                ..
             }) => {
                 assert_eq!(template, "ecommerce");
                 assert_eq!(project, "feature-cart");
@@ -414,5 +519,279 @@ mod tests {
             }
             _ => panic!("Expected Edit command with vim"),
         }
+    }
+
+    fn mock_resolved_repo(name: &str, default_include: bool) -> ResolvedRepo {
+        ResolvedRepo {
+            name: name.to_string(),
+            local_path: PathBuf::from(format!("/mock/{name}")),
+            clone_url: None,
+            original_entry: name.to_string(),
+            setup_hooks: Vec::new(),
+            env: std::collections::HashMap::new(),
+            default_include,
+        }
+    }
+
+    #[test]
+    fn test_cli_create_subcommand_with_include_exclude_all_flags() {
+        // Comma-separated values and --all flag
+        let cli_comma = Cli::try_parse_from([
+            "botai",
+            "create",
+            "ecommerce",
+            "feat-cart",
+            "--include",
+            "repo1,repo2",
+            "--exclude",
+            "repo3,repo4",
+            "--all",
+        ])
+        .expect("Failed to parse comma-separated include and exclude");
+
+        match cli_comma.command {
+            Some(Commands::Create {
+                include,
+                exclude,
+                all,
+                ..
+            }) => {
+                assert_eq!(
+                    include,
+                    Some(vec!["repo1".to_string(), "repo2".to_string()])
+                );
+                assert_eq!(
+                    exclude,
+                    Some(vec!["repo3".to_string(), "repo4".to_string()])
+                );
+                assert!(all);
+            }
+            _ => panic!("Expected Create command"),
+        }
+
+        // Multiple repeatable flags
+        let cli_repeat = Cli::try_parse_from([
+            "botai",
+            "create",
+            "ecommerce",
+            "feat-cart",
+            "--include",
+            "repo1",
+            "--include",
+            "repo2",
+            "--exclude",
+            "repo3",
+            "--exclude",
+            "repo4",
+        ])
+        .expect("Failed to parse repeatable include and exclude");
+
+        match cli_repeat.command {
+            Some(Commands::Create {
+                include,
+                exclude,
+                all,
+                ..
+            }) => {
+                assert_eq!(
+                    include,
+                    Some(vec!["repo1".to_string(), "repo2".to_string()])
+                );
+                assert_eq!(
+                    exclude,
+                    Some(vec!["repo3".to_string(), "repo4".to_string()])
+                );
+                assert!(!all);
+            }
+            _ => panic!("Expected Create command"),
+        }
+
+        // Mixed comma-separated and repeatable flags
+        let cli_mixed = Cli::try_parse_from([
+            "botai",
+            "create",
+            "ecommerce",
+            "feat-cart",
+            "--include",
+            "repo1,repo2",
+            "--include",
+            "repo3",
+            "--exclude",
+            "repo4,repo5",
+            "--exclude",
+            "repo6",
+        ])
+        .expect("Failed to parse mixed include and exclude");
+
+        match cli_mixed.command {
+            Some(Commands::Create {
+                include, exclude, ..
+            }) => {
+                assert_eq!(
+                    include,
+                    Some(vec![
+                        "repo1".to_string(),
+                        "repo2".to_string(),
+                        "repo3".to_string()
+                    ])
+                );
+                assert_eq!(
+                    exclude,
+                    Some(vec![
+                        "repo4".to_string(),
+                        "repo5".to_string(),
+                        "repo6".to_string()
+                    ])
+                );
+            }
+            _ => panic!("Expected Create command"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_cli_selected_repos_defaults() {
+        let repos = vec![
+            mock_resolved_repo("repo1", true),
+            mock_resolved_repo("repo2", true),
+            mock_resolved_repo("repo3", false),
+        ];
+
+        let selected = resolve_cli_selected_repos(&repos, None, None, false)
+            .expect("default selection should succeed");
+        assert_eq!(selected, vec!["repo1", "repo2"]);
+    }
+
+    #[test]
+    fn test_resolve_cli_selected_repos_all() {
+        let repos = vec![
+            mock_resolved_repo("repo1", true),
+            mock_resolved_repo("repo2", true),
+            mock_resolved_repo("repo3", false),
+        ];
+
+        let selected = resolve_cli_selected_repos(&repos, None, None, true)
+            .expect("--all selection should succeed");
+        assert_eq!(selected, vec!["repo1", "repo2", "repo3"]);
+
+        // --all combined with --exclude
+        let selected_with_exclude =
+            resolve_cli_selected_repos(&repos, None, Some(&["repo2".to_string()]), true)
+                .expect("--all with --exclude should succeed");
+        assert_eq!(selected_with_exclude, vec!["repo1", "repo3"]);
+    }
+
+    #[test]
+    fn test_resolve_cli_selected_repos_include_adding_excluded() {
+        let repos = vec![
+            mock_resolved_repo("repo1", true),
+            mock_resolved_repo("repo2", true),
+            mock_resolved_repo("repo3", false),
+        ];
+
+        let selected =
+            resolve_cli_selected_repos(&repos, Some(&["repo3".to_string()]), None, false)
+                .expect("including default-false repo should succeed");
+        assert_eq!(selected, vec!["repo1", "repo2", "repo3"]);
+
+        // Deduplication when including an already default-included repo
+        let selected_dedup = resolve_cli_selected_repos(
+            &repos,
+            Some(&["repo1".to_string(), "repo3".to_string()]),
+            None,
+            false,
+        )
+        .expect("deduplicated include should succeed");
+        assert_eq!(selected_dedup, vec!["repo1", "repo2", "repo3"]);
+    }
+
+    #[test]
+    fn test_resolve_cli_selected_repos_exclude_removing_default() {
+        let repos = vec![
+            mock_resolved_repo("repo1", true),
+            mock_resolved_repo("repo2", true),
+            mock_resolved_repo("repo3", false),
+        ];
+
+        let selected =
+            resolve_cli_selected_repos(&repos, None, Some(&["repo1".to_string()]), false)
+                .expect("excluding default repo should succeed");
+        assert_eq!(selected, vec!["repo2"]);
+    }
+
+    #[test]
+    fn test_resolve_cli_selected_repos_conflict_between_include_and_exclude() {
+        let repos = vec![
+            mock_resolved_repo("repo1", true),
+            mock_resolved_repo("repo2", true),
+            mock_resolved_repo("repo3", false),
+        ];
+
+        let err = resolve_cli_selected_repos(
+            &repos,
+            Some(&["repo1".to_string()]),
+            Some(&["repo1".to_string()]),
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "Cannot both include and exclude repository 'repo1'"
+        );
+    }
+
+    #[test]
+    fn test_resolve_cli_selected_repos_unknown_repo() {
+        let repos = vec![
+            mock_resolved_repo("repo1", true),
+            mock_resolved_repo("repo2", true),
+            mock_resolved_repo("repo3", false),
+        ];
+
+        let err_inc = resolve_cli_selected_repos(&repos, Some(&["ghost".to_string()]), None, false)
+            .unwrap_err();
+        assert_eq!(
+            err_inc.to_string(),
+            "Repository 'ghost' not found in template. Available repositories: repo1, repo2, repo3"
+        );
+
+        let err_exc =
+            resolve_cli_selected_repos(&repos, None, Some(&["phantom".to_string()]), false)
+                .unwrap_err();
+        assert_eq!(
+            err_exc.to_string(),
+            "Repository 'phantom' not found in template. Available repositories: repo1, repo2, repo3"
+        );
+    }
+
+    #[test]
+    fn test_resolve_cli_selected_repos_empty_selection_error() {
+        let repos = vec![
+            mock_resolved_repo("repo1", true),
+            mock_resolved_repo("repo2", true),
+            mock_resolved_repo("repo3", false),
+        ];
+
+        // Excluding all default repositories results in empty selection
+        let err = resolve_cli_selected_repos(
+            &repos,
+            None,
+            Some(&["repo1".to_string(), "repo2".to_string()]),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Cannot create project: at least one repository must be selected."
+        );
+
+        // Template containing only default_include=false repositories without --include or --all
+        let repos_only_false = vec![mock_resolved_repo("repo3", false)];
+        let err_no_defaults =
+            resolve_cli_selected_repos(&repos_only_false, None, None, false).unwrap_err();
+        assert_eq!(
+            err_no_defaults.to_string(),
+            "Cannot create project: at least one repository must be selected."
+        );
     }
 }

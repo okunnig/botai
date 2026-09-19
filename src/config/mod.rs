@@ -1997,11 +1997,18 @@ repos_dir = "/tmp/repos"
 description = "Simple string array"
 repos = ["service-a", "service-b"]
 "#;
-        let config = Config::load_from_str(toml_str).expect("Valid string array config should parse");
+        let config =
+            Config::load_from_str(toml_str).expect("Valid string array config should parse");
         let tpl = config.get_template("simple").expect("Template must exist");
         assert_eq!(tpl.repos.len(), 2);
-        assert_eq!(tpl.repos[0], TemplateRepoEntry::Simple("service-a".to_string()));
-        assert_eq!(tpl.repos[1], TemplateRepoEntry::Simple("service-b".to_string()));
+        assert_eq!(
+            tpl.repos[0],
+            TemplateRepoEntry::Simple("service-a".to_string())
+        );
+        assert_eq!(
+            tpl.repos[1],
+            TemplateRepoEntry::Simple("service-b".to_string())
+        );
         assert_eq!(tpl.repos[0].entry_str(), "service-a");
         assert_eq!(tpl.repos[1].entry_str(), "service-b");
         assert!(tpl.repos[0].is_default_included());
@@ -2022,8 +2029,11 @@ repos = [
     { repo = "docs", default = false }
 ]
 "#;
-        let config = Config::load_from_str(toml_str).expect("Inline table with default = false should parse");
-        let tpl = config.get_template("optional_repo").expect("Template must exist");
+        let config = Config::load_from_str(toml_str)
+            .expect("Inline table with default = false should parse");
+        let tpl = config
+            .get_template("optional_repo")
+            .expect("Template must exist");
         assert_eq!(tpl.repos.len(), 1);
         match &tpl.repos[0] {
             TemplateRepoEntry::Detailed { repo, default } => {
@@ -2050,7 +2060,8 @@ repos = [
     { repo = "auth-service", default = false }
 ]
 "#;
-        let config = Config::load_from_str(toml_str).expect("Aliases 'name' and 'repo' should parse cleanly");
+        let config = Config::load_from_str(toml_str)
+            .expect("Aliases 'name' and 'repo' should parse cleanly");
         let tpl = config.get_template("aliased").expect("Template must exist");
         assert_eq!(tpl.repos.len(), 2);
         assert_eq!(tpl.repos[0].entry_str(), "billing-service");
@@ -2073,8 +2084,11 @@ repos = [
     { name = "frontend" }
 ]
 "#;
-        let config = Config::load_from_str(toml_str).expect("Omitted default field should parse as true");
-        let tpl = config.get_template("implicit_default").expect("Template must exist");
+        let config =
+            Config::load_from_str(toml_str).expect("Omitted default field should parse as true");
+        let tpl = config
+            .get_template("implicit_default")
+            .expect("Template must exist");
         assert_eq!(tpl.repos.len(), 2);
         assert_eq!(tpl.repos[0].entry_str(), "core-api");
         assert!(tpl.repos[0].is_default_included());
@@ -2098,7 +2112,8 @@ repos = [
     { repo = "extra-tools", default = false }
 ]
 "#;
-        let config = Config::load_from_str(toml_str).expect("Mixed array of strings and tables should parse");
+        let config = Config::load_from_str(toml_str)
+            .expect("Mixed array of strings and tables should parse");
         let tpl = config.get_template("mixed").expect("Template must exist");
         assert_eq!(tpl.repos.len(), 5);
 

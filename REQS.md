@@ -386,14 +386,15 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - `--exclude <repos>`: (Optional String, comma-separated or repeatable) Explicitly deselect repositories to exclude from the project, opting out of repositories even if declared with `default = true` in the template configuration.
     - `--all`: (Optional Flag) Include all repositories configured in the template, overriding any `default = false` settings.
     - `--attach` / `-a`: (Flag) Launch interactive TUI multiplexer immediately after project creation.
-  - **Repository Selection Precedence & Conflict Validation**:
-    - **Conflict Validation**: Specifying the same repository in both `--include` and `--exclude` is rejected as an invalid conflicting argument.
-    - **Repository Existence Validation**: Any repository specified in `--include` or `--exclude` must match a configured repository in the template (by directory name or entry string); unrecognized names fail immediately with an error listing available template repositories.
+  - **Repository Selection Precedence & Conflict Validation (`resolve_cli_selected_repos`)**:
+    - Evaluated upfront via `resolve_cli_selected_repos(&all_template_repos, include, exclude, all)` before initializing `ProjectBuilder` or launching TUI sessions.
+    - **Conflict Validation**: Specifying the same repository in both `--include` and `--exclude` is rejected as an invalid conflicting argument (`Cannot both include and exclude repository '<repo>'`).
+    - **Repository Existence Validation**: Any repository specified in `--include` or `--exclude` must match a configured repository in the template (by directory name or entry string); unrecognized names fail immediately with an error listing available template repositories (`Repository '<repo>' not found in template. Available repositories: ...`).
     - **Evaluation Precedence**:
       1. Baseline: If `--all` is specified, all template repositories are initially included. Otherwise, only repositories marked with `default = true` (or simple strings) are initially included.
-      2. Inclusions: Any repositories specified via `--include` are added to the active selection.
+      2. Inclusions: Any repositories specified via `--include` are added to the active selection (deduplicating if already included).
       3. Exclusions: Any repositories specified via `--exclude` are removed from the active selection.
-    - **Zero-Repository Guard**: If applying exclusions results in zero selected repositories, creation fails with an immediate error: at least one repository must be selected.
+    - **Zero-Repository Guard**: If applying exclusions results in zero selected repositories, creation fails with an immediate error: at least one repository must be selected (`Cannot create project: at least one repository must be selected.`).
   - **Non-Attached Mode (Default, without `--attach`)**:
     - Executes workspace initialization steps 1-4 via `ProjectBuilder::create_workspace`.
     - Validates inputs, auto-clones missing repositories to `repos_dir`, fetches upstream branches, provisions git worktrees on branch `<project>`, and synthesizes `AGENTS.md`.
@@ -459,6 +460,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     6. **Workspace Post-Creation Hooks Execution**: Runs configured template `post_create` commands sequentially at the project root directory.
     7. **PTY Process Spawning**: Spawns the agent CLI process inside a master/slave pseudo-terminal attached to a virtual terminal screen buffer.
   - **Modular Execution**:
+    - `resolve_cli_selected_repos`: Standalone helper resolving and validating `--include`, `--exclude`, and `--all` CLI flags against template repositories.
     - `ProjectBuilder::with_selected_repos`: Builder method configuring explicit repository selection subsets.
     - `ProjectBuilder::resolve_effective_repos`: Resolves effective repositories based on explicit selection or `default_include` flags, returning `ProjectError::NoRepositoriesSelected` if empty or `ProjectError::RepositoryNotInTemplate` if a selected repository is not declared in the template.
     - `ProjectBuilder::create_workspace`: Executes steps 1-6 without spawning PTY, returning the canonical project path and repository mappings for effective repositories.

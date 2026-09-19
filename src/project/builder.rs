@@ -277,7 +277,10 @@ impl ProjectBuilder {
                 .filter(|r| selected.iter().any(|s| s == &r.name))
                 .collect()
         } else {
-            all_repos.into_iter().filter(|r| r.default_include).collect()
+            all_repos
+                .into_iter()
+                .filter(|r| r.default_include)
+                .collect()
         };
 
         if effective.is_empty() {
@@ -2446,8 +2449,8 @@ mod tests {
             repos = ["repo_a", "repo_b"]
         "#;
         let config = Config::load_from_str(toml_str).unwrap();
-        let builder = ProjectBuilder::new(config, "tpl", "proj")
-            .with_selected_repos(Vec::<String>::new());
+        let builder =
+            ProjectBuilder::new(config, "tpl", "proj").with_selected_repos(Vec::<String>::new());
 
         let err = builder.resolve_effective_repos().unwrap_err();
         assert!(matches!(err, ProjectError::NoRepositoriesSelected));
@@ -2465,7 +2468,10 @@ mod tests {
         let config_all_false = Config::load_from_str(toml_str_all_false).unwrap();
         let builder_all_false = ProjectBuilder::new(config_all_false, "tpl", "proj");
         let err_all_false = builder_all_false.resolve_effective_repos().unwrap_err();
-        assert!(matches!(err_all_false, ProjectError::NoRepositoriesSelected));
+        assert!(matches!(
+            err_all_false,
+            ProjectError::NoRepositoriesSelected
+        ));
     }
 
     #[test]
@@ -2500,15 +2506,18 @@ mod tests {
         let config = Config::load_from_str(&toml_str).unwrap();
 
         // 1. With selected_repos = None (repo_exc is default = false, so excluded)
-        let builder = ProjectBuilder::new(config.clone(), "tpl", "feat-collision")
-            .with_cwd(temp_dir.path());
+        let builder =
+            ProjectBuilder::new(config.clone(), "tpl", "feat-collision").with_cwd(temp_dir.path());
 
         // Validate succeeds because repo_excluded is ignored!
         assert!(builder.validate().is_ok());
 
         // check_branch_collisions returns empty list
         let collisions = builder.check_branch_collisions();
-        assert!(collisions.is_empty(), "Collisions should be empty: {collisions:?}");
+        assert!(
+            collisions.is_empty(),
+            "Collisions should be empty: {collisions:?}"
+        );
 
         // validate_detailed succeeds
         let detailed = builder.validate_detailed();

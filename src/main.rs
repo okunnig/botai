@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use botai::cli::{Cli, Commands};
+use botai::cli::{resolve_cli_selected_repos, Cli, Commands};
 use botai::config::Config;
 use botai::project::{ProjectBuilder, ProjectSetupEvent};
 use botai::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen};
@@ -48,14 +48,27 @@ fn main() -> Result<()> {
             agent,
             prompt,
             attach,
-        }) => cmd_create(
-            &config,
-            &template,
-            &project,
-            agent.as_deref(),
-            prompt.as_deref(),
-            attach,
-        ),
+            include,
+            exclude,
+            all,
+        }) => {
+            let all_repos = config.resolve_template_repos(&template)?;
+            let selected_repos = resolve_cli_selected_repos(
+                &all_repos,
+                include.as_deref(),
+                exclude.as_deref(),
+                all,
+            )?;
+            cmd_create(
+                &config,
+                &template,
+                &project,
+                agent.as_deref(),
+                prompt.as_deref(),
+                attach,
+                selected_repos,
+            )
+        }
         Some(Commands::Sync { template }) => cmd_sync(&config, template.as_deref()),
         Some(Commands::Attach { project }) => cmd_attach(&config, &project),
         Some(Commands::List) => cmd_list(&config),
@@ -183,7 +196,7 @@ fn run_default_dashboard(config: &Config, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `botai create <template> <project> [--agent <agent>] [--prompt <prompt>] [--attach]`
+/// `botai create <template> <project> [--agent <agent>] [--prompt <prompt>] [--include <repos>] [--exclude <repos>] [--all] [--attach]`
 fn cmd_create(
     config: &Config,
     template_name: &str,
@@ -191,6 +204,7 @@ fn cmd_create(
     agent_override: Option<&str>,
     prompt: Option<&str>,
     attach: bool,
+    selected_repos: Vec<String>,
 ) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current working directory")?;
     let (term_cols, term_rows) = crossterm::terminal::size()
@@ -199,7 +213,8 @@ fn cmd_create(
 
     let mut builder = ProjectBuilder::new(config.clone(), template_name, project_name)
         .with_cwd(cwd.clone())
-        .with_viewport(term_cols, term_rows);
+        .with_viewport(term_cols, term_rows)
+        .with_selected_repos(selected_repos);
 
     if let Some(agent) = agent_override {
         builder = builder.with_agent(agent);
