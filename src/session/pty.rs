@@ -880,13 +880,15 @@ mod tests {
 
         // Wait up to 2 seconds for output and waker invocation
         let mut output = Vec::new();
+        let mut text = String::new();
         for _ in 0..40 {
             if let Ok(bytes) = session.read_nonblocking() {
                 if !bytes.is_empty() {
                     output.extend_from_slice(&bytes);
+                    text = String::from_utf8_lossy(&output).to_string();
                 }
             }
-            if call_count.load(Ordering::SeqCst) > 0 && !output.is_empty() {
+            if call_count.load(Ordering::SeqCst) > 0 && text.contains("test_waker_output") {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
@@ -896,7 +898,6 @@ mod tests {
             call_count.load(Ordering::SeqCst) > 0,
             "Expected waker to be called on PTY output"
         );
-        let text = String::from_utf8_lossy(&output);
         assert!(
             text.contains("test_waker_output"),
             "Expected output to contain 'test_waker_output', got: {text}"
