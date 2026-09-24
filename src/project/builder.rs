@@ -132,7 +132,7 @@ impl ProjectValidation {
 
 /// Unified builder pipeline for multi-repo project creation, worktree orchestration,
 /// context generation, and PTY process spawning.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectBuilder {
     pub config: Config,
     pub template_name: String,
