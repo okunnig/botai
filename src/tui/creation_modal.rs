@@ -8,7 +8,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
+    widgets::{
+        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        StatefulWidget, Widget, Wrap,
+    },
 };
 
 use crate::config::Config;
@@ -21,6 +24,13 @@ use crate::tui::theme::Theme;
 pub enum CreationStep {
     SelectTemplate,
     ConfigureDetails,
+}
+
+/// Active focus pane in Step 1 (Searchable Template Selection).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step1Focus {
+    TemplateList,
+    Preview,
 }
 
 /// Active focused field within the unified Project Creation Modal.
@@ -100,7 +110,8 @@ pub fn step2_layout(inner: Rect, has_desc: bool) -> [Rect; 5] {
 }
 
 pub const PROMPT_VISIBLE_LINES: usize = 3;
-pub const REPOS_VISIBLE_ROWS: usize = 3;
+pub const REPOS_VISIBLE_ROWS: usize = 6;
+pub const STEP1_PREVIEW_VISIBLE_LINES: usize = 15;
 
 /// A wrapped line of prompt text with its character offsets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +133,8 @@ pub struct ProjectCreationModal {
     pub config: Config,
     pub cwd: PathBuf,
     pub step: CreationStep,
+    pub step1_focus: Step1Focus,
+    pub step1_preview_scroll_offset: usize,
     pub template_search_query: TextInput,
     pub templates: Vec<String>,
     pub selected_template_idx: usize,
@@ -149,6 +162,8 @@ impl Clone for ProjectCreationModal {
             config: self.config.clone(),
             cwd: self.cwd.clone(),
             step: self.step,
+            step1_focus: self.step1_focus,
+            step1_preview_scroll_offset: self.step1_preview_scroll_offset,
             template_search_query: self.template_search_query.clone(),
             templates: self.templates.clone(),
             selected_template_idx: self.selected_template_idx,
@@ -176,6 +191,8 @@ impl PartialEq for ProjectCreationModal {
         self.config == other.config
             && self.cwd == other.cwd
             && self.step == other.step
+            && self.step1_focus == other.step1_focus
+            && self.step1_preview_scroll_offset == other.step1_preview_scroll_offset
             && self.template_search_query == other.template_search_query
             && self.templates == other.templates
             && self.selected_template_idx == other.selected_template_idx
@@ -241,6 +258,8 @@ impl ProjectCreationModal {
             config: config.clone(),
             cwd: cwd.to_path_buf(),
             step,
+            step1_focus: Step1Focus::TemplateList,
+            step1_preview_scroll_offset: 0,
             template_search_query: TextInput::new().with_placeholder("<type to filter templates>"),
             templates,
             selected_template_idx,
@@ -275,6 +294,18 @@ impl ProjectCreationModal {
     /// Sets the active field focus.
     pub fn with_focus(mut self, focus: CreationFocus) -> Self {
         self.focus = focus;
+        self
+    }
+
+    /// Sets the active Step 1 dual-pane focus.
+    pub fn with_step1_focus(mut self, focus: Step1Focus) -> Self {
+        self.step1_focus = focus;
+        self
+    }
+
+    /// Sets the Step 1 preview scroll offset.
+    pub fn with_step1_preview_scroll_offset(mut self, offset: usize) -> Self {
+        self.step1_preview_scroll_offset = offset;
         self
     }
 
@@ -333,6 +364,34 @@ impl ProjectCreationModal {
                 }
             }
         }
+    }
+
+    /// Computes the total number of lines in the Step 1 preview scrollable body.
+    pub fn step1_preview_total_body_lines(&self) -> usize {
+        if let Some(tpl_name) = self.selected_template() {
+            if let Some(tpl) = self.config.get_template(tpl_name) {
+                let mut count = 1; // "Repositories (N):"
+                if tpl.repos.is_empty() {
+                    count += 1;
+                } else {
+                    count += tpl.repos.len();
+                }
+                if let Some(ref custom) = tpl.agents_md_append {
+                    let trimmed = custom.trim();
+                    if !trimmed.is_empty() {
+                        count += 1 + trimmed.lines().count();
+                    }
+                }
+                return count;
+            }
+        }
+        0
+    }
+
+    /// Returns the maximum scroll offset for the Step 1 preview body.
+    pub fn step1_preview_max_scroll(&self) -> usize {
+        self.step1_preview_total_body_lines()
+            .saturating_sub(STEP1_PREVIEW_VISIBLE_LINES)
     }
 
     /// Returns the currently selected agent CLI tool name.
@@ -464,6 +523,26 @@ impl ProjectCreationModal {
         }
         self.selected_repo_idx = 0;
         self.repo_scroll_offset = 0;
+        self.step1_preview_scroll_offset = 0;
+    }
+
+    /// Synchronizes `repo_scroll_offset` so that `selected_repo_idx` is visible within `REPOS_VISIBLE_ROWS`.
+    pub fn sync_repo_scroll(&mut self) {
+        if self.repo_items.is_empty() {
+            self.selected_repo_idx = 0;
+            self.repo_scroll_offset = 0;
+            return;
+        }
+        if self.selected_repo_idx >= self.repo_items.len() {
+            self.selected_repo_idx = self.repo_items.len() - 1;
+        }
+        if self.selected_repo_idx < self.repo_scroll_offset {
+            self.repo_scroll_offset = self.selected_repo_idx;
+        } else if self.selected_repo_idx >= self.repo_scroll_offset + REPOS_VISIBLE_ROWS {
+            self.repo_scroll_offset = self
+                .selected_repo_idx
+                .saturating_sub(REPOS_VISIBLE_ROWS.saturating_sub(1));
+        }
     }
 
     /// Returns the names of all currently selected repositories in the checklist.
@@ -1086,6 +1165,9 @@ impl ProjectCreationModal {
 
         match self.step {
             CreationStep::SelectTemplate => {
+                if self.step1_focus == Step1Focus::Preview {
+                    return None;
+                }
                 let prefix_len = 8u16; // "Filter: "
                 let chunks = step1_layout(inner);
                 let cursor_x = chunks[0].x + prefix_len + self.template_search_query.cursor as u16;
@@ -1167,55 +1249,117 @@ impl ProjectCreationModal {
         }
 
         match self.step {
-            CreationStep::SelectTemplate => match key.code {
-                KeyCode::Esc => CreationModalAction::Cancel,
-                KeyCode::Up => {
-                    self.cycle_template_prev();
-                    CreationModalAction::None
+            CreationStep::SelectTemplate => {
+                if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
+                    self.step1_focus = match self.step1_focus {
+                        Step1Focus::TemplateList => Step1Focus::Preview,
+                        Step1Focus::Preview => Step1Focus::TemplateList,
+                    };
+                    return CreationModalAction::None;
                 }
-                KeyCode::Down => {
-                    self.cycle_template_next();
-                    CreationModalAction::None
+
+                match self.step1_focus {
+                    Step1Focus::TemplateList => match key.code {
+                        KeyCode::Esc => CreationModalAction::Cancel,
+                        KeyCode::Up => {
+                            self.cycle_template_prev();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Down => {
+                            self.cycle_template_next();
+                            CreationModalAction::None
+                        }
+                        KeyCode::PageUp => {
+                            self.cycle_template_prev();
+                            CreationModalAction::None
+                        }
+                        KeyCode::PageDown => {
+                            self.cycle_template_next();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char('p') | KeyCode::Char('P') if has_ctrl => {
+                            self.cycle_template_prev();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') if has_ctrl => {
+                            self.cycle_template_next();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Enter => {
+                            let matching = self.matching_template_indices();
+                            if !matching.is_empty() {
+                                let target_idx =
+                                    matching[self.selected_template_idx.min(matching.len() - 1)];
+                                self.step = CreationStep::ConfigureDetails;
+                                self.selected_template_idx = target_idx;
+                                self.sync_agent_with_template();
+                                self.sync_repos_with_template();
+                                self.revalidate();
+                                self.focus = CreationFocus::ProjectName;
+                            }
+                            CreationModalAction::None
+                        }
+                        _ => {
+                            let prev_selected = self.selected_template().map(str::to_string);
+                            let modified = self.template_search_query.handle_key(key);
+                            if modified {
+                                self.sync_selection_for_query(prev_selected.as_deref());
+                            }
+                            CreationModalAction::None
+                        }
+                    },
+                    Step1Focus::Preview => match key.code {
+                        KeyCode::Esc => CreationModalAction::Cancel,
+                        KeyCode::Enter => {
+                            let matching = self.matching_template_indices();
+                            if !matching.is_empty() {
+                                let target_idx =
+                                    matching[self.selected_template_idx.min(matching.len() - 1)];
+                                self.step = CreationStep::ConfigureDetails;
+                                self.selected_template_idx = target_idx;
+                                self.sync_agent_with_template();
+                                self.sync_repos_with_template();
+                                self.revalidate();
+                                self.focus = CreationFocus::ProjectName;
+                            }
+                            CreationModalAction::None
+                        }
+                        KeyCode::Up | KeyCode::Char('k') if !has_ctrl && !has_alt => {
+                            self.step1_preview_scroll_offset =
+                                self.step1_preview_scroll_offset.saturating_sub(1);
+                            CreationModalAction::None
+                        }
+                        KeyCode::Down | KeyCode::Char('j') if !has_ctrl && !has_alt => {
+                            let max = self.step1_preview_max_scroll();
+                            self.step1_preview_scroll_offset =
+                                (self.step1_preview_scroll_offset + 1).min(max);
+                            CreationModalAction::None
+                        }
+                        KeyCode::PageUp => {
+                            self.step1_preview_scroll_offset = self
+                                .step1_preview_scroll_offset
+                                .saturating_sub(STEP1_PREVIEW_VISIBLE_LINES);
+                            CreationModalAction::None
+                        }
+                        KeyCode::PageDown => {
+                            let max = self.step1_preview_max_scroll();
+                            self.step1_preview_scroll_offset = (self.step1_preview_scroll_offset
+                                + STEP1_PREVIEW_VISIBLE_LINES)
+                                .min(max);
+                            CreationModalAction::None
+                        }
+                        KeyCode::Home => {
+                            self.step1_preview_scroll_offset = 0;
+                            CreationModalAction::None
+                        }
+                        KeyCode::End => {
+                            self.step1_preview_scroll_offset = self.step1_preview_max_scroll();
+                            CreationModalAction::None
+                        }
+                        _ => CreationModalAction::None,
+                    },
                 }
-                KeyCode::PageUp => {
-                    self.cycle_template_prev();
-                    CreationModalAction::None
-                }
-                KeyCode::PageDown => {
-                    self.cycle_template_next();
-                    CreationModalAction::None
-                }
-                KeyCode::Char('p') | KeyCode::Char('P') if has_ctrl => {
-                    self.cycle_template_prev();
-                    CreationModalAction::None
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') if has_ctrl => {
-                    self.cycle_template_next();
-                    CreationModalAction::None
-                }
-                KeyCode::Enter => {
-                    let matching = self.matching_template_indices();
-                    if !matching.is_empty() {
-                        let target_idx =
-                            matching[self.selected_template_idx.min(matching.len() - 1)];
-                        self.step = CreationStep::ConfigureDetails;
-                        self.selected_template_idx = target_idx;
-                        self.sync_agent_with_template();
-                        self.sync_repos_with_template();
-                        self.revalidate();
-                        self.focus = CreationFocus::ProjectName;
-                    }
-                    CreationModalAction::None
-                }
-                _ => {
-                    let prev_selected = self.selected_template().map(str::to_string);
-                    let modified = self.template_search_query.handle_key(key);
-                    if modified {
-                        self.sync_selection_for_query(prev_selected.as_deref());
-                    }
-                    CreationModalAction::None
-                }
-            },
+            }
             CreationStep::ConfigureDetails => {
                 if self.focus == CreationFocus::Prompt {
                     match key.code {
@@ -1380,27 +1524,40 @@ impl ProjectCreationModal {
                             self.prev_focus();
                             CreationModalAction::None
                         }
-                        KeyCode::Up => {
-                            if !self.cycle_repo_prev() {
-                                self.prev_focus();
+                        KeyCode::Up | KeyCode::Char('k') if !has_ctrl && !has_alt => {
+                            self.cycle_repo_prev();
+                            CreationModalAction::None
+                        }
+                        KeyCode::Down | KeyCode::Char('j') if !has_ctrl && !has_alt => {
+                            self.cycle_repo_next();
+                            CreationModalAction::None
+                        }
+                        KeyCode::PageUp => {
+                            if !self.repo_items.is_empty() {
+                                self.selected_repo_idx =
+                                    self.selected_repo_idx.saturating_sub(REPOS_VISIBLE_ROWS);
+                                self.sync_repo_scroll();
                             }
                             CreationModalAction::None
                         }
-                        KeyCode::Down => {
-                            if !self.cycle_repo_next() {
-                                self.next_focus();
+                        KeyCode::PageDown => {
+                            if !self.repo_items.is_empty() {
+                                self.selected_repo_idx = (self.selected_repo_idx
+                                    + REPOS_VISIBLE_ROWS)
+                                    .min(self.repo_items.len().saturating_sub(1));
+                                self.sync_repo_scroll();
                             }
                             CreationModalAction::None
                         }
-                        KeyCode::Char('k') if !has_ctrl && !has_alt => {
-                            if !self.cycle_repo_prev() {
-                                self.prev_focus();
-                            }
+                        KeyCode::Home => {
+                            self.selected_repo_idx = 0;
+                            self.repo_scroll_offset = 0;
                             CreationModalAction::None
                         }
-                        KeyCode::Char('j') if !has_ctrl && !has_alt => {
-                            if !self.cycle_repo_next() {
-                                self.next_focus();
+                        KeyCode::End => {
+                            if !self.repo_items.is_empty() {
+                                self.selected_repo_idx = self.repo_items.len().saturating_sub(1);
+                                self.sync_repo_scroll();
                             }
                             CreationModalAction::None
                         }
@@ -1547,7 +1704,12 @@ impl ProjectCreationModal {
             MouseEventKind::ScrollUp => {
                 match self.step {
                     CreationStep::SelectTemplate => {
-                        self.cycle_template_prev();
+                        if self.step1_focus == Step1Focus::Preview {
+                            self.step1_preview_scroll_offset =
+                                self.step1_preview_scroll_offset.saturating_sub(1);
+                        } else {
+                            self.cycle_template_prev();
+                        }
                     }
                     CreationStep::ConfigureDetails => {
                         if self.focus == CreationFocus::Agent {
@@ -1568,7 +1730,13 @@ impl ProjectCreationModal {
             MouseEventKind::ScrollDown => {
                 match self.step {
                     CreationStep::SelectTemplate => {
-                        self.cycle_template_next();
+                        if self.step1_focus == Step1Focus::Preview {
+                            let max = self.step1_preview_max_scroll();
+                            self.step1_preview_scroll_offset =
+                                (self.step1_preview_scroll_offset + 1).min(max);
+                        } else {
+                            self.cycle_template_next();
+                        }
                     }
                     CreationStep::ConfigureDetails => {
                         if self.focus == CreationFocus::Agent {
@@ -1759,47 +1927,71 @@ impl ProjectCreationModal {
         left_par.render(left_area, buf);
 
         // Right: Template Preview
+        let is_preview_focused = self.step1_focus == Step1Focus::Preview;
         let right_block = Block::default()
             .borders(Borders::LEFT)
-            .border_style(Style::default().fg(theme.border_unfocused))
-            .title(" Preview ");
+            .border_style(if is_preview_focused {
+                Style::default().fg(theme.border_focused)
+            } else {
+                Style::default().fg(theme.border_unfocused)
+            })
+            .title(if is_preview_focused {
+                Line::from(Span::styled(
+                    " Preview ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(" Preview ")
+            });
         let right_inner = right_block.inner(right_area);
         right_block.render(right_area, buf);
 
-        let mut right_lines = Vec::new();
         if let Some(tpl_name) = self.selected_template() {
             if let Some(tpl) = self.config.get_template(tpl_name) {
-                right_lines.push(Line::from(vec![
-                    Span::styled(
-                        "Template: ",
-                        Style::default()
-                            .fg(theme.modal_label)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        tpl_name,
-                        Style::default()
-                            .fg(theme.input_text)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
+                let preview_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(3), Constraint::Min(1)])
+                    .split(right_inner);
+                let header_area = preview_chunks[0];
+                let body_area = preview_chunks[1];
 
-                let desc = tpl.description.as_deref().unwrap_or("None");
-                right_lines.push(Line::from(vec![
-                    Span::styled("Description: ", Style::default().fg(theme.modal_label)),
-                    Span::styled(desc, Style::default().fg(theme.input_text)),
-                ]));
+                let pinned_header_lines = vec![
+                    Line::from(vec![
+                        Span::styled(
+                            "Template: ",
+                            Style::default()
+                                .fg(theme.modal_label)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            tpl_name,
+                            Style::default()
+                                .fg(theme.input_text)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Description: ", Style::default().fg(theme.modal_label)),
+                        Span::styled(
+                            tpl.description.as_deref().unwrap_or("None"),
+                            Style::default().fg(theme.input_text),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Default Agent: ", Style::default().fg(theme.modal_label)),
+                        Span::styled(
+                            tpl.default_agent
+                                .as_deref()
+                                .unwrap_or(&self.config.default_agent),
+                            Style::default().fg(theme.input_text),
+                        ),
+                    ]),
+                ];
+                let header_par = Paragraph::new(pinned_header_lines);
+                header_par.render(header_area, buf);
 
-                let agent_name = tpl
-                    .default_agent
-                    .as_deref()
-                    .unwrap_or(&self.config.default_agent);
-                right_lines.push(Line::from(vec![
-                    Span::styled("Default Agent: ", Style::default().fg(theme.modal_label)),
-                    Span::styled(agent_name, Style::default().fg(theme.input_text)),
-                ]));
-
-                right_lines.push(Line::from(vec![Span::styled(
+                let mut body_lines = Vec::new();
+                body_lines.push(Line::from(vec![Span::styled(
                     format!("Repositories ({}):", tpl.repos.len()),
                     Style::default()
                         .fg(theme.modal_label)
@@ -1807,7 +1999,7 @@ impl ProjectCreationModal {
                 )]));
 
                 if tpl.repos.is_empty() {
-                    right_lines.push(Line::from(Span::styled(
+                    body_lines.push(Line::from(Span::styled(
                         "  (none)",
                         Style::default().fg(theme.input_placeholder),
                     )));
@@ -1827,7 +2019,7 @@ impl ProjectCreationModal {
                         } else {
                             format!("  • {name}")
                         };
-                        right_lines.push(Line::from(Span::styled(
+                        body_lines.push(Line::from(Span::styled(
                             display_str,
                             Style::default().fg(theme.status_bar_fg),
                         )));
@@ -1837,38 +2029,55 @@ impl ProjectCreationModal {
                 if let Some(ref custom) = tpl.agents_md_append {
                     let trimmed = custom.trim();
                     if !trimmed.is_empty() {
-                        right_lines.push(Line::from(vec![Span::styled(
+                        body_lines.push(Line::from(vec![Span::styled(
                             "Custom Instructions:",
                             Style::default()
                                 .fg(theme.modal_label)
                                 .add_modifier(Modifier::BOLD),
                         )]));
-                        for line in trimmed.lines().take(2) {
-                            right_lines.push(Line::from(Span::styled(
+                        for line in trimmed.lines() {
+                            body_lines.push(Line::from(Span::styled(
                                 format!("  {line}"),
                                 Style::default().fg(theme.input_placeholder),
                             )));
                         }
                     }
                 }
+
+                let body_par = Paragraph::new(body_lines.clone())
+                    .scroll((self.step1_preview_scroll_offset as u16, 0));
+                body_par.render(body_area, buf);
+
+                if body_lines.len() > body_area.height as usize {
+                    let mut scrollbar_state = ScrollbarState::new(body_lines.len())
+                        .position(self.step1_preview_scroll_offset)
+                        .viewport_content_length(body_area.height as usize);
+                    let scrollbar =
+                        Scrollbar::default().orientation(ScrollbarOrientation::VerticalRight);
+                    scrollbar.render(body_area, buf, &mut scrollbar_state);
+                }
             }
         } else if self.templates.is_empty() {
-            right_lines.push(Line::from(Span::styled(
-                "No templates found in config.toml.",
-                Style::default().fg(theme.input_placeholder),
-            )));
-            right_lines.push(Line::from(Span::styled(
-                "Run 'botai edit' to configure templates.",
-                Style::default().fg(theme.input_placeholder),
-            )));
+            let right_lines = vec![
+                Line::from(Span::styled(
+                    "No templates found in config.toml.",
+                    Style::default().fg(theme.input_placeholder),
+                )),
+                Line::from(Span::styled(
+                    "Run 'botai edit' to configure templates.",
+                    Style::default().fg(theme.input_placeholder),
+                )),
+            ];
+            let right_par = Paragraph::new(right_lines).wrap(Wrap { trim: false });
+            right_par.render(right_inner, buf);
         } else {
-            right_lines.push(Line::from(Span::styled(
+            let right_lines = vec![Line::from(Span::styled(
                 "No template selected",
                 Style::default().fg(theme.input_placeholder),
-            )));
+            ))];
+            let right_par = Paragraph::new(right_lines).wrap(Wrap { trim: false });
+            right_par.render(right_inner, buf);
         }
-        let right_par = Paragraph::new(right_lines).wrap(Wrap { trim: false });
-        right_par.render(right_inner, buf);
 
         // 4. Bottom Divider
         let bottom_divider_str = "─".repeat(bottom_divider_area.width as usize);
@@ -1887,7 +2096,14 @@ impl ProjectCreationModal {
         let footer_text = if self.templates.is_empty() {
             " [Esc] Cancel "
         } else {
-            " [↑/↓] Select | [Enter] Next (Configure) | [Esc] Cancel "
+            match self.step1_focus {
+                Step1Focus::TemplateList => {
+                    " [↑/↓] Select | [Tab] Preview | [Enter] Next | [Esc] Cancel "
+                }
+                Step1Focus::Preview => {
+                    " [↑/↓] Scroll | [PgUp/PgDn] Page | [Tab] Templates | [Enter] Next | [Esc] Cancel "
+                }
+            }
         };
         let footer_line = Line::from(Span::styled(
             footer_text,
@@ -2051,8 +2267,13 @@ impl ProjectCreationModal {
         // 4. Repositories Selection Checklist
         let selected_count = self.selected_repo_names().len();
         let total_count = self.repo_items.len();
+        let item_pos = if total_count == 0 {
+            0
+        } else {
+            self.selected_repo_idx + 1
+        };
         let mut repos_header_spans = vec![Span::styled(
-            format!("{repos_prefix}Repositories ({selected_count}/{total_count} selected):"),
+            format!("{repos_prefix}Repositories ({selected_count}/{total_count} selected • item {item_pos}/{total_count}):"),
             repos_label_style,
         )];
 
@@ -2191,7 +2412,7 @@ impl ProjectCreationModal {
 
         // 6. Footer Hints
         let footer_text = if repos_focused {
-            " [Tab] Next | [Space] Toggle | [A] All | [Enter] Create Project | [Esc] Back "
+            " [Tab] Next | [PgUp/PgDn] Page | [Space] Toggle | [A] All | [Enter] Create Project | [Esc] Back "
         } else if self.templates.len() > 1 {
             " [Tab] Next | [←/→] Agent | [Enter] Create Project | [Esc/Bksp] Back "
         } else {
@@ -2953,7 +3174,7 @@ mod tests {
         assert!(text1.contains("Repositories (2):"));
         assert!(text1.contains("billing-api"));
         assert!(text1.contains("Run cargo test"));
-        assert!(text1.contains("[Enter] Next (Configure)"));
+        assert!(text1.contains("[Enter] Next"));
 
         // 2. Advance to Step 2 and render
         modal.handle_key(key(KeyCode::Enter));
@@ -3465,8 +3686,12 @@ mod tests {
         modal.handle_key(key(KeyCode::Up));
         assert_eq!(modal.focus, CreationFocus::Repositories);
 
-        // Down from Repositories returns to Prompt
+        // Down in Repositories clamps due to boundary isolation
         modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // Tab from Repositories advances to Prompt
+        modal.handle_key(key(KeyCode::Tab));
         assert_eq!(modal.focus, CreationFocus::Prompt);
 
         // Down within prompt moves across lines
@@ -4149,8 +4374,13 @@ mod tests {
         assert_eq!(modal.selected_repo_idx, 1);
         assert_eq!(modal.focus, CreationFocus::Repositories);
 
-        // At bottom of repo list, Down moves to Prompt
+        // At bottom of repo list, Down clamps (boundary isolation)
         modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.selected_repo_idx, 1);
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // Tab moves to Prompt
+        modal.handle_key(key(KeyCode::Tab));
         assert_eq!(modal.focus, CreationFocus::Prompt);
 
         // Up at top line of prompt moves back to Repositories
@@ -4163,8 +4393,13 @@ mod tests {
         assert_eq!(modal.selected_repo_idx, 0);
         assert_eq!(modal.focus, CreationFocus::Repositories);
 
-        // At top of Repositories, Up moves to Agent
+        // At top of Repositories, Up clamps (boundary isolation)
         modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.selected_repo_idx, 0);
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+
+        // BackTab moves to Agent
+        modal.handle_key(key(KeyCode::BackTab));
         assert_eq!(modal.focus, CreationFocus::Agent);
 
         // From Agent, Up moves to ProjectName
@@ -4373,7 +4608,7 @@ mod tests {
             default_agent = "claude"
             repos_dir = ".repos"
             [templates.many_repos]
-            repos = ["repo1", "repo2", "repo3", "repo4", "repo5"]
+            repos = ["repo1", "repo2", "repo3", "repo4", "repo5", "repo6", "repo7", "repo8", "repo9", "repo10"]
         "#;
         let config = Config::load_from_str(toml_str).unwrap();
         let temp_dir = TempDir::new().unwrap();
@@ -4381,26 +4616,32 @@ mod tests {
         modal.step = CreationStep::ConfigureDetails;
         modal.focus = CreationFocus::Repositories;
 
-        assert_eq!(modal.repo_items.len(), 5);
+        assert_eq!(modal.repo_items.len(), 10);
         assert_eq!(modal.selected_repo_idx, 0);
         assert_eq!(modal.repo_scroll_offset, 0);
 
-        // Move down past REPOS_VISIBLE_ROWS (3)
-        modal.handle_key(key(KeyCode::Down)); // idx 1, scroll 0
-        assert_eq!(modal.selected_repo_idx, 1);
-        assert_eq!(modal.repo_scroll_offset, 0);
+        // Move down past REPOS_VISIBLE_ROWS (6)
+        for i in 1..=5 {
+            modal.handle_key(key(KeyCode::Down));
+            assert_eq!(modal.selected_repo_idx, i);
+            assert_eq!(modal.repo_scroll_offset, 0);
+        }
 
-        modal.handle_key(key(KeyCode::Down)); // idx 2, scroll 0
-        assert_eq!(modal.selected_repo_idx, 2);
-        assert_eq!(modal.repo_scroll_offset, 0);
-
-        modal.handle_key(key(KeyCode::Down)); // idx 3, scroll 1 (visible: idx 1, 2, 3)
-        assert_eq!(modal.selected_repo_idx, 3);
+        modal.handle_key(key(KeyCode::Down)); // idx 6, scroll 1 (visible: idx 1..=6)
+        assert_eq!(modal.selected_repo_idx, 6);
         assert_eq!(modal.repo_scroll_offset, 1);
 
-        modal.handle_key(key(KeyCode::Down)); // idx 4, scroll 2 (visible: idx 2, 3, 4)
-        assert_eq!(modal.selected_repo_idx, 4);
+        modal.handle_key(key(KeyCode::Down)); // idx 7, scroll 2 (visible: idx 2..=7)
+        assert_eq!(modal.selected_repo_idx, 7);
         assert_eq!(modal.repo_scroll_offset, 2);
+
+        modal.handle_key(key(KeyCode::Down)); // idx 8, scroll 3 (visible: idx 3..=8)
+        assert_eq!(modal.selected_repo_idx, 8);
+        assert_eq!(modal.repo_scroll_offset, 3);
+
+        modal.handle_key(key(KeyCode::Down)); // idx 9, scroll 4 (visible: idx 4..=9)
+        assert_eq!(modal.selected_repo_idx, 9);
+        assert_eq!(modal.repo_scroll_offset, 4);
 
         // Render in buffer and verify content and scroll indicator
         let area = Rect::new(0, 0, 80, 24);
@@ -4414,16 +4655,22 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        assert!(rendered.contains("Repositories (5/5 selected):"));
-        assert!(rendered.contains("repo3"));
-        assert!(rendered.contains("repo4"));
-        assert!(rendered.contains("repo5"));
+        assert!(rendered.contains("Repositories (10/10 selected • item 10/10):"));
+        assert!(rendered.contains("repo8"));
+        assert!(rendered.contains("repo9"));
+        assert!(rendered.contains("repo10"));
         assert!(rendered.contains("▲")); // Indicates items above can be scrolled to
 
         // Move back up
-        modal.handle_key(key(KeyCode::Up)); // idx 3, scroll 2
+        for i in (4..=8).rev() {
+            modal.handle_key(key(KeyCode::Up));
+            assert_eq!(modal.selected_repo_idx, i);
+            assert_eq!(modal.repo_scroll_offset, 4);
+        }
+
+        modal.handle_key(key(KeyCode::Up)); // idx 3, scroll 3
         assert_eq!(modal.selected_repo_idx, 3);
-        assert_eq!(modal.repo_scroll_offset, 2);
+        assert_eq!(modal.repo_scroll_offset, 3);
 
         modal.handle_key(key(KeyCode::Up)); // idx 2, scroll 2
         assert_eq!(modal.selected_repo_idx, 2);
@@ -4436,5 +4683,276 @@ mod tests {
         modal.handle_key(key(KeyCode::Up)); // idx 0, scroll 0
         assert_eq!(modal.selected_repo_idx, 0);
         assert_eq!(modal.repo_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_step1_focus_toggling() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.t1]
+            repos = ["repo1"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("t1"));
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
+        assert_eq!(modal.step1_focus, Step1Focus::TemplateList);
+
+        // Tab switches to Preview
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.step1_focus, Step1Focus::Preview);
+
+        // Tab again switches back to TemplateList
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.step1_focus, Step1Focus::TemplateList);
+
+        // BackTab switches to Preview
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.step1_focus, Step1Focus::Preview);
+
+        // BackTab again switches back to TemplateList
+        modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.step1_focus, Step1Focus::TemplateList);
+    }
+
+    #[test]
+    fn test_step1_preview_scrolling() {
+        let repos_list = (1..=30)
+            .map(|i| format!("\"repo_{i}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.big_tpl]
+            description = "Big template"
+            repos = [{repos_list}]
+        "#
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("big_tpl"));
+        modal.step1_focus = Step1Focus::Preview;
+        assert_eq!(modal.step1_preview_scroll_offset, 0);
+
+        // Down / 'j' scrolls down
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.step1_preview_scroll_offset, 1);
+
+        modal.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(modal.step1_preview_scroll_offset, 2);
+
+        // Up / 'k' scrolls up
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.step1_preview_scroll_offset, 1);
+
+        modal.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(modal.step1_preview_scroll_offset, 0);
+
+        // Up at 0 saturates at 0
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.step1_preview_scroll_offset, 0);
+
+        // PageDown jumps by visible page height (15)
+        modal.handle_key(key(KeyCode::PageDown));
+        assert_eq!(modal.step1_preview_scroll_offset, 15);
+
+        // PageUp jumps up by 15
+        modal.handle_key(key(KeyCode::PageUp));
+        assert_eq!(modal.step1_preview_scroll_offset, 0);
+
+        // End jumps to maximum scroll offset (total body lines - 15)
+        modal.handle_key(key(KeyCode::End));
+        let max_scroll = modal.step1_preview_max_scroll();
+        assert!(max_scroll > 0);
+        assert_eq!(modal.step1_preview_scroll_offset, max_scroll);
+
+        // Home jumps back to 0
+        modal.handle_key(key(KeyCode::Home));
+        assert_eq!(modal.step1_preview_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_step1_preview_scroll_reset() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.t1]
+            repos = ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "r16", "r17", "r18", "r19", "r20"]
+            [templates.t2]
+            repos = ["r1"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("t1"));
+        modal.step1_preview_scroll_offset = 5;
+
+        // Changing template cycles and resets scroll offset
+        modal.cycle_template_next();
+        assert_eq!(modal.step1_preview_scroll_offset, 0);
+
+        modal.step1_preview_scroll_offset = 3;
+        modal.cycle_template_prev();
+        assert_eq!(modal.step1_preview_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_step1_preview_scrollbar_render() {
+        let repos_list = (1..=30)
+            .map(|i| format!("\"repo_{i}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.big_tpl]
+            description = "Big template"
+            repos = [{repos_list}]
+        "#
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("big_tpl"));
+        let area = Rect::new(0, 0, 80, 24);
+        let theme = Theme::default();
+
+        // 1. TemplateList focused: border is unfocused, title normal, footer hints template list
+        modal.step1_focus = Step1Focus::TemplateList;
+        let mut buf = Buffer::empty(area);
+        modal.render_modal(area, &mut buf, &theme);
+        let text = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(text.contains("[Tab] Preview"));
+        assert!(text.contains("Repositories (30):"));
+
+        // 2. Preview focused: border is focused, title bold, footer hints preview scroll
+        modal.step1_focus = Step1Focus::Preview;
+        let mut buf2 = Buffer::empty(area);
+        modal.render_modal(area, &mut buf2, &theme);
+        let text2 = buf2
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(text2.contains("[Tab] Templates"));
+        assert!(text2.contains("[PgUp/PgDn] Page"));
+        assert!(text2.contains("[↑/↓] Scroll"));
+    }
+
+    #[test]
+    fn test_step2_boundary_isolation() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = ["repo1", "repo2", "repo3"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::Repositories;
+        modal.selected_repo_idx = 0;
+
+        // Up at 0 stays at Repositories focus, does not eject to Agent
+        modal.handle_key(key(KeyCode::Up));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+        assert_eq!(modal.selected_repo_idx, 0);
+
+        modal.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+        assert_eq!(modal.selected_repo_idx, 0);
+
+        // Move to last item (idx 2)
+        modal.selected_repo_idx = 2;
+
+        // Down at end stays at Repositories focus, does not eject to Prompt
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+        assert_eq!(modal.selected_repo_idx, 2);
+
+        modal.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(modal.focus, CreationFocus::Repositories);
+        assert_eq!(modal.selected_repo_idx, 2);
+    }
+
+    #[test]
+    fn test_step2_fast_navigation() {
+        let repos_list = (1..=10)
+            .map(|i| format!("\"repo_{i}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = [{repos_list}]
+        "#
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::Repositories;
+        assert_eq!(modal.selected_repo_idx, 0);
+        assert_eq!(modal.repo_scroll_offset, 0);
+
+        // PageDown jumps by REPOS_VISIBLE_ROWS (6)
+        modal.handle_key(key(KeyCode::PageDown));
+        assert_eq!(modal.selected_repo_idx, 6);
+        assert_eq!(modal.repo_scroll_offset, 1);
+
+        // End jumps to last item (9)
+        modal.handle_key(key(KeyCode::End));
+        assert_eq!(modal.selected_repo_idx, 9);
+        assert_eq!(modal.repo_scroll_offset, 4);
+
+        // PageUp jumps up by 6 (to 3)
+        modal.handle_key(key(KeyCode::PageUp));
+        assert_eq!(modal.selected_repo_idx, 3);
+        assert_eq!(modal.repo_scroll_offset, 3);
+
+        // Home jumps to first item (0)
+        modal.handle_key(key(KeyCode::Home));
+        assert_eq!(modal.selected_repo_idx, 0);
+        assert_eq!(modal.repo_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_step2_position_indicator() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.tpl]
+            repos = ["repo1", "repo2", "repo3"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.focus = CreationFocus::Repositories;
+        modal.selected_repo_idx = 1;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let theme = Theme::default();
+        let mut buf = Buffer::empty(area);
+        modal.render_modal(area, &mut buf, &theme);
+        let text = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(text.contains("Repositories (3/3 selected • item 2/3):"));
+        assert!(text.contains("[PgUp/PgDn] Page"));
     }
 }
