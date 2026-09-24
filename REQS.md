@@ -273,10 +273,15 @@ env = { PORT = "8080", NODE_ENV = "development" }
 ## 6. Session Management & Navigation (TUI Multiplexer)
 - **Multi-Project Concurrency**: Maintains concurrent active project sessions in the background.
 - **Event-Driven TUI Rendering & Dirty Tracking**:
-  - The interactive multiplexer event loop tracks UI mutation state via a `dirty` flag and renders frames conditionally.
-  - Frame rendering is skipped when the application is idle (no incoming PTY bytes, no user input, no window resize, and no status/progress changes), dropping idle CPU utilization to near 0% while preserving responsive interaction.
-- **Immediate PTY Wakeup Signaling**:
+  - The interactive multiplexer event loop (`run_loop_with_receiver`) tracks UI mutation state via a `dirty` flag and renders frames conditionally.
+  - Frame rendering (`terminal.draw(...)`) is skipped when the application is idle (no incoming PTY bytes, no user keystrokes/mouse events, no window resize, and no background modal validation/progress mutations), dropping idle CPU utilization to near 0% while preserving responsive interaction.
+  - State changes that mark `dirty = true` include: host terminal resize/layout updates, setup/destruction progress events, debounced branch collision validation updates, child PTY stream outputs and process status transitions returned by `process_pty_streams()`, timeout-based escape key flushes, and incoming user input bytes.
+  - Dashboard session status synchronization (`dashboard.set_running_sessions`) is executed conditionally only when displaying the dashboard (`is_showing_dashboard()`) and UI state is dirty, avoiding redundant session map iterations during active PTY terminal focus.
+- **Immediate PTY Wakeup Signaling (`PtyWaker`)**:
   - PTY reader threads signal the main TUI event loop immediately upon receiving child process output, breaking out of sleep without waiting for fixed polling intervals to achieve sub-millisecond streaming latency for agent token outputs.
+  - PTY sessions define `PtyWaker = Arc<dyn Fn() + Send + Sync>` configured via `PtySession::set_waker` and `SessionRegistry::set_waker`. Whenever `pty-reader` reads bytes (`n > 0`), it invokes the waker callback.
+  - In `TuiApp`, the PTY waker is connected to the raw stdin channel (`stdin_tx`), sending an empty wake-up pulse (`Vec::new()`).
+  - In `run_loop_with_receiver`, incoming bytes on `stdin_rx` are demuxed: non-empty bytes are forwarded to `handle_input_bytes` (marking `dirty = true`), while empty vectors (wake-up pulses) bypass input decoding and immediately trigger `process_pty_streams()`, achieving instant event-driven terminal redrawing.
 - **Consolidated Process Status Polling**:
   - Lifecycle state and exit codes for active sessions are retrieved using a single consolidated `try_wait` invocation per session, eliminating redundant duplicate `waitpid` syscalls and mutex locking in the render loop.
 - **Zero-Allocation VT Cell Rendering & High-Throughput Performance**:

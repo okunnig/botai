@@ -1,4 +1,4 @@
-use super::{ProjectSession, PtySession, SessionError, SessionStatus, VtScreen};
+use super::{ProjectSession, PtySession, PtyWaker, SessionError, SessionStatus, VtScreen};
 use crate::notify::ActivityTracker;
 
 /// A single active session entry in the session registry, holding state, PTY handle, virtual terminal, and activity tracker.
@@ -95,6 +95,7 @@ impl SessionEntry {
 pub struct SessionRegistry {
     sessions: Vec<SessionEntry>,
     active_index: Option<usize>,
+    waker: Option<PtyWaker>,
 }
 
 impl Default for SessionRegistry {
@@ -109,7 +110,16 @@ impl SessionRegistry {
         Self {
             sessions: Vec::new(),
             active_index: None,
+            waker: None,
         }
+    }
+
+    /// Configures a wake-up callback across all current and future sessions in the registry.
+    pub fn set_waker(&mut self, waker: PtyWaker) {
+        for entry in &mut self.sessions {
+            entry.pty_mut().set_waker(waker.clone());
+        }
+        self.waker = Some(waker);
     }
 
     /// Adds a new session to the registry.
@@ -134,7 +144,10 @@ impl SessionRegistry {
         }
 
         let id = project_session.id.clone();
-        let entry = SessionEntry::new(project_session, pty, vt);
+        let mut entry = SessionEntry::new(project_session, pty, vt);
+        if let Some(ref w) = self.waker {
+            entry.pty_mut().set_waker(w.clone());
+        }
         self.sessions.push(entry);
 
         if self.active_index.is_none() {
@@ -541,5 +554,57 @@ mod tests {
 
         assert_eq!(registry.sessions[0].vt().size(), (140, 50));
         assert_eq!(registry.sessions[1].vt().size(), (140, 50));
+    }
+
+    #[test]
+    fn test_session_registry_set_waker_attaches_to_existing_and_new_sessions() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let tmp = tempdir().expect("Failed to create tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "echo registry_waker_test"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "echo registry_waker_test"]);
+
+        let mut registry = SessionRegistry::new();
+
+        // 1. Add session 1 before set_waker
+        let config1 = PtyConfig::new(cmd, tmp.path()).with_args(args.clone());
+        let pty1 = PtySession::spawn(config1).unwrap();
+        let vt1 = VtScreen::new(80, 24);
+        let ps1 = ProjectSession::new("p1", "ws", "claude");
+        registry.add(ps1, pty1, vt1).unwrap();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+        let waker: PtyWaker = Arc::new(move || {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // 2. Set waker on registry (attaches to p1)
+        registry.set_waker(waker);
+        assert!(registry.waker.is_some());
+
+        // 3. Add session 2 after set_waker (should auto-attach to p2)
+        let config2 = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty2 = PtySession::spawn(config2).unwrap();
+        let vt2 = VtScreen::new(80, 24);
+        let ps2 = ProjectSession::new("p2", "ws", "agy");
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        // Wait up to 2 seconds for output from session 2 and check waker was invoked
+        for _ in 0..40 {
+            if counter.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            counter.load(Ordering::SeqCst) > 0,
+            "Waker should have been invoked by session output"
+        );
     }
 }

@@ -236,6 +236,9 @@ impl PtyConfig {
     }
 }
 
+/// A thread-safe callback invoked when new bytes are read from the child PTY.
+pub type PtyWaker = Arc<dyn Fn() + Send + Sync>;
+
 /// A handle to a running pseudo-terminal session and child process.
 pub struct PtySession {
     pub(crate) config: PtyConfig,
@@ -245,6 +248,7 @@ pub struct PtySession {
     rx: Receiver<Vec<u8>>,
     cached_exit_status: Arc<Mutex<Option<ExitStatus>>>,
     dsr: DsrResponder,
+    waker: Arc<Mutex<Option<PtyWaker>>>,
 }
 
 impl PtySession {
@@ -309,6 +313,8 @@ impl PtySession {
             .map_err(|e| SessionError::Other(format!("Failed to clone PTY reader: {e}")))?;
 
         let (tx, rx) = channel();
+        let waker: Arc<Mutex<Option<PtyWaker>>> = Arc::new(Mutex::new(None));
+        let waker_for_thread = Arc::clone(&waker);
         let _ = thread::Builder::new()
             .name("pty-reader".to_string())
             .spawn(move || {
@@ -319,6 +325,11 @@ impl PtySession {
                         Ok(n) => {
                             if tx.send(buf[..n].to_vec()).is_err() {
                                 break;
+                            }
+                            if let Ok(guard) = waker_for_thread.lock() {
+                                if let Some(ref w) = *guard {
+                                    w();
+                                }
                             }
                         }
                         Err(_) => break,
@@ -334,7 +345,15 @@ impl PtySession {
             rx,
             cached_exit_status: Arc::new(Mutex::new(None)),
             dsr: DsrResponder::new(),
+            waker,
         })
+    }
+
+    /// Sets or updates the wake-up callback invoked when new output arrives from the child PTY.
+    pub fn set_waker(&mut self, waker: PtyWaker) {
+        if let Ok(mut guard) = self.waker.lock() {
+            *guard = Some(waker);
+        }
     }
 
     /// Writes raw bytes to the child process's standard input via the PTY master.
@@ -836,5 +855,51 @@ mod tests {
                 "Process should be terminated and reaped after kill()"
             );
         }
+    }
+
+    #[test]
+    fn test_pty_session_waker_called_on_output() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = tempdir().expect("Failed to create tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "echo test_waker_output"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "echo test_waker_output"]);
+
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let mut session = PtySession::spawn(config).expect("Failed to spawn PTY session");
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&call_count);
+        let waker: PtyWaker = Arc::new(move || {
+            count_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        session.set_waker(waker);
+
+        // Wait up to 2 seconds for output and waker invocation
+        let mut output = Vec::new();
+        for _ in 0..40 {
+            if let Ok(bytes) = session.read_nonblocking() {
+                if !bytes.is_empty() {
+                    output.extend_from_slice(&bytes);
+                }
+            }
+            if call_count.load(Ordering::SeqCst) > 0 && !output.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(
+            call_count.load(Ordering::SeqCst) > 0,
+            "Expected waker to be called on PTY output"
+        );
+        let text = String::from_utf8_lossy(&output);
+        assert!(
+            text.contains("test_waker_output"),
+            "Expected output to contain 'test_waker_output', got: {text}"
+        );
     }
 }

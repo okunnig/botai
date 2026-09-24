@@ -711,10 +711,12 @@ impl ProjectCreationModal {
 
     /// Drains pending asynchronous branch validation results and updates `self.validation`
     /// if the generation matches the current active input.
-    pub fn poll_validation(&mut self) {
+    pub fn poll_validation(&mut self) -> bool {
+        let mut changed = false;
         if let Some(deadline) = self.validation_debounce_deadline {
             if Instant::now() >= deadline {
                 self.flush_validation();
+                changed = true;
             }
         }
 
@@ -723,15 +725,17 @@ impl ProjectCreationModal {
                 if gen == self.validation_generation && self.validation.is_valid {
                     for err in branch_errors {
                         self.validation.add_error(err);
+                        changed = true;
                     }
                 }
             }
         }
+        changed
     }
 
     /// Advances tick-based state and drains pending validation results.
     pub fn tick(&mut self) {
-        self.poll_validation();
+        let _ = self.poll_validation();
     }
 
     /// Default inner width for initial prompt wrapping.
