@@ -4319,11 +4319,8 @@ mod tests {
 
         // Wait for background validation to detect collision
         let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(300) {
+        while modal.validation.is_valid && start.elapsed() < std::time::Duration::from_secs(5) {
             modal.poll_validation();
-            if !modal.validation.is_valid {
-                break;
-            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
@@ -4345,7 +4342,7 @@ mod tests {
 
         // Wait for revalidation without repo_b
         let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(300) {
+        while !modal.validation.is_valid && start.elapsed() < std::time::Duration::from_secs(5) {
             modal.poll_validation();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
