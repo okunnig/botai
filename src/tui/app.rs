@@ -753,13 +753,9 @@ impl TuiApp {
                 }
             }
 
-            let is_alive = session.pty_mut().is_alive();
-            let exit_code = session
-                .pty_mut()
-                .try_wait()
-                .ok()
-                .flatten()
-                .and_then(|s| s.code.map(|c| c as i32));
+            let exit_status = session.pty_mut().try_wait().ok().flatten();
+            let is_alive = exit_status.is_none();
+            let exit_code = exit_status.and_then(|s| s.code.map(|c| c as i32));
 
             if let Some(code) = exit_code {
                 session.project_session.exit_code = Some(code as u32);
@@ -3922,5 +3918,35 @@ repos = []
         let app_cfg = app.config.as_ref().expect("app config must exist");
         assert!(app_cfg.templates.contains_key("added_template"));
         assert!(app_cfg.templates.contains_key("initial_template"));
+    }
+
+    #[test]
+    fn test_consolidated_pty_polling_process_exit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 42"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 42"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("test_exit", "ws", "mock");
+        let session_id = ps.id.clone();
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        wait_for(&mut app, |a| {
+            a.registry
+                .get(&session_id)
+                .map(|s| s.project_session.exit_code == Some(42))
+                .unwrap_or(false)
+        });
+
+        let s = app.registry.get(&session_id).expect("session exists");
+        assert_eq!(s.project_session.exit_code, Some(42));
+        assert_eq!(s.project_session.status, SessionStatus::Error);
     }
 }

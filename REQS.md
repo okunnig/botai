@@ -204,10 +204,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Windows Executable & PATHEXT Probing**:
     - On Windows, hook execution probes `%PATH%` and `%PATHEXT%` (`.COM`, `.EXE`, `.BAT`, `.CMD`) to automatically resolve scripts like `npm`, `yarn`, and `pnpm`.
     - Automatically resolves bare commands and path-prefixed scripts into their `.cmd` or `.bat` executables so Rust's `std::process::Command` invokes them with Windows `cmd.exe /c` batch wrapping without requiring explicit file extensions or shell wrappers.
+  - **Parallel Remote Repository Cloning & Upstream Fetching**:
+    - During project workspace creation, missing remote repository cloning and upstream fetches execute concurrently in parallel across repositories using scoped threads (`std::thread::scope`).
+    - Progress logs and error notifications are streamed back asynchronously to the setup progress sink, significantly reducing workspace initialization latency for multi-repo project templates.
   - **Strict Branching Strategy**: Branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
   - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the template repositories or if `<project_name>` directory exists.
   - **Backing Repository Auto-Discovery (`resolve_main_repo`)**: Resolves the main cached repository from any worktree directory using `git rev-parse --git-common-dir` and `.git` file (`gitdir: <path>`) fallback traversal.
-  - **Clean Destruction & Metadata Pruning (`remove_worktree_auto`)**: Validates uncommitted changes (guarded unless forced), removes worktrees directly from backing central repositories, and executes `git worktree prune` so stale `.git/worktrees/<name>` metadata entries are eliminated while preserving git branch history.
+  - **Clean Destruction & Metadata Pruning (`remove_worktree_auto`)**: Validates uncommitted changes (guarded unless forced) with a single deduplicated dirty check per worktree, removes worktrees directly from backing central repositories, and executes `git worktree prune` so stale `.git/worktrees/<name>` metadata entries are eliminated while preserving git branch history.
 - **Agent Execution**: Spawns a single agent CLI instance at the project root (`CWD/<project_name>`), providing access to all worktree subdirectories.
 
 ---
@@ -269,6 +272,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 6. Session Management & Navigation (TUI Multiplexer)
 - **Multi-Project Concurrency**: Maintains concurrent active project sessions in the background.
+- **Event-Driven TUI Rendering & Dirty Tracking**:
+  - The interactive multiplexer event loop tracks UI mutation state via a `dirty` flag and renders frames conditionally.
+  - Frame rendering is skipped when the application is idle (no incoming PTY bytes, no user input, no window resize, and no status/progress changes), dropping idle CPU utilization to near 0% while preserving responsive interaction.
+- **Immediate PTY Wakeup Signaling**:
+  - PTY reader threads signal the main TUI event loop immediately upon receiving child process output, breaking out of sleep without waiting for fixed polling intervals to achieve sub-millisecond streaming latency for agent token outputs.
+- **Consolidated Process Status Polling**:
+  - Lifecycle state and exit codes for active sessions are retrieved using a single consolidated `try_wait` invocation per session, eliminating redundant duplicate `waitpid` syscalls and mutex locking in the render loop.
 - **Zero-Allocation VT Cell Rendering & High-Throughput Performance**:
   - `TerminalView::render_to_buffer` renders virtual terminal cells directly from `vt100::Screen` borrowing `&str` symbols and mapping colors without per-cell heap allocations, ensuring high-throughput 60FPS+ TUI rendering.
 - **Dynamic Viewport & Responsive Resizing**:
@@ -504,9 +514,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
          - *Step 1*: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
          - *Step 2*: Horizontal divider embedding the live pre-validation status message (`── ✗ <message> ────`, `── ℹ <message> ────`, or `── ✓ Ready to create project ────`), keeping the form body clean and anchoring validation feedback immediately above the bottom shortcuts row.
       5. **Footer Shortcuts Hint Bar (`Constraint::Length(1)`)**: Bottom-anchored key navigation hints (`theme.key_hint`, bold) consistently anchored to the base of the modal across both steps.
-  - **Asynchronous Non-Blocking Pre-Validation**:
+  - **Asynchronous Non-Blocking Pre-Validation & Debouncing**:
     - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
-    - Git branch collisions are checked asynchronously in background worker threads with generation counters to prevent stale results and UI freezing.
+    - Git branch collisions are checked asynchronously in background worker threads with generation counters and input debouncing (50–100ms pause) to eliminate thread and subprocess storms while actively typing.
     - Non-blocking `poll_validation()` drains validation worker responses on TUI loop ticks.
   - **Two-Step Dialog Progression**:
     1. **Step 1: Searchable Template Selection (`CreationStep::SelectTemplate`)**:
