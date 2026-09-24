@@ -511,7 +511,11 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Two-Step Dialog Progression**:
     1. **Step 1: Searchable Template Selection (`CreationStep::SelectTemplate`)**:
        - **Top Filter Search Bar**: Real-time search filter powered by the reusable `TextInput` component (`Filter: <query>`), supporting in-line character cursor positioning, full readline editing keybindings (`Home`/`Ctrl+A`, `End`/`Ctrl+E`, `Left`/`Right`, `Ctrl+Left`/`Alt+B`, `Ctrl+Right`/`Alt+F`, `Backspace`, `Delete`, `Ctrl+U`, `Ctrl+K`, `Ctrl+W`), paste sanitization, and hardware terminal cursor synchronization.
-       - **Comprehensive Matching Criteria**: Case-insensitive substring matching against template names, descriptions, and constituent repository names/sources.
+       - **Matching Criteria**: Strictly case-insensitive substring matching against template names only (descriptions and constituent repository names/sources are not matched).
+       - **Selection Synchronization Rules**:
+         - *Query Changes (typing, backspacing, pasting)*: If the currently selected template is still among the matching results, preserve its selection; otherwise reset selection to index 0 (top hit).
+         - *On Enter in Step 1*: Transitions to Step 2 (`ConfigureDetails`) cleanly with the chosen template without double-indexing into matching indices.
+         - *On Esc in Step 2*: Backtracks to Step 1 preserving the filter query and highlighting the active template in the matching list.
        - **Master-Detail Split Layout**:
          - *Left Panel*: Filtered template list with active selection indicator (` > `) and matching template count.
           - *Right Preview Pane*: Live preview of the highlighted template:
