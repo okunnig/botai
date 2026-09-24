@@ -290,38 +290,16 @@ impl ProjectCreationModal {
     }
 
     /// Returns the indices into `self.templates` matching `self.template_search_query`.
-    /// Filter logic: case-insensitive match against template name, description, and repo URLs/names.
+    /// Filter logic: strictly case-insensitive substring match against template name only.
     pub fn matching_template_indices(&self) -> Vec<usize> {
         let query = self.template_search_query.trim().to_lowercase();
+        if query.is_empty() {
+            return (0..self.templates.len()).collect();
+        }
         self.templates
             .iter()
             .enumerate()
-            .filter(|(_idx, tpl_name)| {
-                if query.is_empty() {
-                    return true;
-                }
-                if tpl_name.to_lowercase().contains(&query) {
-                    return true;
-                }
-                if let Some(tpl) = self.config.get_template(tpl_name) {
-                    if let Some(ref desc) = tpl.description {
-                        if desc.to_lowercase().contains(&query) {
-                            return true;
-                        }
-                    }
-                    for repo in &tpl.repos {
-                        let repo_str = repo.entry_str();
-                        if repo_str.to_lowercase().contains(&query) {
-                            return true;
-                        }
-                        let derived = crate::config::derive_repo_name(repo_str);
-                        if derived.to_lowercase().contains(&query) {
-                            return true;
-                        }
-                    }
-                }
-                false
-            })
+            .filter(|(_idx, tpl_name)| tpl_name.to_lowercase().contains(&query))
             .map(|(idx, _)| idx)
             .collect()
     }
@@ -431,6 +409,24 @@ impl ProjectCreationModal {
                 (self.selected_agent_idx + self.agent_list.len() - 1) % self.agent_list.len();
             self.revalidate();
         }
+    }
+
+    /// Synchronizes template selection and re-syncs state after a filter query modification or backtracking.
+    fn sync_selection_for_query(&mut self, target_template: Option<&str>) {
+        let matching = self.matching_template_indices();
+        self.selected_template_idx = if matching.is_empty() {
+            0
+        } else if let Some(target) = target_template {
+            matching
+                .iter()
+                .position(|&i| self.templates.get(i).map(String::as_str) == Some(target))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.sync_agent_with_template();
+        self.sync_repos_with_template();
+        self.revalidate();
     }
 
     /// Synchronizes the selected agent with the newly selected template's default agent.
@@ -1202,27 +1198,20 @@ impl ProjectCreationModal {
                     if !matching.is_empty() {
                         let target_idx =
                             matching[self.selected_template_idx.min(matching.len() - 1)];
+                        self.step = CreationStep::ConfigureDetails;
                         self.selected_template_idx = target_idx;
                         self.sync_agent_with_template();
                         self.sync_repos_with_template();
                         self.revalidate();
-                        self.step = CreationStep::ConfigureDetails;
                         self.focus = CreationFocus::ProjectName;
                     }
                     CreationModalAction::None
                 }
                 _ => {
+                    let prev_selected = self.selected_template().map(str::to_string);
                     let modified = self.template_search_query.handle_key(key);
-                    let matching = self.matching_template_indices();
-                    if matching.is_empty() {
-                        self.selected_template_idx = 0;
-                    } else if self.selected_template_idx >= matching.len() {
-                        self.selected_template_idx = matching.len() - 1;
-                    }
                     if modified {
-                        self.sync_agent_with_template();
-                        self.sync_repos_with_template();
-                        self.revalidate();
+                        self.sync_selection_for_query(prev_selected.as_deref());
                     }
                     CreationModalAction::None
                 }
@@ -1523,15 +1512,7 @@ impl ProjectCreationModal {
     pub fn handle_back_or_cancel(&mut self) -> CreationModalAction {
         let cur_tpl = self.selected_template().map(str::to_string);
         self.step = CreationStep::SelectTemplate;
-        let matching = self.matching_template_indices();
-        if let Some(tpl) = cur_tpl {
-            self.selected_template_idx = matching
-                .iter()
-                .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
-                .unwrap_or(0);
-        } else {
-            self.selected_template_idx = 0;
-        }
+        self.sync_selection_for_query(cur_tpl.as_deref());
         CreationModalAction::None
     }
 
@@ -1539,16 +1520,9 @@ impl ProjectCreationModal {
     pub fn handle_paste(&mut self, text: &str) {
         match self.step {
             CreationStep::SelectTemplate => {
+                let prev_selected = self.selected_template().map(str::to_string);
                 if self.template_search_query.insert_str(text) {
-                    let matching = self.matching_template_indices();
-                    if matching.is_empty() {
-                        self.selected_template_idx = 0;
-                    } else if self.selected_template_idx >= matching.len() {
-                        self.selected_template_idx = matching.len() - 1;
-                    }
-                    self.sync_agent_with_template();
-                    self.sync_repos_with_template();
-                    self.revalidate();
+                    self.sync_selection_for_query(prev_selected.as_deref());
                 }
             }
             CreationStep::ConfigureDetails => match self.focus {
@@ -2540,7 +2514,7 @@ mod tests {
     }
 
     #[test]
-    fn test_step1_search_filtering_by_name_description_and_repo_urls() {
+    fn test_step1_filtering_strictly_on_template_name() {
         let toml_str = r#"
             default_agent = "claude"
             repos_dir = ".repos"
@@ -2573,22 +2547,228 @@ mod tests {
         modal.template_search_query.set_value("ANALYTICS");
         assert_eq!(modal.matching_templates(), vec!["analytics".to_string()]);
 
-        // 3. Match against description "warehouse"
+        // 3. Match against description keyword "warehouse" -> must return 0 matches (filter on template name only)
         modal.template_search_query.set_value("warehouse");
-        assert_eq!(modal.matching_templates(), vec!["analytics".to_string()]);
+        assert!(modal.matching_templates().is_empty());
 
-        // 4. Match against repo URL "k8s-terraform"
+        // 4. Match against repo URL "k8s-terraform" -> must return 0 matches
         modal.template_search_query.set_value("k8s-terraform");
-        assert_eq!(modal.matching_templates(), vec!["infra".to_string()]);
+        assert!(modal.matching_templates().is_empty());
 
-        // 5. Match against derived repo name "shop-api"
+        // 5. Match against derived repo name "shop-api" -> must return 0 matches
         modal.template_search_query.set_value("shop-api");
-        assert_eq!(modal.matching_templates(), vec!["ecommerce".to_string()]);
+        assert!(modal.matching_templates().is_empty());
 
         // 6. Non-matching query
         modal.template_search_query.set_value("nonexistent-xyz");
         assert!(modal.matching_templates().is_empty());
         assert_eq!(modal.selected_template(), None);
+    }
+
+    #[test]
+    fn test_step1_selection_preservation_and_reset_to_top_hit() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.backend_admin]
+            repos = ["repo1"]
+            [templates.backend_worker]
+            repos = ["repo2"]
+            [templates.frontend_admin]
+            repos = ["repo3"]
+            [templates.frontend_app]
+            repos = ["repo4"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let cwd = temp_dir.path();
+
+        let mut modal = ProjectCreationModal::new(&config, cwd, None);
+        // Templates: ["backend_admin", "backend_worker", "frontend_admin", "frontend_app"]
+        assert_eq!(modal.selected_template(), Some("backend_admin"));
+
+        // Navigate down to "backend_worker" (index 1)
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.selected_template(), Some("backend_worker"));
+
+        // Type 'w' -> query is "w". Only "backend_worker" matches.
+        // Since "backend_worker" still matches, selection must be preserved.
+        modal.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(modal.template_search_query.value(), "w");
+        assert_eq!(modal.selected_template(), Some("backend_worker"));
+        assert_eq!(modal.selected_template_idx, 0);
+
+        // Type 'x' -> query is "wx". No matches.
+        modal.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(modal.template_search_query.value(), "wx");
+        assert_eq!(modal.matching_templates().len(), 0);
+        assert_eq!(modal.selected_template(), None);
+        assert_eq!(modal.selected_template_idx, 0);
+
+        // Backspace 'x' -> query is "w". Matches: ["backend_worker"].
+        modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(modal.template_search_query.value(), "w");
+        assert_eq!(modal.selected_template(), Some("backend_worker"));
+        assert_eq!(modal.selected_template_idx, 0);
+
+        // Backspace 'w' -> query is empty "".
+        // All 4 templates match. "backend_worker" is at index 1.
+        // Selection must be preserved!
+        modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(modal.template_search_query.value(), "");
+        assert_eq!(modal.selected_template(), Some("backend_worker"));
+        assert_eq!(modal.selected_template_idx, 1);
+
+        // Type 'f' -> query is "f". Matches: ["frontend_admin", "frontend_app"].
+        // "backend_worker" no longer matches, so selection resets to index 0 (top hit: frontend_admin).
+        modal.handle_key(key(KeyCode::Char('f')));
+        assert_eq!(modal.template_search_query.value(), "f");
+        assert_eq!(modal.selected_template(), Some("frontend_admin"));
+        assert_eq!(modal.selected_template_idx, 0);
+
+        // Navigate down to "frontend_app"
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.selected_template(), Some("frontend_app"));
+        assert_eq!(modal.selected_template_idx, 1);
+
+        // Backspace 'f' -> query is empty "".
+        // All 4 templates match. "frontend_app" is at index 3.
+        // Selection must be preserved!
+        modal.handle_key(key(KeyCode::Backspace));
+        assert_eq!(modal.template_search_query.value(), "");
+        assert_eq!(modal.selected_template(), Some("frontend_app"));
+        assert_eq!(modal.selected_template_idx, 3);
+
+        // Paste "worker" -> matches only "backend_worker".
+        // "frontend_app" does not match, so resets to index 0 of matching.
+        modal.handle_paste("worker");
+        assert_eq!(modal.template_search_query.value(), "worker");
+        assert_eq!(modal.selected_template(), Some("backend_worker"));
+        assert_eq!(modal.selected_template_idx, 0);
+
+        // Paste "xyz" -> query "workerxyz", no matches.
+        modal.handle_paste("xyz");
+        assert_eq!(modal.matching_templates().len(), 0);
+        assert_eq!(modal.selected_template_idx, 0);
+        assert_eq!(modal.selected_template(), None);
+    }
+
+    #[test]
+    fn test_step1_enter_picks_exact_selected_template() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.alpha]
+            repos = ["alpha-repo"]
+            default_agent = "agy"
+
+            [templates.beta]
+            repos = ["beta-repo"]
+            default_agent = "copilot"
+
+            [templates.gamma]
+            repos = ["gamma-repo"]
+            default_agent = "aider"
+
+            [templates.delta]
+            repos = ["delta-repo"]
+            default_agent = "claude"
+
+            [templates.echo]
+            repos = ["echo-repo"]
+            default_agent = "agy"
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let cwd = temp_dir.path();
+
+        // 1. Test picking hit 1 when filtered with multiple hits
+        let mut modal = ProjectCreationModal::new(&config, cwd, None);
+        // Sorted templates: alpha (0), beta (1), delta (2), echo (3), gamma (4)
+        // Filter by "e" -> matching names: "beta" (idx 1 in templates), "delta" (idx 2), "echo" (idx 3)
+        modal.handle_paste("e");
+        assert_eq!(
+            modal.matching_templates(),
+            vec!["beta".to_string(), "delta".to_string(), "echo".to_string()]
+        );
+        assert_eq!(modal.selected_template(), Some("beta"));
+
+        // Navigate down to "delta" (index 1 in matching, index 2 in templates)
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.selected_template_idx, 1);
+        assert_eq!(modal.selected_template(), Some("delta"));
+
+        // Press Enter to transition to Step 2
+        let act = modal.handle_key(key(KeyCode::Enter));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
+        assert_eq!(modal.selected_template(), Some("delta"));
+        assert_eq!(modal.selected_template_idx, 2); // Index in self.templates
+        assert_eq!(modal.selected_agent(), "claude");
+        assert_eq!(modal.selected_repo_names(), vec!["delta-repo".to_string()]);
+        assert_eq!(modal.focus, CreationFocus::ProjectName);
+
+        // 2. Test picking hit 2 ("echo", index 3 in templates)
+        let mut modal2 = ProjectCreationModal::new(&config, cwd, None);
+        modal2.handle_paste("e");
+        modal2.handle_key(key(KeyCode::Down)); // to delta (idx 1)
+        modal2.handle_key(key(KeyCode::Down)); // to echo (idx 2)
+        assert_eq!(modal2.selected_template_idx, 2);
+        assert_eq!(modal2.selected_template(), Some("echo"));
+
+        let act2 = modal2.handle_key(key(KeyCode::Enter));
+        assert_eq!(act2, CreationModalAction::None);
+        assert_eq!(modal2.step, CreationStep::ConfigureDetails);
+        assert_eq!(modal2.selected_template(), Some("echo"));
+        assert_eq!(modal2.selected_template_idx, 3);
+        assert_eq!(modal2.selected_agent(), "agy");
+        assert_eq!(modal2.selected_repo_names(), vec!["echo-repo".to_string()]);
+    }
+
+    #[test]
+    fn test_step2_backtrack_preserves_query_and_template_selection() {
+        let toml_str = r#"
+            default_agent = "claude"
+            repos_dir = ".repos"
+            [templates.alpha]
+            repos = ["alpha-repo"]
+
+            [templates.beta]
+            repos = ["beta-repo"]
+
+            [templates.gamma]
+            repos = ["gamma-repo"]
+        "#;
+        let config = Config::load_from_str(toml_str).unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let cwd = temp_dir.path();
+
+        let mut modal = ProjectCreationModal::new(&config, cwd, None);
+        // Type "a" -> all 3 templates match ("alpha", "beta", "gamma")
+        modal.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(modal.template_search_query.value(), "a");
+        assert_eq!(modal.matching_templates().len(), 3);
+
+        // Navigate to "beta" (index 1 in matching)
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.selected_template(), Some("beta"));
+        assert_eq!(modal.selected_template_idx, 1);
+
+        // Press Enter to advance to Step 2
+        modal.handle_key(key(KeyCode::Enter));
+        assert_eq!(modal.step, CreationStep::ConfigureDetails);
+        assert_eq!(modal.selected_template(), Some("beta"));
+
+        // Press Esc in Step 2 to backtrack to Step 1
+        let act = modal.handle_key(key(KeyCode::Esc));
+        assert_eq!(act, CreationModalAction::None);
+        assert_eq!(modal.step, CreationStep::SelectTemplate);
+
+        // Verify filter query is preserved intact
+        assert_eq!(modal.template_search_query.value(), "a");
+        // Verify template selection is preserved and highlighted at matching index 1
+        assert_eq!(modal.selected_template(), Some("beta"));
+        assert_eq!(modal.selected_template_idx, 1);
     }
 
     #[test]
@@ -3814,23 +3994,23 @@ mod tests {
         assert_eq!(modal.matching_templates().len(), 3);
 
         // 5. Up and Down arrows (and Ctrl+P / Ctrl+N, PageUp / PageDown) cycle templates without altering filter text or cursor
-        assert_eq!(modal.selected_template(), Some("alpha"));
-        modal.handle_key(key(KeyCode::Down));
         assert_eq!(modal.selected_template(), Some("beta"));
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.selected_template(), Some("gamma"));
         assert_eq!(modal.template_search_query.value(), "");
         assert_eq!(modal.template_search_query.cursor(), 0);
 
         modal.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!(modal.selected_template(), Some("gamma"));
-
-        modal.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(modal.selected_template(), Some("beta"));
-
-        modal.handle_key(key(KeyCode::PageUp));
         assert_eq!(modal.selected_template(), Some("alpha"));
 
-        modal.handle_key(key(KeyCode::PageDown));
+        modal.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(modal.selected_template(), Some("gamma"));
+
+        modal.handle_key(key(KeyCode::PageUp));
         assert_eq!(modal.selected_template(), Some("beta"));
+
+        modal.handle_key(key(KeyCode::PageDown));
+        assert_eq!(modal.selected_template(), Some("gamma"));
 
         // 6. Word navigation and readline shortcuts: Ctrl+Left / Alt+B, Ctrl+Right / Alt+F, Ctrl+W, Ctrl+K
         modal.template_search_query.set_value("alpha beta gamma");
@@ -4139,11 +4319,8 @@ mod tests {
 
         // Wait for background validation to detect collision
         let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(300) {
+        while modal.validation.is_valid && start.elapsed() < std::time::Duration::from_secs(5) {
             modal.poll_validation();
-            if !modal.validation.is_valid {
-                break;
-            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
@@ -4165,7 +4342,7 @@ mod tests {
 
         // Wait for revalidation without repo_b
         let start = std::time::Instant::now();
-        while start.elapsed() < std::time::Duration::from_millis(300) {
+        while !modal.validation.is_valid && start.elapsed() < std::time::Duration::from_secs(5) {
             modal.poll_validation();
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
