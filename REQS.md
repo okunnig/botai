@@ -516,50 +516,57 @@ env = { PORT = "8080", NODE_ENV = "development" }
          - *Query Changes (typing, backspacing, pasting)*: If the currently selected template is still among the matching results, preserve its selection; otherwise reset selection to index 0 (top hit).
          - *On Enter in Step 1*: Transitions to Step 2 (`ConfigureDetails`) cleanly with the chosen template without double-indexing into matching indices.
          - *On Esc in Step 2*: Backtracks to Step 1 preserving the filter query and highlighting the active template in the matching list.
-       - **Master-Detail Split Layout**:
+       - **Master-Detail Split Layout & Dual-Pane Focus**:
+         - *Focus Toggling*: Step 1 maintains dual-pane focus (`Step1Focus::TemplateList` vs `Step1Focus::Preview`), toggled via `Tab` / `Shift+Tab`.
+         - *Border & Title Styling*: The active pane is highlighted with `theme.border_focused` and bold title; the inactive pane uses `theme.border_unfocused`.
          - *Left Panel*: Filtered template list with active selection indicator (` > `) and matching template count.
-          - *Right Preview Pane*: Live preview of the highlighted template:
-            - Description, repository count, default agent CLI, and custom instructions.
-            - **Default vs Optional Repositories Preview**: Lists constituent repositories indicating inclusion status: default repositories are rendered normally (e.g. `• <name>`), while optional opt-in repositories (`default = false`) are explicitly badged with `[optional]`.
-        - **Controls**: `Up`/`Down` and `Ctrl+P`/`Ctrl+N` (navigate template list), text typing and readline shortcuts (edit search query), `Enter` selects template and advances to Step 2, `Esc` cancels/closes modal.
-        - **Consistent Template Selection & Preview (No Single-Template Bypass)**: Regardless of template count (even when only one template is configured), the creation modal always begins in Step 1 (`CreationStep::SelectTemplate`) to ensure uniform visibility of template descriptions, repository sources, and configuration. When only a single template exists, it is automatically highlighted and pre-selected so the user can immediately review its preview and press `Enter` to advance.
-        - **Empty-State Presentation**: If zero templates are configured in `config.toml`, Step 1 renders a helpful empty-state preview card: `"No templates found in config.toml. Run 'botai edit' to configure templates."` with `Esc` to cancel.
+         - *Right Preview Pane*: Live preview of the highlighted template divided into pinned metadata and a vertically scrollable content viewport:
+           - **Pinned Header**: Template name, description, and default agent CLI stay permanently visible at the top of the preview pane.
+           - **Scrollable Viewport & Custom Instructions**: Beneath the pinned header, the repository count header (`Repositories (N):`), constituent repository bullets (`  • <name>`), and custom instructions (`Custom Instructions:` from `agents_md_append`) render inside a scrollable viewport with a vertical Ratatui `Scrollbar` indicator (track and thumb).
+           - **Default vs Optional Repositories**: Lists constituent repositories indicating inclusion status: default repositories are rendered normally (e.g. `• <name>`), while optional opt-in repositories (`default = false`) are explicitly badged with `[optional]`.
+           - **Automatic Scroll Reset**: Selecting or cycling a different template immediately resets the preview scroll offset to `0`.
+       - **Controls**:
+         - *When Template List Focused*: Typing / readline keys update search filter; `Up`/`Down` and `Ctrl+P`/`Ctrl+N` cycle templates; `Enter` advances to Step 2; `Esc` cancels/closes modal.
+         - *When Preview Pane Focused*: `Up`/`Down` (and `k`/`j`) scroll content by 1 row; `PageUp`/`PageDown` scroll by visible page height; `Home`/`End` jump to top/bottom; `Enter` advances to Step 2; `Esc` cancels/closes modal.
+         - *Footer Hints*: Dynamically indicate available keys based on the active pane (e.g., `[Tab] Preview` vs `[Tab] Templates`).
+       - **Consistent Template Selection & Preview (No Single-Template Bypass)**: Regardless of template count (even when only one template is configured), the creation modal always begins in Step 1 (`CreationStep::SelectTemplate`) to ensure uniform visibility of template descriptions, repository sources, and configuration. When only a single template exists, it is automatically highlighted and pre-selected so the user can immediately review its preview and press `Enter` to advance.
+       - **Empty-State Presentation**: If zero templates are configured in `config.toml`, Step 1 renders a helpful empty-state preview card: `"No templates found in config.toml. Run 'botai edit' to configure templates."` with `Esc` to cancel.
     2. **Step 2: Project Details & Configuration (`CreationStep::ConfigureDetails`)**:
        - **Modal Header**: Displays step progress and selected template name (`Create New Project (Template: <name>)`).
-        - **Form Fields**:
-          - `Project Name:` Editable one-line text input powered by the reusable `TextInput` widget component with:
-            - **In-Line Cursor Navigation**: `Left` / `Right` arrows exclusively move the cursor character-by-character within the text without transitioning field focus.
-            - **Standard Readline Keybindings**:
-              - `Ctrl+A` / `Home`: Move cursor to the beginning of the project name.
-              - `Ctrl+E` / `End`: Move cursor to the end of the project name.
-              - `Backspace`: Delete character before the cursor.
-              - `Delete`: Delete character under the cursor.
-              - `Ctrl+U`: Delete from cursor to the beginning of the line.
-              - `Ctrl+K`: Delete from cursor to the end of the line.
-              - `Ctrl+W`: Delete the word immediately preceding the cursor.
-              - `Ctrl+Left` / `Alt+B`: Move cursor backward one word.
-              - `Ctrl+Right` / `Alt+F`: Move cursor forward one word.
-            - **Field Navigation Isolation**: Focus switching is handled exclusively by `Tab` / `Shift+Tab` or `Up` / `Down` arrows.
-            - **Paste Handling**: Sanitizes pasted text by stripping newlines and inserting content at the current cursor position.
-            - **Accurate Terminal Hardware Cursor**: Positions the terminal cursor at the exact column offset matching the current cursor position.
-            - **Real-Time Pre-Validation Badges**: Dynamically displays `[✓ Ready]`, `[✗ Collision]`, or `[Required]`.
-          - `Agent CLI:` Interactive tool selector (`claude`, `agy`, `copilot`, `aider`, etc. cycled via `Left`/`Right`).
-          - `Repositories:` Interactive repository selection checklist:
-            - **Header & Counter**: Displays `Repositories (<selected_count>/<total_count> selected):` with dynamic scroll indicator badges (`▲` if scrolled down, `▼` if more items exist below).
-            - **Item Presentation**: Each repository item displays an active pointer indicator (`▶ ` for the highlighted item, `  ` otherwise), checkbox state (`[x]` for included/selected, `[ ]` for excluded/unselected), repository name (bold when selected, dimmed when unselected), and an ` (optional)` tag for repositories configured with `default = false`.
-            - **Initial State**: Automatically pre-populated when selecting or changing templates based on template repository configurations: repositories with `default = true` (or string syntax) are pre-checked `[x]`, and repositories with `default = false` are pre-unchecked `[ ]`.
-            - **Navigation & Focus Cycle**: Integrated into the Step 2 field focus cycle (`Project Name` -> `Agent CLI` -> `Repositories` -> `Initial Prompt`), navigated using `Tab` / `Shift+Tab`. When `Repositories` is focused:
-              - `Up` / `Down` arrows or `k` / `j` move the highlighted item up and down through the checklist.
-              - Navigating `Up` / `k` past the top repository transitions focus to `Agent CLI`.
-              - Navigating `Down` / `j` past the bottom repository transitions focus to `Initial Prompt`.
-              - Mouse wheel scrolling up and down inside the repository list scrolls the checklist item selection.
-            - **Selection Controls**:
-              - `Space`: Toggles the inclusion state of the currently highlighted repository.
-              - `a` / `A`: Bulk toggles all repositories (deselects all if all are currently selected; otherwise selects all).
-            - **Scrollable Viewport**: Constrained to a visible height of up to 3 items (`REPOS_VISIBLE_ROWS = 3`). When repository count exceeds 3, the viewport scrolls smoothly to keep the active item visible, accompanied by `▲` / `▼` indicators.
-            - **Real-Time Pre-Validation**: Continuously validates repository selection:
-              - Fast synchronous validation: If zero repositories are selected, immediately marks the modal invalid with `"At least one repository must be selected"` and blocks form submission (`Enter`).
-              - Asynchronous branch collision validation: Passes only currently selected repositories (`with_selected_repos(selected_repos)`) to `ProjectBuilder::pre_validate()`, ensuring that branch collisions in unselected/deselected repositories do not block project creation.
+       - **Form Fields**:
+         - `Project Name:` Editable one-line text input powered by the reusable `TextInput` widget component with:
+           - **In-Line Cursor Navigation**: `Left` / `Right` arrows exclusively move the cursor character-by-character within the text without transitioning field focus.
+           - **Standard Readline Keybindings**:
+             - `Ctrl+A` / `Home`: Move cursor to the beginning of the project name.
+             - `Ctrl+E` / `End`: Move cursor to the end of the project name.
+             - `Backspace`: Delete character before the cursor.
+             - `Delete`: Delete character under the cursor.
+             - `Ctrl+U`: Delete from cursor to the beginning of the line.
+             - `Ctrl+K`: Delete from cursor to the end of the line.
+             - `Ctrl+W`: Delete the word immediately preceding the cursor.
+             - `Ctrl+Left` / `Alt+B`: Move cursor backward one word.
+             - `Ctrl+Right` / `Alt+F`: Move cursor forward one word.
+           - **Field Navigation Isolation**: Focus switching is handled exclusively by `Tab` / `Shift+Tab` or `Up` / `Down` arrows.
+           - **Paste Handling**: Sanitizes pasted text by stripping newlines and inserting content at the current cursor position.
+           - **Accurate Terminal Hardware Cursor**: Positions the terminal cursor at the exact column offset matching the current cursor position.
+           - **Real-Time Pre-Validation Badges**: Dynamically displays `[✓ Ready]`, `[✗ Collision]`, or `[Required]`.
+         - `Agent CLI:` Interactive tool selector (`claude`, `agy`, `copilot`, `aider`, etc. cycled via `Left`/`Right`).
+         - `Repositories:` Interactive repository selection checklist:
+           - **Header & Counter**: Displays `Repositories (<selected_count>/<total_count> selected • item <highlighted_idx+1>/<total_count>):` with dynamic scroll indicator badges (`▲` if scrolled down, `▼` if more items exist below).
+           - **Item Presentation**: Each repository item displays an active pointer indicator (`▶ ` for the highlighted item, `  ` otherwise), checkbox state (`[x]` for included/selected, `[ ]` for excluded/unselected), repository name (bold when selected, dimmed when unselected), and an ` (optional)` tag for repositories configured with `default = false`.
+           - **Initial State**: Automatically pre-populated when selecting or changing templates based on template repository configurations: repositories with `default = true` (or string syntax) are pre-checked `[x]`, and repositories with `default = false` are pre-unchecked `[ ]`.
+           - **Navigation & Boundary Isolation**: Integrated into the Step 2 field focus cycle (`Project Name` -> `Agent CLI` -> `Repositories` -> `Initial Prompt`), navigated using `Tab` / `Shift+Tab`. When `Repositories` is focused:
+             - `Up` / `Down` arrows or `k` / `j` move the highlighted item up and down through the checklist.
+             - **Boundary Focus Isolation**: Pressing `Up` / `k` on the first repository clamps at the top (does not eject focus to `Agent CLI`). Pressing `Down` / `j` on the last repository clamps at the bottom (does not eject focus to `Initial Prompt`). Field transitions are performed cleanly via `Tab` / `Shift+Tab`.
+             - **Fast Navigation**: `PageUp` / `PageDown` jump selection by visible page height (`REPOS_VISIBLE_ROWS`); `Home` / `End` jump selection directly to the first / last repository.
+             - Mouse wheel scrolling up and down inside the repository list scrolls the checklist item selection.
+           - **Selection Controls**:
+             - `Space`: Toggles the inclusion state of the currently highlighted repository.
+             - `a` / `A`: Bulk toggles all repositories (deselects all if all are currently selected; otherwise selects all).
+           - **Expanded Scrollable Viewport**: Height of 6 items (`REPOS_VISIBLE_ROWS = 6`). When repository count exceeds 6, the viewport scrolls smoothly to keep the active item visible, accompanied by `▲` / `▼` indicators and position tracking in the header.
+           - **Real-Time Pre-Validation**: Continuously validates repository selection:
+             - Fast synchronous validation: If zero repositories are selected, immediately marks the modal invalid with `"At least one repository must be selected"` and blocks form submission (`Enter`).
+             - Asynchronous branch collision validation: Passes only currently selected repositories (`with_selected_repos(selected_repos)`) to `ProjectBuilder::pre_validate()`, ensuring that branch collisions in unselected/deselected repositories do not block project creation.
           - `Initial Prompt:` Optional task instruction prompt rendered in a dedicated multi-line box (3–4 visible lines) with:
             - **Word Wrapping & Sizing**: Automatic line wrapping according to available modal width, preserving line breaks.
             - **Internal Vertical Scrolling**: Automatic vertical scrolling keeping the active line and cursor in view when text exceeds visible lines.
