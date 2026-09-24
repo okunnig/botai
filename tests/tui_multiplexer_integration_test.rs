@@ -1222,3 +1222,71 @@ fn test_integration_escape_timeout_in_run_loop_with_receiver() {
     assert!(!app.raw_decoder.has_pending());
     assert!(app.pending_raw_input.is_empty());
 }
+
+#[test]
+fn test_integration_run_loop_with_receiver_conditional_redraw_and_wakeup_pulses() {
+    use botai::session::PtyWaker;
+    use botai::tui::app::TuiApp;
+    use ratatui::backend::TestBackend;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "more"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "cat"]);
+
+    let mut registry = SessionRegistry::new();
+    let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+    let pty = PtySession::spawn(config).unwrap();
+    let vt = VtScreen::new(80, 24);
+    let mut ps = ProjectSession::new("pulse-test", "ws", "claude");
+    ps.set_status(SessionStatus::WaitingForInput);
+    registry.add(ps, pty, vt).unwrap();
+
+    let mut app = TuiApp::new(registry);
+    app.tick_rate = Duration::from_millis(50);
+
+    let (stdin_tx, stdin_rx) = mpsc::channel();
+
+    // Set up waker that counts invocations and sends empty wake-up pulses to stdin_tx
+    let wake_count = Arc::new(AtomicUsize::new(0));
+    let wake_count_clone = Arc::clone(&wake_count);
+    let waker_tx = stdin_tx.clone();
+    let waker: PtyWaker = Arc::new(move || {
+        wake_count_clone.fetch_add(1, Ordering::SeqCst);
+        let _ = waker_tx.send(Vec::new());
+    });
+    app.registry.set_waker(waker);
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Send a standalone empty wake-up pulse directly into stdin channel
+    stdin_tx.send(Vec::new()).unwrap();
+
+    // Spawn thread to send input bytes to active session, triggering PTY output, then quit
+    let tx_clone = stdin_tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = tx_clone.send(b"pty_pulse_output\n".to_vec());
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = tx_clone.send(vec![0x00, b'q']);
+    });
+
+    app.run_loop_with_receiver(&mut terminal, &stdin_rx)
+        .unwrap();
+
+    assert!(app.should_quit);
+    // Verify waker was called on PTY output
+    assert!(wake_count.load(Ordering::SeqCst) > 0);
+    // Verify VT screen received the child output
+    let output = app.registry.active_session().unwrap().vt().contents();
+    assert!(
+        output.contains("pty_pulse_output"),
+        "Expected VT screen to contain 'pty_pulse_output', got: {output}"
+    );
+}

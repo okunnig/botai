@@ -3,6 +3,7 @@ use std::env;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -29,7 +30,7 @@ use crate::config::{Config, ConfigError};
 use crate::notify::NotificationService;
 use crate::project::ProjectBuilder;
 use crate::session::{
-    ProjectSession, PtyConfig, PtySession, SessionRegistry, SessionStatus, VtScreen,
+    ProjectSession, PtyConfig, PtySession, PtyWaker, SessionRegistry, SessionStatus, VtScreen,
 };
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
 use crate::tui::dashboard::{
@@ -494,6 +495,12 @@ impl TuiApp {
         B::Error: std::fmt::Display,
     {
         let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let waker_tx = stdin_tx.clone();
+        let waker: PtyWaker = Arc::new(move || {
+            let _ = waker_tx.send(Vec::new());
+        });
+        self.registry.set_waker(waker);
+
         std::thread::spawn(move || {
             use std::io::Read;
             let mut stdin = std::io::stdin().lock();
@@ -524,6 +531,7 @@ impl TuiApp {
         B::Error: std::fmt::Display,
     {
         let mut last_tick = Instant::now();
+        let mut dirty = true;
 
         // Query initial terminal viewport size and synchronize sessions
         let initial_size = terminal
@@ -552,95 +560,114 @@ impl TuiApp {
             if self.viewport_size != Some((term_area.width, term_area.height)) {
                 self.viewport_size = Some((term_area.width, term_area.height));
                 self.resize_all_sessions(term_area.width, term_area.height);
+                dirty = true;
             }
 
             // 1. Poll setup progress events and modal validation
-            self.poll_setup_progress();
-            self.poll_destroy_progress();
+            if self.poll_setup_progress() {
+                dirty = true;
+            }
+            if self.poll_destroy_progress() {
+                dirty = true;
+            }
             if let Some(dashboard) = &mut self.dashboard {
-                dashboard.poll_validation();
+                if dashboard.poll_validation() {
+                    dirty = true;
+                }
             }
             if let Some(modal) = &mut self.creation_modal {
-                modal.poll_validation();
+                if modal.poll_validation() {
+                    dirty = true;
+                }
             }
 
             // 2. Process PTY outputs for all sessions
-            self.process_pty_streams();
-
-            // Synchronize running sessions on dashboard
-            let running = self.running_sessions_map();
-            if let Some(dashboard) = &mut self.dashboard {
-                dashboard.set_running_sessions(running);
+            if self.process_pty_streams() {
+                dirty = true;
             }
 
-            // 3. Draw active frame
-            let theme = self.config.as_ref().map(|c| c.theme()).unwrap_or_default();
-            terminal
-                .draw(|f| {
-                    let (status_area, term_area) = compute_layout(f.area());
+            // Synchronize running sessions on dashboard
+            if self.is_showing_dashboard() && dirty {
+                let running = self.running_sessions_map();
+                if let Some(dashboard) = &mut self.dashboard {
+                    dashboard.set_running_sessions(running);
+                }
+            }
 
-                    if self.is_showing_dashboard() {
-                        if let Some(dashboard) = &self.dashboard {
-                            render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
-                            if let Some(pos) = dashboard.cursor_position(f.area()) {
-                                f.set_cursor_position(pos);
+            // 3. Draw active frame conditionally
+            if dirty {
+                let theme = self.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                terminal
+                    .draw(|f| {
+                        let (status_area, term_area) = compute_layout(f.area());
+
+                        if self.is_showing_dashboard() {
+                            if let Some(dashboard) = &self.dashboard {
+                                render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
+                                if let Some(pos) = dashboard.cursor_position(f.area()) {
+                                    f.set_cursor_position(pos);
+                                }
                             }
-                        }
-                    } else {
-                        f.render_widget(
-                            StatusBar::new(&self.registry)
-                                .with_leader(self.leader_active)
-                                .with_theme(&theme),
-                            status_area,
-                        );
+                        } else {
+                            f.render_widget(
+                                StatusBar::new(&self.registry)
+                                    .with_leader(self.leader_active)
+                                    .with_theme(&theme),
+                                status_area,
+                            );
 
-                        if let Some(active) = self.registry.active_session() {
-                            f.render_widget(TerminalView::new(active.vt()), term_area);
+                            if let Some(active) = self.registry.active_session() {
+                                f.render_widget(TerminalView::new(active.vt()), term_area);
 
-                            if active.status() == SessionStatus::Error {
-                                render_error_banner(
-                                    active.project_session.exit_code,
-                                    term_area,
-                                    f.buffer_mut(),
-                                    &theme,
-                                );
-                            } else if !active.vt().hide_cursor() && active.vt().scrollback() == 0 {
-                                let (col, row) = active.vt().cursor_position();
-                                if col < term_area.width && row < term_area.height {
-                                    f.set_cursor_position(ratatui::layout::Position::new(
-                                        term_area.x + col,
-                                        term_area.y + row,
-                                    ));
+                                if active.status() == SessionStatus::Error {
+                                    render_error_banner(
+                                        active.project_session.exit_code,
+                                        term_area,
+                                        f.buffer_mut(),
+                                        &theme,
+                                    );
+                                } else if !active.vt().hide_cursor()
+                                    && active.vt().scrollback() == 0
+                                {
+                                    let (col, row) = active.vt().cursor_position();
+                                    if col < term_area.width && row < term_area.height {
+                                        f.set_cursor_position(ratatui::layout::Position::new(
+                                            term_area.x + col,
+                                            term_area.y + row,
+                                        ));
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if let Some(modal) = &self.creation_modal {
-                        modal.render_modal(f.area(), f.buffer_mut(), &theme);
-                        if let Some(pos) = modal.cursor_position(f.area()) {
-                            f.set_cursor_position(pos);
+                        if let Some(modal) = &self.creation_modal {
+                            modal.render_modal(f.area(), f.buffer_mut(), &theme);
+                            if let Some(pos) = modal.cursor_position(f.area()) {
+                                f.set_cursor_position(pos);
+                            }
                         }
-                    }
 
-                    if let Some(setup_modal) = &self.setup_modal {
-                        render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
-                    }
+                        if let Some(setup_modal) = &self.setup_modal {
+                            render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
+                        }
 
-                    if let Some(destroy_modal) = &self.destroy_modal {
-                        render_destroy_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
-                    }
+                        if let Some(destroy_modal) = &self.destroy_modal {
+                            render_destroy_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
+                        }
 
-                    if let Some(destroy_modal) = &self.destroy_progress_modal {
-                        render_destroy_progress_modal(
-                            destroy_modal,
-                            f.area(),
-                            f.buffer_mut(),
-                            &theme,
-                        );
-                    }
-                })
-                .map_err(|e| io::Error::other(e.to_string()))?;
+                        if let Some(destroy_modal) = &self.destroy_progress_modal {
+                            render_destroy_progress_modal(
+                                destroy_modal,
+                                f.area(),
+                                f.buffer_mut(),
+                                &theme,
+                            );
+                        }
+                    })
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+
+                dirty = false;
+            }
 
             // 4. Handle raw input bytes with timeout up to tick_rate
             let timeout = self.tick_rate.saturating_sub(last_tick.elapsed());
@@ -650,10 +677,15 @@ impl TuiApp {
                     while let Ok(more) = stdin_rx.try_recv() {
                         all_bytes.extend(more);
                     }
-                    self.handle_input_bytes(&all_bytes);
+                    if !all_bytes.is_empty() {
+                        self.handle_input_bytes(&all_bytes);
+                        dirty = true;
+                    }
                 }
                 Err(_) => {
-                    self.flush_pending_input();
+                    if self.flush_pending_input() {
+                        dirty = true;
+                    }
                 }
             }
 
@@ -720,7 +752,9 @@ impl TuiApp {
     }
 
     /// Reads output bytes from all running PTY sessions into their respective VT screens.
-    pub fn process_pty_streams(&mut self) {
+    /// Returns `true` if any bytes were processed, status changed, or sessions exited (indicating UI state mutated).
+    pub fn process_pty_streams(&mut self) -> bool {
+        let mut changed = false;
         let now = Instant::now();
         let mut clean_exits = Vec::new();
 
@@ -735,9 +769,11 @@ impl TuiApp {
             let session_id = session.id().to_string();
             let is_active_focused =
                 is_focused_mode && active_session_id.as_deref() == Some(&session_id);
+            let prev_status = session.project_session.status;
 
             if let Ok(bytes) = session.pty_mut().read_nonblocking() {
                 if !bytes.is_empty() {
+                    changed = true;
                     session.vt_mut().process(&bytes);
                     let notifs = session.tracker.process_bytes(&bytes);
                     session.project_session.set_status(session.tracker.status());
@@ -753,20 +789,23 @@ impl TuiApp {
                 }
             }
 
-            let is_alive = session.pty_mut().is_alive();
-            let exit_code = session
-                .pty_mut()
-                .try_wait()
-                .ok()
-                .flatten()
-                .and_then(|s| s.code.map(|c| c as i32));
+            let exit_status = session.pty_mut().try_wait().ok().flatten();
+            let is_alive = exit_status.is_none();
+            let exit_code = exit_status.and_then(|s| s.code.map(|c| c as i32));
 
             if let Some(code) = exit_code {
-                session.project_session.exit_code = Some(code as u32);
+                if session.project_session.exit_code != Some(code as u32) {
+                    session.project_session.exit_code = Some(code as u32);
+                    changed = true;
+                }
             }
 
             let (status, notif, _) = session.tracker.evaluate(is_alive, exit_code, now);
             session.project_session.set_status(status);
+
+            if session.project_session.status != prev_status {
+                changed = true;
+            }
 
             if let Some(mut event) = notif {
                 event.set_project_name(session.project_name());
@@ -780,15 +819,21 @@ impl TuiApp {
             if !is_alive {
                 if exit_code == Some(0) {
                     clean_exits.push(session.id().to_string());
-                } else {
+                } else if session.project_session.status != SessionStatus::Error {
                     session.project_session.set_status(SessionStatus::Error);
+                    changed = true;
                 }
             }
         }
 
-        for id in clean_exits {
-            self.close_session(&id);
+        if !clean_exits.is_empty() {
+            changed = true;
+            for id in clean_exits {
+                self.close_session(&id);
+            }
         }
+
+        changed
     }
 
     /// Opens the in-session project creation modal, reloading potentially updated configuration first.
@@ -934,17 +979,32 @@ impl TuiApp {
     }
 
     /// Polls setup modal events (if any) and adds newly created project sessions to registry upon completion.
-    pub fn poll_setup_progress(&mut self) {
+    /// Returns `true` if setup progress, logs, or sessions changed.
+    pub fn poll_setup_progress(&mut self) -> bool {
+        let mut changed = false;
         if let Some(modal) = &mut self.setup_modal {
+            let was_finished = modal.is_finished;
+            let old_logs = modal.logs.len();
+            let old_step = modal.current_step;
             modal.tick();
+            if !was_finished {
+                changed = true;
+            }
             if let Some((ps, pty, vt)) = modal.poll_events() {
                 let _ = self.registry.add(ps, pty, vt);
                 let new_idx = self.registry.len().saturating_sub(1);
                 let _ = self.registry.set_active_index(new_idx);
                 self.setup_modal = None;
                 self.showing_dashboard = false;
+                changed = true;
+            } else if modal.logs.len() != old_logs
+                || modal.current_step != old_step
+                || modal.is_finished != was_finished
+            {
+                changed = true;
             }
         }
+        changed
     }
 
     /// Handles keyboard events when the setup modal is active.
@@ -967,11 +1027,26 @@ impl TuiApp {
     }
 
     /// Polls destruction progress events and advances modal spinner animation.
-    pub fn poll_destroy_progress(&mut self) {
+    /// Returns `true` if destruction progress or logs changed.
+    pub fn poll_destroy_progress(&mut self) -> bool {
+        let mut changed = false;
         if let Some(modal) = &mut self.destroy_progress_modal {
+            let was_finished = modal.is_finished;
+            let old_logs = modal.logs.len();
+            let old_step = modal.current_step;
             modal.tick();
+            if !was_finished {
+                changed = true;
+            }
             modal.poll_events();
+            if modal.logs.len() != old_logs
+                || modal.current_step != old_step
+                || modal.is_finished != was_finished
+            {
+                changed = true;
+            }
         }
+        changed
     }
 
     /// Handles keyboard events when the in-session destroy confirmation modal is active.
@@ -1413,15 +1488,19 @@ impl TuiApp {
     }
 
     /// Flushes pending incomplete raw input bytes and raw escape sequences when timeout expires.
-    pub fn flush_pending_input(&mut self) {
-        if !self.pending_raw_input.is_empty() {
+    /// Returns `true` if any pending input or actions were flushed.
+    pub fn flush_pending_input(&mut self) -> bool {
+        let had_pending = !self.pending_raw_input.is_empty();
+        if had_pending {
             let pending = std::mem::take(&mut self.pending_raw_input);
             self.process_non_mouse_bytes(&pending);
         }
         let actions = self.raw_decoder.flush();
+        let had_actions = !actions.is_empty();
         for action in actions {
             self.handle_raw_action(action);
         }
+        had_pending || had_actions
     }
 
     /// Forwards pasted text to the creation modal if active.
@@ -3922,5 +4001,35 @@ repos = []
         let app_cfg = app.config.as_ref().expect("app config must exist");
         assert!(app_cfg.templates.contains_key("added_template"));
         assert!(app_cfg.templates.contains_key("initial_template"));
+    }
+
+    #[test]
+    fn test_consolidated_pty_polling_process_exit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 42"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 42"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("test_exit", "ws", "mock");
+        let session_id = ps.id.clone();
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        wait_for(&mut app, |a| {
+            a.registry
+                .get(&session_id)
+                .map(|s| s.project_session.exit_code == Some(42))
+                .unwrap_or(false)
+        });
+
+        let s = app.registry.get(&session_id).expect("session exists");
+        assert_eq!(s.project_session.exit_code, Some(42));
+        assert_eq!(s.project_session.status, SessionStatus::Error);
     }
 }

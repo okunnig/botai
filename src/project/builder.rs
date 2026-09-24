@@ -132,7 +132,7 @@ impl ProjectValidation {
 
 /// Unified builder pipeline for multi-repo project creation, worktree orchestration,
 /// context generation, and PTY process spawning.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectBuilder {
     pub config: Config,
     pub template_name: String,
@@ -485,26 +485,53 @@ impl ProjectBuilder {
                 message: "Cloning and updating repositories...".to_string(),
             });
 
-            for repo in &resolved_repos {
-                if !repo.exists_locally() {
-                    if let Some(url) = &repo.clone_url {
-                        progress_sink(ProjectSetupEvent::Log(format!(
-                            "[2/4] Cloning repository '{}' from {}...",
-                            repo.name, url
-                        )));
-                        crate::git::clone_repo(url, &repo.local_path)?;
-                    } else {
-                        anyhow::bail!(
-                            "Repository '{}' does not exist locally and has no remote URL configured",
-                            repo.name
-                        );
+            if !resolved_repos.is_empty() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let mut errors = Vec::new();
+
+                std::thread::scope(|s| {
+                    for repo in &resolved_repos {
+                        let thread_tx = tx.clone();
+                        s.spawn(move || {
+                            if !repo.exists_locally() {
+                                if let Some(url) = &repo.clone_url {
+                                    let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
+                                        "[2/4] Cloning repository '{}' from {}...",
+                                        repo.name, url
+                                    )));
+                                    if let Err(err) = crate::git::clone_repo(url, &repo.local_path) {
+                                        let _ = thread_tx.send(ProjectSetupEvent::Error(format!(
+                                            "Failed to clone repository '{}': {}",
+                                            repo.name, err
+                                        )));
+                                    }
+                                } else {
+                                    let _ = thread_tx.send(ProjectSetupEvent::Error(format!(
+                                        "Repository '{}' does not exist locally and has no remote URL configured",
+                                        repo.name
+                                    )));
+                                }
+                            } else {
+                                let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
+                                    "[2/4] Fetching latest updates for repository '{}'...",
+                                    repo.name
+                                )));
+                                let _ = crate::git::fetch_repo(&repo.local_path);
+                            }
+                        });
                     }
-                } else {
-                    progress_sink(ProjectSetupEvent::Log(format!(
-                        "[2/4] Fetching latest updates for repository '{}'...",
-                        repo.name
-                    )));
-                    let _ = crate::git::fetch_repo(&repo.local_path);
+
+                    drop(tx);
+                    while let Ok(event) = rx.recv() {
+                        if let ProjectSetupEvent::Error(ref err) = event {
+                            errors.push(err.clone());
+                        }
+                        progress_sink(event);
+                    }
+                });
+
+                if !errors.is_empty() {
+                    anyhow::bail!("{}", errors.join("; "));
                 }
             }
 
@@ -2643,6 +2670,238 @@ mod tests {
         assert_eq!(
             fast_val.primary_message(),
             Some("At least one repository must be selected")
+        );
+    }
+
+    #[test]
+    fn test_step2_parallel_cloning_and_fetching() {
+        let temp_dir = TempDir::new().unwrap();
+        let upstream1 = temp_dir.path().join("upstream1");
+        create_mock_git_repo(&upstream1);
+
+        let upstream2 = temp_dir.path().join("upstream2");
+        create_mock_git_repo(&upstream2);
+
+        let local_repo = temp_dir.path().join("local_repo");
+        create_mock_git_repo(&local_repo);
+
+        let repos_dir = temp_dir.path().join("cached_repos");
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.parallel_tpl]
+            description = "Parallel cloning test template"
+            repos = [
+                "file://{}",
+                "file://{}",
+                "{}"
+            ]
+            "#,
+            toml_path(&repos_dir),
+            toml_path(&upstream1),
+            toml_path(&upstream2),
+            toml_path(&local_repo)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let builder =
+            ProjectBuilder::new(config, "parallel_tpl", "parallel-proj").with_cwd(&project_cwd);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let (project_dir, mappings) = builder
+            .create_workspace(move |event| {
+                events_clone.lock().unwrap().push(event);
+            })
+            .expect("create_workspace should succeed with parallel clone and fetch");
+
+        assert_eq!(mappings.len(), 3);
+        assert!(project_dir.join("upstream1").exists());
+        assert!(project_dir.join("upstream2").exists());
+        assert!(project_dir.join("local_repo").exists());
+
+        // Verify cached repos were cloned into repos_dir
+        assert!(repos_dir.join("upstream1").join("README.md").exists());
+        assert!(repos_dir.join("upstream2").join("README.md").exists());
+
+        // Verify events logged
+        let evs = events.lock().unwrap();
+        let log_messages: Vec<String> = evs
+            .iter()
+            .filter_map(|e| match e {
+                ProjectSetupEvent::Log(msg) => Some(msg.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            log_messages
+                .iter()
+                .any(|m| m.contains("Cloning repository 'upstream1'")),
+            "Expected cloning log for upstream1"
+        );
+        assert!(
+            log_messages
+                .iter()
+                .any(|m| m.contains("Cloning repository 'upstream2'")),
+            "Expected cloning log for upstream2"
+        );
+        assert!(
+            log_messages
+                .iter()
+                .any(|m| m.contains("Fetching latest updates for repository 'local_repo'")),
+            "Expected fetch log for local_repo"
+        );
+    }
+
+    #[test]
+    fn test_step2_missing_repo_without_url_error_propagation() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.missing_tpl]
+            repos = ["nonexistent_bare_repo"]
+            "#,
+            toml_path(temp_dir.path())
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let builder =
+            ProjectBuilder::new(config, "missing_tpl", "missing-proj").with_cwd(&project_cwd);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = builder.create_workspace(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        assert!(
+            res.is_err(),
+            "create_workspace must fail for missing repo with no URL"
+        );
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("does not exist locally and has no remote URL configured"),
+            "Error must mention missing remote URL, got: {err_msg}"
+        );
+
+        let evs = events.lock().unwrap();
+        let has_error_event = evs.iter().any(|e| match e {
+            ProjectSetupEvent::Error(msg) => {
+                msg.contains("does not exist locally and has no remote URL configured")
+            }
+            _ => false,
+        });
+        assert!(
+            has_error_event,
+            "Sink must receive ProjectSetupEvent::Error for missing remote URL"
+        );
+    }
+
+    #[test]
+    fn test_step2_clone_failure_error_propagation() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let invalid_url = "file:///nonexistent/repo_invalid.git";
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.invalid_clone_tpl]
+            repos = ["{}"]
+            "#,
+            toml_path(temp_dir.path()),
+            invalid_url
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let builder =
+            ProjectBuilder::new(config, "invalid_clone_tpl", "invalid-proj").with_cwd(&project_cwd);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = builder.create_workspace(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        assert!(
+            res.is_err(),
+            "create_workspace must fail when git clone fails"
+        );
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to clone repository"),
+            "Error message must indicate clone failure, got: {err_msg}"
+        );
+
+        let evs = events.lock().unwrap();
+        let has_error_event = evs.iter().any(|e| match e {
+            ProjectSetupEvent::Error(msg) => msg.contains("Failed to clone repository"),
+            _ => false,
+        });
+        assert!(
+            has_error_event,
+            "Sink must receive ProjectSetupEvent::Error when clone fails"
+        );
+    }
+
+    #[test]
+    fn test_step2_multiple_missing_repos_errors_propagated() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.multi_fail_tpl]
+            repos = ["missing_alpha", "missing_beta"]
+            "#,
+            toml_path(temp_dir.path())
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let builder =
+            ProjectBuilder::new(config, "multi_fail_tpl", "multi-fail-proj").with_cwd(&project_cwd);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = builder.create_workspace(move |event| {
+            events_clone.lock().unwrap().push(event);
+        });
+
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("missing_alpha") || err_msg.contains("missing_beta"));
+
+        let evs = events.lock().unwrap();
+        let error_events: Vec<String> = evs
+            .iter()
+            .filter_map(|e| match e {
+                ProjectSetupEvent::Error(msg) => Some(msg.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            error_events.iter().any(|e| e.contains("missing_alpha")),
+            "Expected missing_alpha error event"
+        );
+        assert!(
+            error_events.iter().any(|e| e.contains("missing_beta")),
+            "Expected missing_beta error event"
         );
     }
 }

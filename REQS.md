@@ -204,10 +204,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Windows Executable & PATHEXT Probing**:
     - On Windows, hook execution probes `%PATH%` and `%PATHEXT%` (`.COM`, `.EXE`, `.BAT`, `.CMD`) to automatically resolve scripts like `npm`, `yarn`, and `pnpm`.
     - Automatically resolves bare commands and path-prefixed scripts into their `.cmd` or `.bat` executables so Rust's `std::process::Command` invokes them with Windows `cmd.exe /c` batch wrapping without requiring explicit file extensions or shell wrappers.
+  - **Parallel Remote Repository Cloning & Upstream Fetching**:
+    - During project workspace creation, missing remote repository cloning and upstream fetches execute concurrently in parallel across repositories using scoped threads (`std::thread::scope`).
+    - Progress logs and error notifications are streamed back asynchronously to the setup progress sink, significantly reducing workspace initialization latency for multi-repo project templates.
   - **Strict Branching Strategy**: Branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
   - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the template repositories or if `<project_name>` directory exists.
   - **Backing Repository Auto-Discovery (`resolve_main_repo`)**: Resolves the main cached repository from any worktree directory using `git rev-parse --git-common-dir` and `.git` file (`gitdir: <path>`) fallback traversal.
-  - **Clean Destruction & Metadata Pruning (`remove_worktree_auto`)**: Validates uncommitted changes (guarded unless forced), removes worktrees directly from backing central repositories, and executes `git worktree prune` so stale `.git/worktrees/<name>` metadata entries are eliminated while preserving git branch history.
+  - **Clean Destruction & Metadata Pruning (`remove_worktree_auto`)**: Validates uncommitted changes (guarded unless forced) with a single deduplicated dirty check per worktree, removes worktrees directly from backing central repositories, and executes `git worktree prune` so stale `.git/worktrees/<name>` metadata entries are eliminated while preserving git branch history.
 - **Agent Execution**: Spawns a single agent CLI instance at the project root (`CWD/<project_name>`), providing access to all worktree subdirectories.
 
 ---
@@ -269,6 +272,18 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 6. Session Management & Navigation (TUI Multiplexer)
 - **Multi-Project Concurrency**: Maintains concurrent active project sessions in the background.
+- **Event-Driven TUI Rendering & Dirty Tracking**:
+  - The interactive multiplexer event loop (`run_loop_with_receiver`) tracks UI mutation state via a `dirty` flag and renders frames conditionally.
+  - Frame rendering (`terminal.draw(...)`) is skipped when the application is idle (no incoming PTY bytes, no user keystrokes/mouse events, no window resize, and no background modal validation/progress mutations), dropping idle CPU utilization to near 0% while preserving responsive interaction.
+  - State changes that mark `dirty = true` include: host terminal resize/layout updates, setup/destruction progress events, debounced branch collision validation updates, child PTY stream outputs and process status transitions returned by `process_pty_streams()`, timeout-based escape key flushes, and incoming user input bytes.
+  - Dashboard session status synchronization (`dashboard.set_running_sessions`) is executed conditionally only when displaying the dashboard (`is_showing_dashboard()`) and UI state is dirty, avoiding redundant session map iterations during active PTY terminal focus.
+- **Immediate PTY Wakeup Signaling (`PtyWaker`)**:
+  - PTY reader threads signal the main TUI event loop immediately upon receiving child process output, breaking out of sleep without waiting for fixed polling intervals to achieve sub-millisecond streaming latency for agent token outputs.
+  - PTY sessions define `PtyWaker = Arc<dyn Fn() + Send + Sync>` configured via `PtySession::set_waker` and `SessionRegistry::set_waker`. Whenever `pty-reader` reads bytes (`n > 0`), it invokes the waker callback.
+  - In `TuiApp`, the PTY waker is connected to the raw stdin channel (`stdin_tx`), sending an empty wake-up pulse (`Vec::new()`).
+  - In `run_loop_with_receiver`, incoming bytes on `stdin_rx` are demuxed: non-empty bytes are forwarded to `handle_input_bytes` (marking `dirty = true`), while empty vectors (wake-up pulses) bypass input decoding and immediately trigger `process_pty_streams()`, achieving instant event-driven terminal redrawing.
+- **Consolidated Process Status Polling**:
+  - Lifecycle state and exit codes for active sessions are retrieved using a single consolidated `try_wait` invocation per session, eliminating redundant duplicate `waitpid` syscalls and mutex locking in the render loop.
 - **Zero-Allocation VT Cell Rendering & High-Throughput Performance**:
   - `TerminalView::render_to_buffer` renders virtual terminal cells directly from `vt100::Screen` borrowing `&str` symbols and mapping colors without per-cell heap allocations, ensuring high-throughput 60FPS+ TUI rendering.
 - **Dynamic Viewport & Responsive Resizing**:
@@ -504,9 +519,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
          - *Step 1*: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
          - *Step 2*: Horizontal divider embedding the live pre-validation status message (`── ✗ <message> ────`, `── ℹ <message> ────`, or `── ✓ Ready to create project ────`), keeping the form body clean and anchoring validation feedback immediately above the bottom shortcuts row.
       5. **Footer Shortcuts Hint Bar (`Constraint::Length(1)`)**: Bottom-anchored key navigation hints (`theme.key_hint`, bold) consistently anchored to the base of the modal across both steps.
-  - **Asynchronous Non-Blocking Pre-Validation**:
+  - **Asynchronous Non-Blocking Pre-Validation & Debouncing**:
     - Keystrokes run `validate_fast()` immediately (0ms) so basic errors and warnings show without UI latency.
-    - Git branch collisions are checked asynchronously in background worker threads with generation counters to prevent stale results and UI freezing.
+    - Git branch collisions are checked asynchronously in background worker threads with generation counters and input debouncing (50–100ms pause) to eliminate thread and subprocess storms while actively typing.
     - Non-blocking `poll_validation()` drains validation worker responses on TUI loop ticks.
   - **Two-Step Dialog Progression**:
     1. **Step 1: Searchable Template Selection (`CreationStep::SelectTemplate`)**:
@@ -566,7 +581,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
            - **Expanded Scrollable Viewport**: Height of 6 items (`REPOS_VISIBLE_ROWS = 6`). When repository count exceeds 6, the viewport scrolls smoothly to keep the active item visible, accompanied by `▲` / `▼` indicators and position tracking in the header.
            - **Real-Time Pre-Validation**: Continuously validates repository selection:
              - Fast synchronous validation: If zero repositories are selected, immediately marks the modal invalid with `"At least one repository must be selected"` and blocks form submission (`Enter`).
-             - Asynchronous branch collision validation: Passes only currently selected repositories (`with_selected_repos(selected_repos)`) to `ProjectBuilder::pre_validate()`, ensuring that branch collisions in unselected/deselected repositories do not block project creation.
+             - Asynchronous branch collision validation: Asynchronous branch collision checks across template repositories are debounced with a configurable duration (default 50ms, `with_debounce_duration`). Typing bursts batch collision checks without spawning redundant OS threads or git subprocesses, only executing background checks once the user pauses typing or when explicitly flushed (`flush_validation()`). Passes only currently selected repositories (`with_selected_repos(selected_repos)`), ensuring that branch collisions in unselected/deselected repositories do not block project creation.
           - `Initial Prompt:` Optional task instruction prompt rendered in a dedicated multi-line box (3–4 visible lines) with:
             - **Word Wrapping & Sizing**: Automatic line wrapping according to available modal width, preserving line breaks.
             - **Internal Vertical Scrolling**: Automatic vertical scrolling keeping the active line and cursor in view when text exceeds visible lines.

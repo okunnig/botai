@@ -394,7 +394,7 @@ impl GitWorktreeManager {
 
         let main_repo = Self::resolve_main_repo(worktree_path)?;
 
-        let remove_res = Self::remove_worktree(&main_repo, worktree_path, force);
+        let remove_res = Self::remove_worktree(&main_repo, worktree_path, true);
         if remove_res.is_err() || worktree_path.exists() {
             if worktree_path.exists() {
                 let _ = std::fs::remove_dir_all(worktree_path);

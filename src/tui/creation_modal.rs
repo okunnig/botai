@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -151,6 +152,10 @@ pub struct ProjectCreationModal {
     pub focus: CreationFocus,
     pub validation: ProjectValidation,
     pub validation_generation: u64,
+    pub pending_validation_builder: Option<ProjectBuilder>,
+    pub pending_validation_generation: Option<u64>,
+    pub validation_debounce_deadline: Option<Instant>,
+    pub validation_debounce_duration: Duration,
     validation_tx: mpsc::Sender<ValidationResult>,
     validation_rx: ValidationReceiver,
 }
@@ -180,6 +185,10 @@ impl Clone for ProjectCreationModal {
             focus: self.focus,
             validation: self.validation.clone(),
             validation_generation: self.validation_generation,
+            pending_validation_builder: self.pending_validation_builder.clone(),
+            pending_validation_generation: self.pending_validation_generation,
+            validation_debounce_deadline: self.validation_debounce_deadline,
+            validation_debounce_duration: self.validation_debounce_duration,
             validation_tx,
             validation_rx: Arc::new(Mutex::new(validation_rx)),
         }
@@ -208,6 +217,10 @@ impl PartialEq for ProjectCreationModal {
             && self.prompt_scroll_offset == other.prompt_scroll_offset
             && self.focus == other.focus
             && self.validation == other.validation
+            && self.pending_validation_builder == other.pending_validation_builder
+            && self.pending_validation_generation == other.pending_validation_generation
+            && self.validation_debounce_deadline == other.validation_debounce_deadline
+            && self.validation_debounce_duration == other.validation_debounce_duration
     }
 }
 
@@ -276,6 +289,10 @@ impl ProjectCreationModal {
             focus: CreationFocus::ProjectName,
             validation: ProjectValidation::valid(),
             validation_generation: 0,
+            pending_validation_builder: None,
+            pending_validation_generation: None,
+            validation_debounce_deadline: None,
+            validation_debounce_duration: Duration::from_millis(50),
             validation_tx,
             validation_rx: Arc::new(Mutex::new(validation_rx)),
         };
@@ -283,6 +300,12 @@ impl ProjectCreationModal {
         modal.sync_repos_with_template();
         modal.revalidate();
         modal
+    }
+
+    /// Sets the debounce duration for background branch collision checks.
+    pub fn with_debounce_duration(mut self, duration: Duration) -> Self {
+        self.validation_debounce_duration = duration;
+        self
     }
 
     /// Sets the active step.
@@ -637,7 +660,7 @@ impl ProjectCreationModal {
         };
     }
 
-    /// Re-evaluates fast pre-validation immediately (0ms) and dispatches background
+    /// Re-evaluates fast pre-validation immediately (0ms) and schedules debounced background
     /// git branch collision checks across template repositories if fast checks pass.
     pub fn revalidate(&mut self) {
         let tpl_name = self.selected_template().unwrap_or("");
@@ -660,12 +683,27 @@ impl ProjectCreationModal {
         self.validation_generation = self.validation_generation.wrapping_add(1);
 
         if self.validation.is_valid && !self.project_name_input.trim().is_empty() {
-            let gen = self.validation_generation;
-            let tx = self.validation_tx.clone();
-            let builder_clone = builder.clone();
+            self.pending_validation_builder = Some(builder);
+            self.pending_validation_generation = Some(self.validation_generation);
+            self.validation_debounce_deadline =
+                Some(Instant::now() + self.validation_debounce_duration);
+        } else {
+            self.pending_validation_builder = None;
+            self.pending_validation_generation = None;
+            self.validation_debounce_deadline = None;
+        }
+    }
 
+    /// Immediately triggers pending debounced background validation if one is waiting.
+    pub fn flush_validation(&mut self) {
+        self.validation_debounce_deadline = None;
+        if let (Some(gen), Some(builder)) = (
+            self.pending_validation_generation.take(),
+            self.pending_validation_builder.take(),
+        ) {
+            let tx = self.validation_tx.clone();
             std::thread::spawn(move || {
-                let collisions = builder_clone.check_branch_collisions();
+                let collisions = builder.check_branch_collisions();
                 let _ = tx.send((gen, collisions));
             });
         }
@@ -673,21 +711,31 @@ impl ProjectCreationModal {
 
     /// Drains pending asynchronous branch validation results and updates `self.validation`
     /// if the generation matches the current active input.
-    pub fn poll_validation(&mut self) {
+    pub fn poll_validation(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(deadline) = self.validation_debounce_deadline {
+            if Instant::now() >= deadline {
+                self.flush_validation();
+                changed = true;
+            }
+        }
+
         if let Ok(rx) = self.validation_rx.lock() {
             while let Ok((gen, branch_errors)) = rx.try_recv() {
                 if gen == self.validation_generation && self.validation.is_valid {
                     for err in branch_errors {
                         self.validation.add_error(err);
+                        changed = true;
                     }
                 }
             }
         }
+        changed
     }
 
     /// Advances tick-based state and drains pending validation results.
     pub fn tick(&mut self) {
-        self.poll_validation();
+        let _ = self.poll_validation();
     }
 
     /// Default inner width for initial prompt wrapping.
@@ -4954,5 +5002,183 @@ mod tests {
 
         assert!(text.contains("Repositories (3/3 selected • item 2/3):"));
         assert!(text.contains("[PgUp/PgDn] Page"));
+    }
+
+    #[test]
+    fn test_creation_modal_rapid_successive_keystrokes_debouncing() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("service_debounced");
+        init_mock_repo(&repo_dir);
+
+        let _ = std::process::Command::new("git")
+            .args(["branch", "debounced-target"])
+            .current_dir(&repo_dir)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.debounced_tpl]
+            repos = ["{}"]
+            "#,
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let debounce_ms = 80;
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("debounced_tpl"))
+            .with_debounce_duration(Duration::from_millis(debounce_ms));
+        modal.step = CreationStep::ConfigureDetails;
+
+        // Initially with empty project name, no pending validation
+        assert!(modal.pending_validation_builder.is_none());
+        assert!(modal.pending_validation_generation.is_none());
+        assert!(modal.validation_debounce_deadline.is_none());
+
+        // Rapid keystrokes: type each character of "debounced-target" in rapid succession
+        let target_name = "debounced-target";
+        for (i, c) in target_name.chars().enumerate() {
+            modal.handle_key(key(KeyCode::Char(c)));
+
+            // Immediately poll after keystroke
+            modal.poll_validation();
+
+            // Builder and deadline must be pending
+            assert!(modal.pending_validation_builder.is_some());
+            assert!(modal.pending_validation_generation.is_some());
+            assert_eq!(modal.pending_validation_generation, Some((i + 2) as u64)); // generation starts at 1 in new()
+            assert!(modal.validation_debounce_deadline.is_some());
+
+            // Because debounce window hasn't expired, no collision has been reported yet
+            assert!(modal.validation.is_valid);
+            assert!(modal.validation.errors.is_empty());
+        }
+
+        // Right after typing stops, deadline is still in the future and pending is Some
+        assert!(modal.pending_validation_builder.is_some());
+        assert!(modal.validation_debounce_deadline.is_some());
+        modal.poll_validation();
+        assert!(modal.pending_validation_builder.is_some());
+        assert!(modal.validation.is_valid);
+
+        // Sleep past the debounce duration (debounce_ms + 40ms)
+        std::thread::sleep(Duration::from_millis(debounce_ms + 40));
+
+        // Now poll_validation() should trigger the background check
+        modal.poll_validation();
+        assert!(
+            modal.pending_validation_builder.is_none(),
+            "Pending builder should be taken upon debounce expiration"
+        );
+        assert!(
+            modal.validation_debounce_deadline.is_none(),
+            "Deadline should be cleared upon debounce expiration"
+        );
+
+        // Wait for background worker to complete and verify branch collision is detected
+        let start = Instant::now();
+        while modal.validation.is_valid && start.elapsed() < Duration::from_secs(3) {
+            modal.poll_validation();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            !modal.validation.is_valid,
+            "Branch collision should be detected after debounce window expires"
+        );
+        assert!(
+            modal
+                .validation
+                .primary_message()
+                .unwrap()
+                .contains("already exists in repository"),
+            "Error should indicate branch collision"
+        );
+    }
+
+    #[test]
+    fn test_creation_modal_flush_validation_and_cleared_on_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("service_flush");
+        init_mock_repo(&repo_dir);
+
+        let _ = std::process::Command::new("git")
+            .args(["branch", "flush-branch"])
+            .current_dir(&repo_dir)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.flush_tpl]
+            repos = ["{}"]
+            "#,
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("flush_tpl"))
+            .with_debounce_duration(Duration::from_millis(500));
+        modal.step = CreationStep::ConfigureDetails;
+
+        modal.set_project_name("flush-branch");
+        assert!(modal.pending_validation_builder.is_some());
+        assert!(modal.validation_debounce_deadline.is_some());
+
+        // Immediately flush validation
+        modal.flush_validation();
+        assert!(modal.pending_validation_builder.is_none());
+        assert!(modal.validation_debounce_deadline.is_none());
+
+        // Background thread was spawned by flush_validation
+        let start = Instant::now();
+        while modal.validation.is_valid && start.elapsed() < Duration::from_secs(3) {
+            modal.poll_validation();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!modal.validation.is_valid);
+
+        // Now clear the project name - pending validation should be cleared
+        modal.set_project_name("");
+        assert!(modal.pending_validation_builder.is_none());
+        assert!(modal.pending_validation_generation.is_none());
+        assert!(modal.validation_debounce_deadline.is_none());
+    }
+
+    #[test]
+    fn test_creation_modal_clone_and_partial_eq_with_debounce_fields() {
+        let config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None)
+            .with_debounce_duration(Duration::from_millis(123));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.set_project_name("my-proj");
+
+        let cloned = modal.clone();
+        assert_eq!(modal, cloned);
+        assert_eq!(
+            cloned.validation_debounce_duration,
+            Duration::from_millis(123)
+        );
+        assert_eq!(
+            cloned.pending_validation_generation,
+            modal.pending_validation_generation
+        );
+        assert_eq!(
+            cloned.pending_validation_builder,
+            modal.pending_validation_builder
+        );
+        assert_eq!(
+            cloned.validation_debounce_deadline,
+            modal.validation_debounce_deadline
+        );
+
+        let different_duration = modal
+            .clone()
+            .with_debounce_duration(Duration::from_millis(456));
+        assert_ne!(modal, different_duration);
     }
 }
