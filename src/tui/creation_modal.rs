@@ -293,15 +293,13 @@ impl ProjectCreationModal {
     /// Filter logic: strictly case-insensitive substring match against template name only.
     pub fn matching_template_indices(&self) -> Vec<usize> {
         let query = self.template_search_query.trim().to_lowercase();
+        if query.is_empty() {
+            return (0..self.templates.len()).collect();
+        }
         self.templates
             .iter()
             .enumerate()
-            .filter(|(_idx, tpl_name)| {
-                if query.is_empty() {
-                    return true;
-                }
-                tpl_name.to_lowercase().contains(&query)
-            })
+            .filter(|(_idx, tpl_name)| tpl_name.to_lowercase().contains(&query))
             .map(|(idx, _)| idx)
             .collect()
     }
@@ -411,6 +409,24 @@ impl ProjectCreationModal {
                 (self.selected_agent_idx + self.agent_list.len() - 1) % self.agent_list.len();
             self.revalidate();
         }
+    }
+
+    /// Synchronizes template selection and re-syncs state after a filter query modification or backtracking.
+    fn sync_selection_for_query(&mut self, target_template: Option<&str>) {
+        let matching = self.matching_template_indices();
+        self.selected_template_idx = if matching.is_empty() {
+            0
+        } else if let Some(target) = target_template {
+            matching
+                .iter()
+                .position(|&i| self.templates.get(i).map(String::as_str) == Some(target))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.sync_agent_with_template();
+        self.sync_repos_with_template();
+        self.revalidate();
     }
 
     /// Synchronizes the selected agent with the newly selected template's default agent.
@@ -1195,22 +1211,7 @@ impl ProjectCreationModal {
                     let prev_selected = self.selected_template().map(str::to_string);
                     let modified = self.template_search_query.handle_key(key);
                     if modified {
-                        let matching = self.matching_template_indices();
-                        self.selected_template_idx = if matching.is_empty() {
-                            0
-                        } else if let Some(ref prev) = prev_selected {
-                            matching
-                                .iter()
-                                .position(|&i| {
-                                    self.templates.get(i).map(String::as_str) == Some(prev.as_str())
-                                })
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        self.sync_agent_with_template();
-                        self.sync_repos_with_template();
-                        self.revalidate();
+                        self.sync_selection_for_query(prev_selected.as_deref());
                     }
                     CreationModalAction::None
                 }
@@ -1511,18 +1512,7 @@ impl ProjectCreationModal {
     pub fn handle_back_or_cancel(&mut self) -> CreationModalAction {
         let cur_tpl = self.selected_template().map(str::to_string);
         self.step = CreationStep::SelectTemplate;
-        let matching = self.matching_template_indices();
-        if let Some(tpl) = cur_tpl {
-            self.selected_template_idx = matching
-                .iter()
-                .position(|&i| self.templates.get(i).map(String::as_str) == Some(&tpl))
-                .unwrap_or(0);
-        } else {
-            self.selected_template_idx = 0;
-        }
-        self.sync_agent_with_template();
-        self.sync_repos_with_template();
-        self.revalidate();
+        self.sync_selection_for_query(cur_tpl.as_deref());
         CreationModalAction::None
     }
 
@@ -1532,22 +1522,7 @@ impl ProjectCreationModal {
             CreationStep::SelectTemplate => {
                 let prev_selected = self.selected_template().map(str::to_string);
                 if self.template_search_query.insert_str(text) {
-                    let matching = self.matching_template_indices();
-                    self.selected_template_idx = if matching.is_empty() {
-                        0
-                    } else if let Some(ref prev) = prev_selected {
-                        matching
-                            .iter()
-                            .position(|&i| {
-                                self.templates.get(i).map(String::as_str) == Some(prev.as_str())
-                            })
-                            .unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    self.sync_agent_with_template();
-                    self.sync_repos_with_template();
-                    self.revalidate();
+                    self.sync_selection_for_query(prev_selected.as_deref());
                 }
             }
             CreationStep::ConfigureDetails => match self.focus {
