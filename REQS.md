@@ -285,7 +285,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Consolidated Process Status Polling**:
   - Lifecycle state and exit codes for active sessions are retrieved using a single consolidated `try_wait` invocation per session, eliminating redundant duplicate `waitpid` syscalls and mutex locking in the render loop.
 - **Zero-Allocation VT Cell Rendering & High-Throughput Performance**:
-  - `TerminalView::render_to_buffer` renders virtual terminal cells directly from `vt100::Screen` borrowing `&str` symbols and mapping colors without per-cell heap allocations, ensuring high-throughput 60FPS+ TUI rendering.
+  - `TerminalView::render_to_buffer` renders virtual terminal cells directly from `vt100::Screen` borrowing `&str` symbols, mapping colors, and mapping SGR attributes bold, dim, italic, underline and inverse to ratatui modifiers without per-cell heap allocations, ensuring high-throughput 60FPS+ TUI rendering.
 - **Dynamic Viewport & Responsive Resizing**:
   - Automatically synchronizes PTY dimensions and VT virtual screen buffers to the host terminal viewport on initial startup, on window resize events (`Event::Resize`), and when creating or switching active project sessions.
   - Propagates window size changes (`SIGWINCH` / `ResizePseudoConsole`) so full-screen interactive agent CLIs (`agy`, `claude`, `aider`, etc.) dynamically re-render to the exact available terminal dimensions.

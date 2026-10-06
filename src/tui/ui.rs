@@ -97,6 +97,9 @@ impl<'a> TerminalView<'a> {
                     if cell.bold() {
                         style = style.add_modifier(Modifier::BOLD);
                     }
+                    if cell.dim() {
+                        style = style.add_modifier(Modifier::DIM);
+                    }
                     if cell.italic() {
                         style = style.add_modifier(Modifier::ITALIC);
                     }
@@ -228,5 +231,32 @@ mod tests {
         assert_eq!(out_of_bounds_cell.fg, RatatuiColor::Reset);
         assert_eq!(out_of_bounds_cell.bg, RatatuiColor::Reset);
         assert_eq!(out_of_bounds_cell.modifier, Modifier::empty());
+    }
+
+    #[test]
+    fn test_terminal_view_renders_dim() {
+        let mut vt = VtScreen::new(40, 10);
+        vt.process(b"\x1b[2mdim\x1b[0m normal \x1b[2mA\x1b[22mB");
+
+        let view = TerminalView::new(&vt);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 10));
+        view.render_to_buffer(Rect::new(0, 0, 40, 10), &mut buffer);
+
+        let cell_d = buffer.cell((0, 0)).expect("cell 0,0");
+        assert_eq!(cell_d.symbol(), "d");
+        assert!(cell_d.modifier.contains(Modifier::DIM));
+        assert!(!cell_d.modifier.contains(Modifier::BOLD));
+
+        let cell_n = buffer.cell((4, 0)).expect("cell 4,0");
+        assert_eq!(cell_n.symbol(), "n");
+        assert!(!cell_n.modifier.contains(Modifier::DIM));
+
+        let cell_a = buffer.cell((11, 0)).expect("cell 11,0");
+        assert_eq!(cell_a.symbol(), "A");
+        assert!(cell_a.modifier.contains(Modifier::DIM));
+
+        let cell_b = buffer.cell((12, 0)).expect("cell 12,0");
+        assert_eq!(cell_b.symbol(), "B");
+        assert!(!cell_b.modifier.contains(Modifier::DIM));
     }
 }
