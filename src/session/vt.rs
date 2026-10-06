@@ -75,6 +75,8 @@ pub struct VtCell {
     pub bg: Option<vt100::Color>,
     /// Whether bold styling is enabled.
     pub bold: bool,
+    /// Whether dim / faint styling is enabled.
+    pub dim: bool,
     /// Whether italic styling is enabled.
     pub italic: bool,
     /// Whether underline styling is enabled.
@@ -175,6 +177,7 @@ impl VtScreen {
             fg,
             bg,
             bold: cell.bold(),
+            dim: cell.dim(),
             italic: cell.italic(),
             underline: cell.underline(),
             inverse: cell.inverse(),
@@ -278,6 +281,21 @@ mod tests {
     }
 
     #[test]
+    fn test_vt_screen_dim_attribute() {
+        let mut screen = VtScreen::new(80, 24);
+        screen.process(b"\x1b[2mD\x1b[0mP");
+
+        let dim_cell = screen.cell(0, 0).expect("Expected cell at 0,0");
+        assert_eq!(dim_cell.text, "D");
+        assert!(dim_cell.dim);
+        assert!(!dim_cell.bold);
+
+        let plain_cell = screen.cell(1, 0).expect("Expected cell at 1,0");
+        assert_eq!(plain_cell.text, "P");
+        assert!(!plain_cell.dim);
+    }
+
+    #[test]
     fn test_vt_screen_resize() {
         let mut screen = VtScreen::new(80, 24);
         assert_eq!(screen.size(), (80, 24));
@@ -305,6 +323,7 @@ mod tests {
             fg: Some(vt100::Color::Idx(1)),
             bg: None,
             bold: true,
+            dim: false,
             italic: false,
             underline: false,
             inverse: false,
