@@ -15,10 +15,12 @@ fn create_mock_session(
     agent: &str,
 ) -> (ProjectSession, PtySession, VtScreen) {
     let tmp = tempdir().expect("Failed to create tempdir");
+    // The child must outlive the test's PTY writes; a write to an exited child
+    // fails and TuiApp then skips record_activity().
     #[cfg(windows)]
-    let (cmd, args) = ("cmd.exe", vec!["/c", "exit 0"]);
+    let (cmd, args) = ("cmd.exe", vec!["/c", "more"]);
     #[cfg(not(windows))]
-    let (cmd, args) = ("sh", vec!["-c", "true"]);
+    let (cmd, args) = ("sh", vec!["-c", "cat"]);
 
     let config = PtyConfig::new(cmd, tmp.path())
         .with_args(args)
