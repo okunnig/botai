@@ -18,7 +18,6 @@ portable-pty = "0.9"
 crossterm = { version = "0.29", features = ["event-stream"] }
 ratatui = "0.30"
 vt100 = "0.16"
-notify-rust = "4.11"
 tokio = { version = "1.38", features = ["full"] }
 # Canonicalize without a `\\?\` prefix: git rejects those as positional path arguments.
 dunce = "1.0"

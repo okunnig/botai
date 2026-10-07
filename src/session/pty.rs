@@ -332,6 +332,7 @@ impl PtySession {
                                 }
                             }
                         }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(_) => break,
                     }
                 }
