@@ -40,8 +40,8 @@ use crate::tui::destroy_progress_modal::{
     render_destroy_progress_modal, DestroyProgressModalState,
 };
 use crate::tui::events::{
-    is_incomplete_sgr_mouse, is_shift_enter, is_unmodified_enter, parse_raw_events, parse_sgr_mouse,
-    translate_mouse_event, RawAction, RawLeaderDecoder,
+    is_incomplete_sgr_mouse, is_shift_enter, is_unmodified_enter, parse_raw_events,
+    parse_sgr_mouse, translate_mouse_event, RawAction, RawLeaderDecoder,
 };
 use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
 use crate::tui::status_bar::StatusBar;
@@ -1385,8 +1385,10 @@ impl TuiApp {
                 if let Some(active) = self.registry.active_session_mut() {
                     active.vt_mut().reset_scrollback();
 
-                    let bytes_to_write =
-                        Self::translate_passthrough_bytes(&bytes, &active.project_session.agent_name);
+                    let bytes_to_write = Self::translate_passthrough_bytes(
+                        &bytes,
+                        &active.project_session.agent_name,
+                    );
 
                     if active.pty_mut().write_all(&bytes_to_write).is_ok()
                         && active.status() != SessionStatus::Error
@@ -1432,9 +1434,10 @@ impl TuiApp {
 
         // If the active session is errored, dismiss it on Enter (\r, \n) or plain Space (when leader is inactive)
         if is_active_errored && !self.leader_active {
-            let is_dismiss = segment
-                .iter()
-                .any(|&b| b == b'\r' || b == b'\n' || b == b' ');
+            let is_dismiss = is_unmodified_enter(segment)
+                || segment
+                    .iter()
+                    .any(|&b| b == b'\r' || b == b'\n' || b == b' ');
             if is_dismiss {
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
@@ -3580,6 +3583,68 @@ repos = []
 
         // Send \r to dismiss
         app.handle_raw_bytes(b"\r");
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_errored_session_dismissal_csi_u_enter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 1"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 1"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-err-csiu", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
+        assert_eq!(app.registry.len(), 1);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Error
+        );
+
+        // CSI-u unmodified Enter (\x1b[13u) dismisses an active errored session
+        app.handle_raw_bytes(b"\x1b[13u");
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_tui_app_process_non_mouse_bytes_errored_session_dismissal_csi_u_enter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 1"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 1"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-err-pnm", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
+        assert_eq!(app.registry.len(), 1);
+
+        // process_non_mouse_bytes returns true when dismissing active errored session with CSI-u Enter
+        assert!(app.process_non_mouse_bytes(b"\x1b[13u"));
         assert_eq!(app.registry.len(), 0);
         assert!(app.should_quit);
     }
