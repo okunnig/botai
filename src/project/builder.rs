@@ -83,6 +83,19 @@ pub enum ProjectDestroyEvent {
     Error(String),
 }
 
+/// Structured events emitted during the repository addition pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectAddRepoEvent {
+    Step {
+        current: usize,
+        total: usize,
+        message: String,
+    },
+    Log(String),
+    Success,
+    Error(String),
+}
+
 /// Detailed pre-validation result for project creation inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectValidation {
@@ -886,6 +899,28 @@ pub fn extract_template_name_from_agents_md<P: AsRef<std::path::Path>>(
     None
 }
 
+/// Extracts any initial task description recorded under `## Task Description` in a project's `AGENTS.md`.
+pub fn extract_task_description_from_agents_md<P: AsRef<std::path::Path>>(
+    project_dir: P,
+) -> Option<String> {
+    let agents_path = project_dir.as_ref().join("AGENTS.md");
+    let content = fs::read_to_string(agents_path).ok()?;
+    let marker = "## Task Description";
+    let start_idx = content.find(marker)? + marker.len();
+    let rest = &content[start_idx..];
+    let prompt_end = if let Some(end_idx) = rest.find("\n## ") {
+        &rest[..end_idx]
+    } else {
+        rest
+    };
+    let trimmed = prompt_end.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Safely tears down a project workspace with streaming progress events:
 /// 1. Executes template `pre_destroy` lifecycle hooks if template is configured.
 /// 2. Validates uncommitted changes across worktrees (unless `force` is true).
@@ -1100,6 +1135,352 @@ pub fn destroy_project_workspace(
     force: bool,
 ) -> anyhow::Result<()> {
     destroy_project_workspace_with_progress(config, cwd, project_name, force, |_| {})
+}
+
+/// Adds additional template repository worktrees to an existing project workspace.
+///
+/// Steps:
+/// 1. Auto-clones missing candidate repos into `repos_dir` and performs best-effort upstream fetch.
+/// 2. Verifies branch `<project_name>` does not already exist, and checks out git worktree at `<project_dir>/<repo_name>`.
+/// 3. Executes configured per-repository `setup` hooks in parallel (Warn-and-Continue policy).
+/// 4. Synchronizes and re-synthesizes `<project_dir>/AGENTS.md` orientation context with all effective repositories.
+pub fn add_worktrees_to_project<F>(
+    config: &Config,
+    project_dir: &std::path::Path,
+    repos_to_add: &[String],
+    progress_sink: F,
+) -> anyhow::Result<Vec<RepoMapping>>
+where
+    F: Fn(ProjectAddRepoEvent) + Send + Sync + 'static,
+{
+    if !project_dir.is_dir() {
+        let msg = format!(
+            "Project directory '{}' does not exist",
+            project_dir.display()
+        );
+        progress_sink(ProjectAddRepoEvent::Error(msg.clone()));
+        anyhow::bail!("{msg}");
+    }
+
+    let project_name = project_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            let msg = "Could not determine project name from directory path".to_string();
+            progress_sink(ProjectAddRepoEvent::Error(msg.clone()));
+            anyhow::anyhow!("{msg}")
+        })?;
+
+    let template_name = extract_template_name_from_agents_md(project_dir).ok_or_else(|| {
+        let msg = format!(
+            "Could not determine template from AGENTS.md in {}",
+            project_dir.display()
+        );
+        progress_sink(ProjectAddRepoEvent::Error(msg.clone()));
+        anyhow::anyhow!("{msg}")
+    })?;
+
+    let tpl = config.get_template(&template_name).ok_or_else(|| {
+        let msg = format!("Template '{template_name}' not found in configuration");
+        progress_sink(ProjectAddRepoEvent::Error(msg.clone()));
+        anyhow::anyhow!("{msg}")
+    })?;
+
+    let all_template_repos = config.resolve_template_repos(&template_name)?;
+
+    let git = GitWorktreeManager::new();
+    let mut existing_worktree_names = Vec::new();
+    let mut existing_mappings = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(project_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.join(".git").exists() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    let name = name.to_string();
+                    existing_worktree_names.push(name.clone());
+                    let worktree_path = dunce::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                    let original_path =
+                        if let Some(matched) = all_template_repos.iter().find(|r| r.name == name) {
+                            matched.local_path.clone()
+                        } else if let Ok(main_repo) = git.resolve_main_repo(&worktree_path) {
+                            main_repo
+                        } else {
+                            worktree_path.clone()
+                        };
+                    existing_mappings.push(RepoMapping::new(name, original_path, worktree_path));
+                }
+            }
+        }
+    }
+
+    let candidate_repos: Vec<ResolvedRepo> = all_template_repos
+        .iter()
+        .filter(|r| {
+            repos_to_add.iter().any(|target| target == &r.name)
+                && !existing_worktree_names.contains(&r.name)
+        })
+        .cloned()
+        .collect();
+
+    if candidate_repos.is_empty() {
+        progress_sink(ProjectAddRepoEvent::Log(
+            "No new template repositories to add to the project.".to_string(),
+        ));
+        progress_sink(ProjectAddRepoEvent::Success);
+        return Ok(Vec::new());
+    }
+
+    // Step 1: Auto-cloning missing candidate repos & upstream fetching
+    progress_sink(ProjectAddRepoEvent::Step {
+        current: 1,
+        total: 4,
+        message: "Cloning and updating repositories...".to_string(),
+    });
+    progress_sink(ProjectAddRepoEvent::Log(
+        "[1/4] Cloning and updating repositories...".to_string(),
+    ));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        for repo in &candidate_repos {
+            let thread_tx = tx.clone();
+            s.spawn(move || {
+                if !repo.exists_locally() {
+                    if let Some(url) = &repo.clone_url {
+                        let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
+                            "[1/4] Cloning repository '{}' from {}...",
+                            repo.name, url
+                        )));
+                        if let Err(err) = crate::git::clone_repo(url, &repo.local_path) {
+                            let _ = thread_tx.send(ProjectAddRepoEvent::Error(format!(
+                                "Failed to clone repository '{}': {}",
+                                repo.name, err
+                            )));
+                        }
+                    } else {
+                        let _ = thread_tx.send(ProjectAddRepoEvent::Error(format!(
+                            "Repository '{}' does not exist locally and has no remote URL configured",
+                            repo.name
+                        )));
+                    }
+                } else {
+                    let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
+                        "[1/4] Fetching latest updates for repository '{}'...",
+                        repo.name
+                    )));
+                    let _ = crate::git::fetch_repo(&repo.local_path);
+                }
+            });
+        }
+        drop(tx);
+        while let Ok(event) = rx.recv() {
+            progress_sink(event);
+        }
+    });
+
+    // Step 2: Checking out git worktrees
+    progress_sink(ProjectAddRepoEvent::Step {
+        current: 2,
+        total: 4,
+        message: "Creating git worktrees...".to_string(),
+    });
+    progress_sink(ProjectAddRepoEvent::Log(
+        "[2/4] Creating git worktrees...".to_string(),
+    ));
+
+    let project_dir_canon =
+        dunce::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    let mut newly_added_mappings: Vec<RepoMapping> = Vec::new();
+    let mut newly_added_repos: Vec<ResolvedRepo> = Vec::new();
+
+    for repo in candidate_repos {
+        if !repo.exists_locally() {
+            continue;
+        }
+
+        match git.branch_exists(&repo.local_path, &project_name) {
+            Ok(true) => {
+                let err_msg = format!(
+                    "Branch '{project_name}' already exists in repository '{}'",
+                    repo.name
+                );
+                progress_sink(ProjectAddRepoEvent::Error(err_msg));
+                continue;
+            }
+            Err(err) => {
+                let err_msg = format!(
+                    "Failed to check branch for repository '{}': {}",
+                    repo.name, err
+                );
+                progress_sink(ProjectAddRepoEvent::Error(err_msg));
+                continue;
+            }
+            Ok(false) => {}
+        }
+
+        let worktree_path = project_dir_canon.join(&repo.name);
+        progress_sink(ProjectAddRepoEvent::Log(format!(
+            "[2/4] Creating git worktree for '{}' at {}...",
+            repo.name,
+            worktree_path.display()
+        )));
+
+        match create_worktree(&repo.local_path, &worktree_path, &project_name) {
+            Ok(_) => {
+                progress_sink(ProjectAddRepoEvent::Log(format!(
+                    "✓ Created git worktree for '{}'",
+                    repo.name
+                )));
+                newly_added_mappings.push(RepoMapping::new(
+                    repo.name.clone(),
+                    repo.local_path.clone(),
+                    worktree_path,
+                ));
+                newly_added_repos.push(repo);
+            }
+            Err(err) => {
+                progress_sink(ProjectAddRepoEvent::Error(format!(
+                    "Failed to create worktree for '{}': {}",
+                    repo.name, err
+                )));
+            }
+        }
+    }
+
+    // Step 3: Executing configured per-repository setup hooks in parallel
+    progress_sink(ProjectAddRepoEvent::Step {
+        current: 3,
+        total: 4,
+        message: "Running setup hooks...".to_string(),
+    });
+    progress_sink(ProjectAddRepoEvent::Log(
+        "[3/4] Running setup hooks...".to_string(),
+    ));
+
+    let repos_with_hooks: Vec<(&ResolvedRepo, PathBuf)> = newly_added_repos
+        .iter()
+        .filter(|r| !r.setup_hooks.is_empty())
+        .map(|r| (r, project_dir_canon.join(&r.name)))
+        .collect();
+
+    if !repos_with_hooks.is_empty() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|s| {
+            for (repo, worktree_path) in &repos_with_hooks {
+                let thread_tx = tx.clone();
+                let tpl_env = &tpl.env;
+                let repo_env = &repo.env;
+                let setup_hooks = &repo.setup_hooks;
+                let repo_name = &repo.name;
+                let wt_path = worktree_path.clone();
+
+                s.spawn(move || {
+                    for cmd in setup_hooks {
+                        if cmd.is_empty() {
+                            continue;
+                        }
+                        let prog = &cmd[0];
+                        let args = &cmd[1..];
+                        let cmd_display = cmd.join(" ");
+                        let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
+                            "Running setup hook for '{repo_name}': {cmd_display}"
+                        )));
+
+                        let mut command = prepare_hook_command(prog, args);
+                        command.current_dir(&wt_path);
+                        for (k, v) in tpl_env {
+                            command.env(k, v);
+                        }
+                        for (k, v) in repo_env {
+                            command.env(k, v);
+                        }
+
+                        match command.output() {
+                            Ok(output) => {
+                                if !output.status.success() {
+                                    let exit_code = output
+                                        .status
+                                        .code()
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "signal".to_string());
+                                    let stderr_snippet = String::from_utf8_lossy(&output.stderr);
+                                    let trimmed_err = stderr_snippet.trim();
+                                    let msg = if trimmed_err.is_empty() {
+                                        format!("exit code {exit_code}")
+                                    } else {
+                                        format!("exit code {exit_code}: {trimmed_err}")
+                                    };
+                                    let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
+                                        "⚠ Warning: Setup hook for '{repo_name}' failed: {msg}"
+                                    )));
+                                } else {
+                                    let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
+                                        "✓ Setup hook for '{repo_name}' completed: {cmd_display}"
+                                    )));
+                                }
+                            }
+                            Err(err) => {
+                                let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
+                                    "⚠ Warning: Setup hook for '{repo_name}' failed: {err}"
+                                )));
+                            }
+                        }
+                    }
+                });
+            }
+            drop(tx);
+            while let Ok(event) = rx.recv() {
+                progress_sink(event);
+            }
+        });
+    }
+
+    // Step 4: Re-generate AGENTS.md
+    progress_sink(ProjectAddRepoEvent::Step {
+        current: 4,
+        total: 4,
+        message: "Updating AGENTS.md context orientation file...".to_string(),
+    });
+    progress_sink(ProjectAddRepoEvent::Log(
+        "[4/4] Updating AGENTS.md context orientation file...".to_string(),
+    ));
+
+    let mut combined_mappings = existing_mappings;
+    combined_mappings.extend(newly_added_mappings.clone());
+
+    combined_mappings.sort_by_key(|m| {
+        all_template_repos
+            .iter()
+            .position(|r| r.name == m.name)
+            .unwrap_or(usize::MAX)
+    });
+
+    let initial_prompt = extract_task_description_from_agents_md(project_dir);
+
+    let project_context = ProjectContext {
+        project_name: project_name.clone(),
+        template_name: template_name.clone(),
+        description: tpl.description.clone(),
+        agents_md_append: tpl.agents_md_append.clone(),
+        repos: combined_mappings,
+        env: tpl.env.clone(),
+        initial_prompt,
+    };
+
+    if let Err(err) = generate_agents_md(&project_dir_canon, &project_context) {
+        let msg = format!("Failed to update AGENTS.md: {err}");
+        progress_sink(ProjectAddRepoEvent::Error(msg));
+    } else {
+        progress_sink(ProjectAddRepoEvent::Log(
+            "✓ Successfully updated AGENTS.md orientation context.".to_string(),
+        ));
+    }
+
+    progress_sink(ProjectAddRepoEvent::Success);
+    Ok(newly_added_mappings)
 }
 
 /// Resolves an executable candidate against PATH and PATHEXT extensions.
@@ -2903,5 +3284,276 @@ mod tests {
             error_events.iter().any(|e| e.contains("missing_beta")),
             "Expected missing_beta error event"
         );
+    }
+
+    #[test]
+    fn test_extract_task_description_from_agents_md() {
+        let temp_dir = TempDir::new().unwrap();
+        let proj_dir = temp_dir.path().join("proj");
+        fs::create_dir_all(&proj_dir).unwrap();
+
+        // 1. Missing AGENTS.md
+        assert_eq!(extract_task_description_from_agents_md(&proj_dir), None);
+
+        // 2. AGENTS.md without Task Description
+        fs::write(
+            proj_dir.join("AGENTS.md"),
+            "# Project: proj\n\nTemplate: **tpl**\n\n## Repository Layout\n",
+        )
+        .unwrap();
+        assert_eq!(extract_task_description_from_agents_md(&proj_dir), None);
+
+        // 3. Valid AGENTS.md with Task Description
+        fs::write(
+            proj_dir.join("AGENTS.md"),
+            "# Project: proj\n\nTemplate: **tpl**\n\n## Task Description\n\nImplement feature X\n\n## Repository Layout\n",
+        )
+        .unwrap();
+        assert_eq!(
+            extract_task_description_from_agents_md(&proj_dir),
+            Some("Implement feature X".to_string())
+        );
+    }
+
+    #[test]
+    fn test_add_worktrees_to_project_success_and_agents_md_regeneration() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let project_cwd = temp_dir.path().join("workspace");
+        fs::create_dir_all(&repos_dir).unwrap();
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let repo_a = repos_dir.join("repo_a");
+        let repo_b = repos_dir.join("repo_b");
+        create_mock_git_repo(&repo_a);
+        create_mock_git_repo(&repo_b);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.tpl]
+            description = "Multi repo template"
+            repos = ["repo_a", "repo_b"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        // Initially create project with only repo_a
+        let builder = ProjectBuilder::new(config.clone(), "tpl", "my-project")
+            .with_cwd(&project_cwd)
+            .with_selected_repos(["repo_a"])
+            .with_prompt("Fix all issues");
+        let (project_dir, initial_mappings) = builder.create_workspace(|_| {}).unwrap();
+        assert_eq!(initial_mappings.len(), 1);
+        assert_eq!(initial_mappings[0].name, "repo_a");
+
+        let agents_md_path = project_dir.join("AGENTS.md");
+        let initial_agents_md = fs::read_to_string(&agents_md_path).unwrap();
+        assert!(initial_agents_md.contains("repo_a"));
+        assert!(!initial_agents_md.contains("repo_b"));
+        assert!(initial_agents_md.contains("Fix all issues"));
+
+        // Now add repo_b
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let added_mappings = add_worktrees_to_project(
+            &config,
+            &project_dir,
+            &["repo_b".to_string()],
+            move |event| {
+                events_clone.lock().unwrap().push(event);
+            },
+        )
+        .unwrap();
+
+        assert_eq!(added_mappings.len(), 1);
+        assert_eq!(added_mappings[0].name, "repo_b");
+        assert!(project_dir.join("repo_b").join(".git").exists());
+
+        // Check events
+        let evs = events.lock().unwrap();
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectAddRepoEvent::Step { current: 1, .. })));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectAddRepoEvent::Step { current: 2, .. })));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectAddRepoEvent::Step { current: 3, .. })));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectAddRepoEvent::Step { current: 4, .. })));
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectAddRepoEvent::Success)));
+
+        // Verify AGENTS.md re-generation
+        let updated_agents_md = fs::read_to_string(&agents_md_path).unwrap();
+        assert!(updated_agents_md.contains("repo_a"));
+        assert!(updated_agents_md.contains("repo_b"));
+        assert!(updated_agents_md.contains("Fix all issues"));
+    }
+
+    #[test]
+    fn test_add_worktrees_to_project_branch_collision_partial_addition() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let project_cwd = temp_dir.path().join("workspace");
+        fs::create_dir_all(&repos_dir).unwrap();
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let repo_a = repos_dir.join("repo_a");
+        let repo_b = repos_dir.join("repo_b");
+        let repo_c = repos_dir.join("repo_c");
+        create_mock_git_repo(&repo_a);
+        create_mock_git_repo(&repo_b);
+        create_mock_git_repo(&repo_c);
+
+        // Pre-create branch "partial-proj" in repo_b to force a collision
+        let _ = std::process::Command::new("git")
+            .args(["branch", "partial-proj"])
+            .current_dir(&repo_b)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.tpl]
+            repos = ["repo_a", "repo_b", "repo_c"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        // Initially create with repo_a
+        let builder = ProjectBuilder::new(config.clone(), "tpl", "partial-proj")
+            .with_cwd(&project_cwd)
+            .with_selected_repos(["repo_a"]);
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+
+        // Attempt to add repo_b and repo_c
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let added_mappings = add_worktrees_to_project(
+            &config,
+            &project_dir,
+            &["repo_b".to_string(), "repo_c".to_string()],
+            move |event| {
+                events_clone.lock().unwrap().push(event);
+            },
+        )
+        .unwrap();
+
+        // repo_b collided and failed, repo_c succeeded
+        assert_eq!(added_mappings.len(), 1);
+        assert_eq!(added_mappings[0].name, "repo_c");
+        assert!(project_dir.join("repo_c").join(".git").exists());
+        assert!(!project_dir.join("repo_b").exists());
+
+        // Error event for repo_b
+        let evs = events.lock().unwrap();
+        let has_collision_err = evs.iter().any(|e| match e {
+            ProjectAddRepoEvent::Error(msg) => {
+                msg.contains("Branch 'partial-proj' already exists in repository 'repo_b'")
+            }
+            _ => false,
+        });
+        assert!(
+            has_collision_err,
+            "Expected branch collision error for repo_b"
+        );
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectAddRepoEvent::Success)));
+
+        // AGENTS.md contains repo_a and repo_c
+        let agents_md = fs::read_to_string(project_dir.join("AGENTS.md")).unwrap();
+        assert!(agents_md.contains("repo_a"));
+        assert!(agents_md.contains("repo_c"));
+        assert!(!agents_md.contains("repo_b"));
+    }
+
+    #[test]
+    fn test_add_worktrees_to_project_runs_setup_hooks() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let project_cwd = temp_dir.path().join("workspace");
+        fs::create_dir_all(&repos_dir).unwrap();
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let repo_a = repos_dir.join("repo_a");
+        let repo_b = repos_dir.join("repo_b");
+        create_mock_git_repo(&repo_a);
+        create_mock_git_repo(&repo_b);
+
+        #[cfg(windows)]
+        let hook_cmd = r#"["cmd.exe", "/c", "echo hook_ran > hook.txt"]"#;
+        #[cfg(not(windows))]
+        let hook_cmd = r#"["touch", "hook.txt"]"#;
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [repos.repo_b]
+            setup = [
+                {}
+            ]
+            [templates.tpl]
+            repos = ["repo_a", "repo_b"]
+            "#,
+            toml_path(&repos_dir),
+            hook_cmd
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        let builder = ProjectBuilder::new(config.clone(), "tpl", "hook-proj")
+            .with_cwd(&project_cwd)
+            .with_selected_repos(["repo_a"]);
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+
+        let added_mappings =
+            add_worktrees_to_project(&config, &project_dir, &["repo_b".to_string()], |_| {})
+                .unwrap();
+
+        assert_eq!(added_mappings.len(), 1);
+        assert!(project_dir.join("repo_b").join("hook.txt").exists());
+    }
+
+    #[test]
+    fn test_add_worktrees_to_project_all_already_included() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let project_cwd = temp_dir.path().join("workspace");
+        fs::create_dir_all(&repos_dir).unwrap();
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let repo_a = repos_dir.join("repo_a");
+        create_mock_git_repo(&repo_a);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.tpl]
+            repos = ["repo_a"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        let builder = ProjectBuilder::new(config.clone(), "tpl", "already-included-proj")
+            .with_cwd(&project_cwd);
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+
+        // Adding repo_a again when already present
+        let added =
+            add_worktrees_to_project(&config, &project_dir, &["repo_a".to_string()], |_| {})
+                .unwrap();
+        assert!(added.is_empty());
     }
 }

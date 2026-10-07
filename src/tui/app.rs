@@ -32,6 +32,10 @@ use crate::project::ProjectBuilder;
 use crate::session::{
     ProjectSession, PtyConfig, PtySession, PtyWaker, SessionRegistry, SessionStatus, VtScreen,
 };
+use crate::tui::add_repo_modal::{render_add_repo_modal, AddRepoModalAction, AddRepoModalState};
+use crate::tui::add_repo_progress_modal::{
+    render_add_repo_progress_modal, AddRepoProgressModalState,
+};
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
 use crate::tui::dashboard::{
     render_dashboard, render_destroy_modal, DashboardAction, DashboardState, DestroyModalState,
@@ -59,6 +63,9 @@ pub struct TuiApp {
     pub setup_modal: Option<SetupModalState>,
     pub destroy_modal: Option<DestroyModalState>,
     pub destroy_progress_modal: Option<DestroyProgressModalState>,
+    pub add_repo_modal: Option<AddRepoModalState>,
+    pub add_repo_progress_modal: Option<AddRepoProgressModalState>,
+    pub status_notification: Option<String>,
     pub config: Option<Config>,
     pub cwd: Option<PathBuf>,
     pub viewport_size: Option<(u16, u16)>,
@@ -276,6 +283,9 @@ impl TuiApp {
             setup_modal: None,
             destroy_modal: None,
             destroy_progress_modal: None,
+            add_repo_modal: None,
+            add_repo_progress_modal: None,
+            status_notification: None,
             config: None,
             cwd: None,
             viewport_size: None,
@@ -341,6 +351,24 @@ impl TuiApp {
     /// Sets the destroy progress modal state on `TuiApp`.
     pub fn with_destroy_progress_modal(mut self, modal: DestroyProgressModalState) -> Self {
         self.destroy_progress_modal = Some(modal);
+        self
+    }
+
+    /// Sets the add repo modal state on `TuiApp`.
+    pub fn with_add_repo_modal(mut self, modal: AddRepoModalState) -> Self {
+        self.add_repo_modal = Some(modal);
+        self
+    }
+
+    /// Sets the add repo progress modal state on `TuiApp`.
+    pub fn with_add_repo_progress_modal(mut self, modal: AddRepoProgressModalState) -> Self {
+        self.add_repo_progress_modal = Some(modal);
+        self
+    }
+
+    /// Sets the status notification banner on `TuiApp`.
+    pub fn with_status_notification(mut self, notification: impl Into<String>) -> Self {
+        self.status_notification = Some(notification.into());
         self
     }
 
@@ -570,6 +598,9 @@ impl TuiApp {
             if self.poll_destroy_progress() {
                 dirty = true;
             }
+            if self.poll_add_repo_progress() {
+                dirty = true;
+            }
             if let Some(dashboard) = &mut self.dashboard {
                 if dashboard.poll_validation() {
                     dirty = true;
@@ -612,7 +643,8 @@ impl TuiApp {
                             f.render_widget(
                                 StatusBar::new(&self.registry)
                                     .with_leader(self.leader_active)
-                                    .with_theme(&theme),
+                                    .with_theme(&theme)
+                                    .with_notification(self.status_notification.as_deref()),
                                 status_area,
                             );
 
@@ -658,6 +690,19 @@ impl TuiApp {
                         if let Some(destroy_modal) = &self.destroy_progress_modal {
                             render_destroy_progress_modal(
                                 destroy_modal,
+                                f.area(),
+                                f.buffer_mut(),
+                                &theme,
+                            );
+                        }
+
+                        if let Some(add_repo_modal) = &self.add_repo_modal {
+                            render_add_repo_modal(add_repo_modal, f.area(), f.buffer_mut(), &theme);
+                        }
+
+                        if let Some(add_repo_progress) = &self.add_repo_progress_modal {
+                            render_add_repo_progress_modal(
+                                add_repo_progress,
                                 f.area(),
                                 f.buffer_mut(),
                                 &theme,
@@ -709,11 +754,28 @@ impl TuiApp {
                     _ => {}
                 }
             }
+        } else if self.add_repo_progress_modal.is_some() {
+            let events = parse_raw_events(bytes);
+            for event in events {
+                match event {
+                    Event::Key(key) => self.handle_add_repo_progress_modal_key(key),
+                    Event::Paste(_) => {}
+                    Event::Mouse(mouse) => self.handle_add_repo_progress_modal_mouse(mouse),
+                    _ => {}
+                }
+            }
         } else if self.destroy_modal.is_some() {
             let events = parse_raw_events(bytes);
             for event in events {
                 if let Event::Key(key) = event {
                     self.handle_destroy_modal_key(key);
+                }
+            }
+        } else if self.add_repo_modal.is_some() {
+            let events = parse_raw_events(bytes);
+            for event in events {
+                if let Event::Key(key) = event {
+                    self.handle_add_repo_modal_key(key);
                 }
             }
         } else if self.setup_modal.is_some() {
@@ -763,6 +825,8 @@ impl TuiApp {
             && self.setup_modal.is_none()
             && self.destroy_progress_modal.is_none()
             && self.destroy_modal.is_none()
+            && self.add_repo_modal.is_none()
+            && self.add_repo_progress_modal.is_none()
             && !self.is_showing_dashboard();
 
         for session in self.registry.list_mut() {
@@ -974,6 +1038,9 @@ impl TuiApp {
             DashboardAction::Destroy(project) => {
                 self.start_project_destruction(&project);
             }
+            DashboardAction::AddRepo(project) => {
+                self.open_add_repo_modal_for_project(&project);
+            }
             DashboardAction::None => {}
         }
     }
@@ -1086,6 +1153,170 @@ impl TuiApp {
         if let Some(modal) = &mut self.destroy_progress_modal {
             let _ = modal.handle_mouse(mouse);
         }
+    }
+
+    /// Polls repository addition progress events and advances modal spinner animation.
+    /// Returns `true` if progress or logs changed.
+    pub fn poll_add_repo_progress(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(modal) = &mut self.add_repo_progress_modal {
+            let was_finished = modal.is_finished;
+            let old_logs = modal.logs.len();
+            let old_step = modal.current_step;
+            let old_added = modal.added_repos.len();
+            modal.tick();
+            if !was_finished {
+                changed = true;
+            }
+            modal.poll_events();
+            if modal.logs.len() != old_logs
+                || modal.current_step != old_step
+                || modal.added_repos.len() != old_added
+                || modal.is_finished != was_finished
+            {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Handles keyboard events when the Add Repository modal is active.
+    pub fn handle_add_repo_modal_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(mut modal) = self.add_repo_modal.take() {
+            match modal.handle_key(key) {
+                AddRepoModalAction::Cancel => {
+                    self.add_repo_modal = None;
+                }
+                AddRepoModalAction::Submit {
+                    project_name,
+                    repos,
+                } => {
+                    self.add_repo_modal = None;
+                    self.start_add_repo_worktrees(&project_name, repos);
+                }
+                AddRepoModalAction::None => {
+                    self.add_repo_modal = Some(modal);
+                }
+            }
+        }
+    }
+
+    /// Handles keyboard events when the repository addition progress modal is active.
+    /// Dismisses the modal upon completion/error and updates status notification or refreshes dashboard.
+    pub fn handle_add_repo_progress_modal_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(modal) = &mut self.add_repo_progress_modal {
+            if modal.handle_key(key) {
+                let project_name = modal.project_name.clone();
+                let added_repos = modal.added_repos.clone();
+                let is_success = modal.is_success;
+                let error = modal.error.clone();
+                self.add_repo_progress_modal = None;
+
+                if self.is_showing_dashboard() {
+                    self.refresh_dashboard();
+                } else if added_repos.len() == 1 {
+                    self.status_notification = Some(format!(
+                        "✓ Added repository '{}' to project '{}'",
+                        added_repos[0], project_name
+                    ));
+                } else if added_repos.len() > 1 {
+                    self.status_notification = Some(format!(
+                        "✓ Added {} repositories to project '{}'",
+                        added_repos.len(),
+                        project_name
+                    ));
+                } else if is_success {
+                    self.status_notification = Some(format!(
+                        "✓ Added repositories to project '{}'",
+                        project_name
+                    ));
+                } else if let Some(err) = error {
+                    self.status_notification = Some(format!(
+                        "✗ Failed to add repository to project '{}': {err}",
+                        project_name
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Handles mouse events (such as scroll wheel) when the repository addition progress modal is active.
+    pub fn handle_add_repo_progress_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        if let Some(modal) = &mut self.add_repo_progress_modal {
+            let _ = modal.handle_mouse(mouse);
+        }
+    }
+
+    /// Opens the Add Repository modal for an existing project directory.
+    pub fn open_add_repo_modal_for_project(&mut self, project_name: &str) {
+        let _ = self.reload_config();
+        let cwd = self
+            .cwd
+            .clone()
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let project_dir = cwd.join(project_name);
+        let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
+
+        let default_config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                .unwrap_or_else(|_| Config {
+                    default_agent: "claude".to_string(),
+                    theme: "tokyo-night".to_string(),
+                    repos_dir: PathBuf::from(".botai_repos"),
+                    repos: HashMap::new(),
+                    agents: HashMap::new(),
+                    templates: HashMap::new(),
+                });
+        let config = self.config.as_ref().unwrap_or(&default_config);
+
+        match AddRepoModalState::from_project(config, &project_dir) {
+            Ok(modal) => {
+                self.add_repo_modal = Some(modal);
+            }
+            Err(e) => {
+                if !self.is_showing_dashboard() {
+                    self.status_notification = Some(format!("✗ {e}"));
+                }
+            }
+        }
+    }
+
+    /// Starts asynchronous repository addition on a background worker thread and activates `add_repo_progress_modal`.
+    pub fn start_add_repo_worktrees(&mut self, project_name: &str, repos: Vec<String>) {
+        let _ = self.reload_config();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let modal = AddRepoProgressModalState::new(project_name, repos.clone(), rx);
+        self.add_repo_progress_modal = Some(modal);
+
+        let cwd = self
+            .cwd
+            .clone()
+            .or_else(|| env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let project_dir = cwd.join(project_name);
+        let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
+
+        let default_config =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                .unwrap_or_else(|_| Config {
+                    default_agent: "claude".to_string(),
+                    theme: "tokyo-night".to_string(),
+                    repos_dir: PathBuf::from(".botai_repos"),
+                    repos: HashMap::new(),
+                    agents: HashMap::new(),
+                    templates: HashMap::new(),
+                });
+        let config = self.config.clone().unwrap_or(default_config);
+
+        std::thread::spawn(move || {
+            crate::tui::add_repo_progress_modal::run_add_repo_worker(
+                config,
+                project_dir,
+                repos,
+                tx,
+            );
+        });
     }
 
     /// Starts asynchronous project destruction on a background worker thread and activates `destroy_progress_modal`.
@@ -1321,19 +1552,23 @@ impl TuiApp {
             RawAction::EnterLeader => {
                 self.leader_active = true;
                 self.raw_decoder.set_leader_active(true);
+                self.status_notification = None;
             }
             RawAction::CancelLeader => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
             }
             RawAction::Quit => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
                 self.should_quit = true;
             }
             RawAction::Detach => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
                 if self.dashboard.is_some() {
                     self.refresh_dashboard();
                     self.showing_dashboard = true;
@@ -1345,26 +1580,31 @@ impl TuiApp {
             RawAction::SwitchSession(idx) => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
                 let _ = self.registry.set_active_index(idx);
             }
             RawAction::NextSession => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
                 self.registry.next_session();
             }
             RawAction::PrevSession => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
                 self.registry.prev_session();
             }
             RawAction::OpenLauncher => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
                 self.open_creation_modal();
             }
             RawAction::CloseSession => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
                     self.close_session(&id);
@@ -1373,14 +1613,33 @@ impl TuiApp {
             RawAction::DestroyProject => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
                 if let Some(active) = self.registry.active_session() {
                     let project_name = active.project_name().to_string();
                     self.open_destroy_modal(project_name);
                 }
             }
+            RawAction::AddRepo => {
+                self.leader_active = false;
+                self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
+                if let Some(active) = self.registry.active_session() {
+                    let project_name = active.project_name().to_string();
+                    self.open_add_repo_modal_for_project(&project_name);
+                } else if let Some(dashboard) = &self.dashboard {
+                    if !dashboard.local_projects.is_empty() {
+                        let idx = dashboard
+                            .selected_project_idx
+                            .min(dashboard.local_projects.len().saturating_sub(1));
+                        let project_name = dashboard.local_projects[idx].clone();
+                        self.open_add_repo_modal_for_project(&project_name);
+                    }
+                }
+            }
             RawAction::Passthrough(bytes) => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
+                self.status_notification = None;
                 if let Some(active) = self.registry.active_session_mut() {
                     active.vt_mut().reset_scrollback();
 
@@ -4031,5 +4290,254 @@ repos = []
         let s = app.registry.get(&session_id).expect("session exists");
         assert_eq!(s.project_session.exit_code, Some(42));
         assert_eq!(s.project_session.status, SessionStatus::Error);
+    }
+
+    #[test]
+    fn test_tui_app_add_repo_modal_open_on_leader_a() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let proj_dir = cwd.join("active-proj");
+        fs::create_dir_all(proj_dir.join("repo-a").join(".git")).unwrap();
+        fs::write(
+            proj_dir.join("AGENTS.md"),
+            "# Project: active-proj\n\nTemplate: **ecommerce**\n",
+        )
+        .unwrap();
+
+        let config_toml = r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[agents.mock]
+command = "sh"
+args = ["-c", "exit 0"]
+
+[templates.ecommerce]
+repos = ["repo-a", "repo-b"]
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let pty_cfg = PtyConfig::new(cmd, &proj_dir).with_args(args);
+        let pty = PtySession::spawn(pty_cfg).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("active-proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry).with_config(config).with_cwd(cwd);
+
+        assert!(app.add_repo_modal.is_none());
+
+        // Press Ctrl+Space then 'a'
+        app.handle_raw_bytes(&[0x00]);
+        assert!(app.leader_active);
+        app.handle_raw_bytes(b"a");
+        assert!(!app.leader_active);
+
+        // Add repo modal should be open
+        assert!(app.add_repo_modal.is_some());
+        let modal = app.add_repo_modal.as_ref().unwrap();
+        assert_eq!(modal.project_name, "active-proj");
+        assert_eq!(modal.template_name, "ecommerce");
+        assert!(!modal.all_included);
+        assert_eq!(modal.items.len(), 1);
+        assert_eq!(modal.items[0].name, "repo-b");
+    }
+
+    #[test]
+    fn test_tui_app_add_repo_modal_from_dashboard_action() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let proj_dir = cwd.join("dash-proj");
+        fs::create_dir_all(proj_dir.join("repo-a").join(".git")).unwrap();
+        fs::write(
+            proj_dir.join("AGENTS.md"),
+            "# Project: dash-proj\n\nTemplate: **ecommerce**\n",
+        )
+        .unwrap();
+
+        let config_toml = r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[templates.ecommerce]
+repos = ["repo-a", "repo-b"]
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+        let dashboard =
+            DashboardState::new(vec!["ecommerce".to_string()], vec!["dash-proj".to_string()]);
+        let mut app = TuiApp::new(SessionRegistry::new())
+            .with_config(config)
+            .with_dashboard(dashboard)
+            .with_cwd(cwd);
+
+        app.handle_dashboard_action(DashboardAction::AddRepo("dash-proj".to_string()));
+        assert!(app.add_repo_modal.is_some());
+        let modal = app.add_repo_modal.as_ref().unwrap();
+        assert_eq!(modal.project_name, "dash-proj");
+        assert_eq!(modal.items.len(), 1);
+        assert_eq!(modal.items[0].name, "repo-b");
+    }
+
+    #[test]
+    fn test_tui_app_add_repo_modal_key_handling_cancel_and_submit() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let proj_dir = cwd.join("proj");
+        fs::create_dir_all(proj_dir.join("repo-a").join(".git")).unwrap();
+        fs::write(
+            proj_dir.join("AGENTS.md"),
+            "# Project: proj\n\nTemplate: **ecommerce**\n",
+        )
+        .unwrap();
+
+        let config_toml = r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[templates.ecommerce]
+repos = ["repo-a", "repo-b"]
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+        let mut app = TuiApp::new(SessionRegistry::new())
+            .with_config(config)
+            .with_cwd(cwd);
+
+        // 1. Open modal and Cancel with Esc
+        app.open_add_repo_modal_for_project("proj");
+        assert!(app.add_repo_modal.is_some());
+        app.handle_add_repo_modal_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.add_repo_modal.is_none());
+
+        // 2. Open modal, select repo-b via Space, submit via Enter
+        app.open_add_repo_modal_for_project("proj");
+        assert!(app.add_repo_modal.is_some());
+        app.handle_add_repo_modal_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.add_repo_modal.as_ref().unwrap().items[0].selected);
+        app.handle_add_repo_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.add_repo_modal.is_none());
+        assert!(app.add_repo_progress_modal.is_some());
+        let progress = app.add_repo_progress_modal.as_ref().unwrap();
+        assert_eq!(progress.project_name, "proj");
+        assert_eq!(progress.target_repos, vec!["repo-b".to_string()]);
+    }
+
+    #[test]
+    fn test_tui_app_add_repo_progress_modal_lifecycle_and_notification() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let proj_dir = cwd.join("proj");
+        fs::create_dir_all(&proj_dir).unwrap();
+
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let pty_cfg = PtyConfig::new(cmd, &proj_dir).with_args(args);
+        let pty = PtySession::spawn(pty_cfg).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let progress = AddRepoProgressModalState::new("proj", vec!["repo-b".to_string()], rx);
+        let mut app = TuiApp::new(registry)
+            .with_add_repo_progress_modal(progress)
+            .with_cwd(cwd);
+
+        // Send progress events
+        tx.send(crate::project::ProjectAddRepoEvent::Log(
+            "✓ Created git worktree for 'repo-b'".to_string(),
+        ))
+        .unwrap();
+        tx.send(crate::project::ProjectAddRepoEvent::Success)
+            .unwrap();
+
+        assert!(app.poll_add_repo_progress());
+        assert!(app.add_repo_progress_modal.as_ref().unwrap().is_finished);
+        assert!(app.add_repo_progress_modal.as_ref().unwrap().is_success);
+        assert_eq!(
+            app.add_repo_progress_modal.as_ref().unwrap().added_repos,
+            vec!["repo-b".to_string()]
+        );
+
+        // Dismiss progress modal with Enter
+        app.handle_add_repo_progress_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.add_repo_progress_modal.is_none());
+
+        // Focus returned to active session with notification set
+        assert_eq!(
+            app.status_notification.as_deref(),
+            Some("✓ Added repository 'repo-b' to project 'proj'")
+        );
+
+        // Raw input clears notification
+        app.handle_raw_action(RawAction::Passthrough(b"ls\n".to_vec()));
+        assert!(app.status_notification.is_none());
+    }
+
+    #[test]
+    fn test_tui_app_add_repo_progress_modal_dashboard_dismissal_refreshes() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let progress = AddRepoProgressModalState::new("proj", vec!["repo-b".to_string()], rx);
+        let dashboard =
+            DashboardState::new(vec!["ecommerce".to_string()], vec!["proj".to_string()]);
+        let mut app = TuiApp::new(SessionRegistry::new())
+            .with_dashboard(dashboard)
+            .with_add_repo_progress_modal(progress);
+        app.showing_dashboard = true;
+
+        tx.send(crate::project::ProjectAddRepoEvent::Success)
+            .unwrap();
+        app.poll_add_repo_progress();
+
+        app.handle_add_repo_progress_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.add_repo_progress_modal.is_none());
+        assert!(app.status_notification.is_none());
+        assert!(app.dashboard.is_some());
+    }
+
+    #[test]
+    fn test_tui_app_add_repo_all_included_notice() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let proj_dir = cwd.join("all-in");
+        fs::create_dir_all(proj_dir.join("repo-a").join(".git")).unwrap();
+        fs::create_dir_all(proj_dir.join("repo-b").join(".git")).unwrap();
+        fs::write(
+            proj_dir.join("AGENTS.md"),
+            "# Project: all-in\n\nTemplate: **ecommerce**\n",
+        )
+        .unwrap();
+
+        let config_toml = r#"
+default_agent = "mock"
+repos_dir = "/tmp/repos"
+
+[templates.ecommerce]
+repos = ["repo-a", "repo-b"]
+"#;
+        let config = Config::load_from_str(config_toml).unwrap();
+        let mut app = TuiApp::new(SessionRegistry::new())
+            .with_config(config)
+            .with_cwd(cwd);
+
+        app.open_add_repo_modal_for_project("all-in");
+        assert!(app.add_repo_modal.is_some());
+        let modal = app.add_repo_modal.as_ref().unwrap();
+        assert!(modal.all_included);
+        assert!(modal.items.is_empty());
+
+        // Dismiss notice with Enter
+        app.handle_add_repo_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.add_repo_modal.is_none());
     }
 }

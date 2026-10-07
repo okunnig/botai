@@ -107,8 +107,9 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     assert!(!rendered_text.contains("Project Templates"));
     assert!(rendered_text.contains("payment-gateway"));
     assert!(rendered_text.contains("user-auth-service"));
-    assert!(rendered_text
-        .contains("↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"));
+    assert!(rendered_text.contains(
+        "↑/↓: Navigate | Enter: Attach | n/c: New Project | a: Add Repo | d: Destroy | q: Quit"
+    ));
 
     // 5. Navigate to second project and attach
     state.handle_key(key(KeyCode::Down));

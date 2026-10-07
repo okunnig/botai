@@ -1,3 +1,5 @@
+pub mod add_repo_modal;
+pub mod add_repo_progress_modal;
 pub mod app;
 pub mod creation_modal;
 pub mod dashboard;
@@ -9,6 +11,12 @@ pub mod text_input;
 pub mod theme;
 pub mod ui;
 
+pub use add_repo_modal::{
+    render_add_repo_modal, AddRepoItem, AddRepoModalAction, AddRepoModalState,
+};
+pub use add_repo_progress_modal::{
+    render_add_repo_progress_modal, run_add_repo_worker, AddRepoProgressModalState,
+};
 pub use app::{install_panic_hook, TuiApp};
 pub use creation_modal::{CreationFocus, CreationModalAction, CreationStep, ProjectCreationModal};
 pub use dashboard::{
