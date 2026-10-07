@@ -32,6 +32,7 @@ pub enum DashboardAction {
         selected_repos: Vec<String>,
     },
     Destroy(String),
+    AddRepo(String),
     Quit,
 }
 
@@ -339,6 +340,16 @@ impl DashboardState {
                 }
                 DashboardAction::None
             }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                if !self.local_projects.is_empty() {
+                    let idx = self
+                        .selected_project_idx
+                        .min(self.local_projects.len().saturating_sub(1));
+                    DashboardAction::AddRepo(self.local_projects[idx].clone())
+                } else {
+                    DashboardAction::None
+                }
+            }
             KeyCode::Enter => {
                 if !self.local_projects.is_empty() {
                     let idx = self
@@ -433,8 +444,9 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
             .add_modifier(Modifier::BOLD),
     ));
 
-    let full_hints = "↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit";
-    let compact_hints = "Enter: Attach | n: New | d: Destroy | q: Quit";
+    let full_hints =
+        "↑/↓: Navigate | Enter: Attach | n/c: New Project | a: Add Repo | d: Destroy | q: Quit";
+    let compact_hints = "Enter: Attach | n: New | a: Add Repo | d: Destroy | q: Quit";
     let minimal_hints = "q: Quit";
 
     let full_len = full_hints.chars().count() as u16;
@@ -659,11 +671,12 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(text_wide.contains("botai"));
-        assert!(text_wide
-            .contains("↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"));
+        assert!(text_wide.contains(
+            "↑/↓: Navigate | Enter: Attach | n/c: New Project | a: Add Repo | d: Destroy | q: Quit"
+        ));
 
-        // 2. Medium screen (60 cols) -> Compact hints
-        let area_med = Rect::new(0, 0, 60, 20);
+        // 2. Medium screen (75 cols) -> Compact hints
+        let area_med = Rect::new(0, 0, 75, 20);
         let mut buf_med = Buffer::empty(area_med);
         render_dashboard(&state, area_med, &mut buf_med, &theme);
         let text_med = buf_med
@@ -672,7 +685,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(text_med.contains("botai"));
-        assert!(text_med.contains("Enter: Attach | n: New | d: Destroy | q: Quit"));
+        assert!(text_med.contains("Enter: Attach | n: New | a: Add Repo | d: Destroy | q: Quit"));
         assert!(!text_med.contains("↑/↓: Navigate"));
 
         // 3. Narrow screen (20 cols) -> Minimal hints
@@ -1155,6 +1168,31 @@ command = "claude"
         let action = empty_state.handle_key(key(KeyCode::Char('d')));
         assert_eq!(action, DashboardAction::None);
         assert!(empty_state.destroy_modal.is_none());
+    }
+
+    #[test]
+    fn test_add_repo_action_from_project_list() {
+        let mut state = DashboardState::new(
+            vec!["ws".into()],
+            vec!["proj-alpha".into(), "proj-beta".into()],
+        );
+        state.selected_project_idx = 1;
+
+        let action = state.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(action, DashboardAction::AddRepo("proj-beta".to_string()));
+
+        let action_upper = state.handle_key(key(KeyCode::Char('A')));
+        assert_eq!(
+            action_upper,
+            DashboardAction::AddRepo("proj-beta".to_string())
+        );
+
+        // On empty project list, 'a' does nothing
+        let mut empty = DashboardState::new(vec![], vec![]);
+        assert_eq!(
+            empty.handle_key(key(KeyCode::Char('a'))),
+            DashboardAction::None
+        );
     }
 
     #[test]

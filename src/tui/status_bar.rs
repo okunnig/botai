@@ -174,6 +174,7 @@ pub struct StatusBar<'a> {
     registry: &'a SessionRegistry,
     leader_active: bool,
     theme: Option<&'a Theme>,
+    notification: Option<&'a str>,
 }
 
 impl<'a> StatusBar<'a> {
@@ -183,12 +184,19 @@ impl<'a> StatusBar<'a> {
             registry,
             leader_active: false,
             theme: None,
+            notification: None,
         }
     }
 
     /// Configures whether leader mode is actively displayed on the status bar.
     pub fn with_leader(mut self, leader_active: bool) -> Self {
         self.leader_active = leader_active;
+        self
+    }
+
+    /// Configures an optional status notification banner displayed on the status bar.
+    pub fn with_notification(mut self, notification: Option<&'a str>) -> Self {
+        self.notification = notification;
         self
     }
 
@@ -349,6 +357,25 @@ impl<'a> StatusBar<'a> {
         area: Rect,
         buf: &mut Buffer,
     ) {
+        Self::render_to_buffer_with_theme_and_notification(
+            registry,
+            leader_active,
+            None,
+            theme,
+            area,
+            buf,
+        );
+    }
+
+    /// Renders the status bar directly into a Ratatui `Buffer` with an optional notification banner.
+    pub fn render_to_buffer_with_theme_and_notification(
+        registry: &SessionRegistry,
+        leader_active: bool,
+        notification: Option<&str>,
+        theme: &Theme,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -356,7 +383,7 @@ impl<'a> StatusBar<'a> {
         if registry.is_empty() {
             if leader_active {
                 let leader_msg =
-                    "[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
+                    "[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
                 let line = Line::from(Span::styled(
                     leader_msg,
                     Style::default()
@@ -393,7 +420,7 @@ impl<'a> StatusBar<'a> {
 
         if leader_active {
             let leader_msg =
-                "[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
+                "[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
             let leader_len = leader_msg.chars().count() as u16;
             let leader_style = Style::default()
                 .fg(theme.leader_fg)
@@ -406,6 +433,19 @@ impl<'a> StatusBar<'a> {
             } else if area.width >= leader_len {
                 let leader_line = Line::from(Span::styled(leader_msg, leader_style));
                 top_bar = top_bar.with_right_and_padding(leader_line, leader_len, false);
+            }
+        } else if let Some(notif) = notification {
+            let notif_len = notif.chars().count() as u16;
+            let notif_style = Style::default()
+                .fg(theme.status_done)
+                .bg(theme.status_bar_bg)
+                .add_modifier(Modifier::BOLD);
+            if area.width >= tabs_width + notif_len + 2 {
+                let notif_line = Line::from(Span::styled(notif, notif_style));
+                top_bar = top_bar.with_right_and_padding(notif_line, notif_len, true);
+            } else if area.width >= notif_len {
+                let notif_line = Line::from(Span::styled(notif, notif_style));
+                top_bar = top_bar.with_right_and_padding(notif_line, notif_len, false);
             }
         } else {
             let hint = "Ctrl+Space: Actions";
@@ -425,7 +465,14 @@ impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        Self::render_to_buffer_with_theme(self.registry, self.leader_active, theme, area, buf);
+        Self::render_to_buffer_with_theme_and_notification(
+            self.registry,
+            self.leader_active,
+            self.notification,
+            theme,
+            area,
+            buf,
+        );
     }
 }
 
@@ -433,7 +480,14 @@ impl<'a> Widget for &StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        StatusBar::render_to_buffer_with_theme(self.registry, self.leader_active, theme, area, buf);
+        StatusBar::render_to_buffer_with_theme_and_notification(
+            self.registry,
+            self.leader_active,
+            self.notification,
+            theme,
+            area,
+            buf,
+        );
     }
 }
 
@@ -587,7 +641,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered_leader
-            .contains("[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]"));
+            .contains("[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]"));
     }
 
     #[test]
@@ -659,7 +713,7 @@ mod tests {
 
         assert!(rendered.contains("● 1 [ws] proj-backend"));
         assert!(rendered
-            .contains("[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]"));
+            .contains("[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]"));
     }
 
     #[test]
@@ -930,5 +984,31 @@ mod tests {
 
         assert_eq!(str1, str2);
         assert!(str1.contains("Test Bar"));
+    }
+
+    #[test]
+    fn test_status_bar_with_notification() {
+        let mut registry = SessionRegistry::new();
+        let (ps, pty, vt) =
+            create_test_session_with_status("p1", "ws", "claude", SessionStatus::Done);
+        registry.add(ps, pty, vt).unwrap();
+
+        let area = Rect::new(0, 0, 100, 1);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+
+        let status_bar = StatusBar::new(&registry)
+            .with_theme(&theme)
+            .with_notification(Some("✓ Added repository 'docs' to project 'p1'"));
+
+        status_bar.render(area, &mut buf);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("✓ Added repository 'docs' to project 'p1'"));
     }
 }

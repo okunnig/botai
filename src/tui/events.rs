@@ -24,6 +24,8 @@ pub enum RawAction {
     CloseSession,
     /// Opens the in-session Quick Project Launcher modal (`c` / `C`).
     OpenLauncher,
+    /// Opens the Add Repository modal (`a` / `A`).
+    AddRepo,
     /// Quits the entire botai dashboard (`q` / `Q`).
     Quit,
     /// Raw byte sequence forwarded directly to the active session's PTY.
@@ -138,6 +140,9 @@ impl RawLeaderDecoder {
                     }
                     b'c' | b'C' => {
                         actions.push(RawAction::OpenLauncher);
+                    }
+                    b'a' | b'A' => {
+                        actions.push(RawAction::AddRepo);
                     }
                     b'n' | b'N' => {
                         actions.push(RawAction::NextSession);
@@ -945,6 +950,15 @@ mod tests {
 
         decoder.set_leader_active(true);
         assert_eq!(decoder.decode(b"C"), vec![RawAction::OpenLauncher]);
+        assert!(!decoder.is_leader_active());
+
+        // a / A -> AddRepo
+        decoder.set_leader_active(true);
+        assert_eq!(decoder.decode(b"a"), vec![RawAction::AddRepo]);
+        assert!(!decoder.is_leader_active());
+
+        decoder.set_leader_active(true);
+        assert_eq!(decoder.decode(b"A"), vec![RawAction::AddRepo]);
         assert!(!decoder.is_leader_active());
 
         // n / N -> NextSession
