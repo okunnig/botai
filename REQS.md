@@ -255,11 +255,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - **Silence / Inactivity Timeout Fallback**: Employs an idle threshold (default 1,500 ms) as a robust baseline fallback for legacy tools or raw command output not emitting explicit control sequences.
   - **Per-Session Activity Tracking**:
     - Each project session maintains an isolated, independent `ActivityTracker` instance with its own activity clock and state machine, preventing cross-session timer crosstalk.
-- **Background-Aware Desktop Notifications**:
-  - Emits native OS desktop notifications (via `notify-rust` / terminal notifications) with per-project debouncing and cooldown:
+- **In-Memory Notification Tracking & Debouncing**:
+  - Desktop notifications via `notify-rust` are removed to prevent macOS main-thread hangs (where native notification dispatchers block or hang when invoked outside the main Cocoa/AppKit runloop), while real-time TUI status badges, status banners, semantic stream scanning (OSC 133, OSC 9, OSC 777, BEL, inactivity timeouts), and in-memory event tracking are fully preserved.
+  - `NotificationService` maintains in-memory event tracking, per-project debouncing, and cooldown:
+    - Debounces duplicate notification events per project and event type (Completed, WaitingForInput, Error, Custom).
     - An agent CLI process completes a task or exits.
     - An agent transitions to an idle state awaiting user input / approval, or emits a `BEL` / OSC notification.
-  - **Focus-Aware Notification Filtering**: Desktop notifications for waiting/attention events are suppressed if the user is actively viewing and interacting with that specific session, triggering only when the session is running in the background (different project tab, modal dialog, or dashboard open).
+  - **Focus-Aware Notification Filtering**: Attention events for waiting states are suppressed if the user is actively viewing and interacting with that specific session, triggering tracking only when the session is running in the background (different project tab, modal dialog, or dashboard open).
 - **Real-Time Session Indicators in TUI**:
   - Live status indicators formatted as a leading solid round dot symbol (`●` U+25CF) inside project tabs in the status bar (e.g., `  ● 1 [ecommerce] payment-api  `, falling back to `  ● 1 payment-api  ` if template name is empty, with active/inactive styling):
     - ● **Busy / Thinking**: Themed Busy color (`theme.status_busy`, e.g., Cyan / Electric Blue / Amber) when agent is actively executing.
@@ -282,6 +284,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - PTY sessions define `PtyWaker = Arc<dyn Fn() + Send + Sync>` configured via `PtySession::set_waker` and `SessionRegistry::set_waker`. Whenever `pty-reader` reads bytes (`n > 0`), it invokes the waker callback.
   - In `TuiApp`, the PTY waker is connected to the raw stdin channel (`stdin_tx`), sending an empty wake-up pulse (`Vec::new()`).
   - In `run_loop_with_receiver`, incoming bytes on `stdin_rx` are demuxed: non-empty bytes are forwarded to `handle_input_bytes` (marking `dirty = true`), while empty vectors (wake-up pulses) bypass input decoding and immediately trigger `process_pty_streams()`, achieving instant event-driven terminal redrawing.
+- **EINTR Retry Resilience on Reader Threads**:
+  - Both the stdin reader thread (`src/tui/app.rs`) and child PTY reader threads (`src/session/pty.rs`) explicitly handle `std::io::ErrorKind::Interrupted` (`EINTR`) errors by retrying `read()` within their processing loops instead of exiting prematurely.
+  - Guarantees thread survival and continuous stream delivery when asynchronous POSIX signals (e.g. `SIGWINCH` on terminal resize, `SIGCHLD`, or process control signals) interrupt ongoing blocking read syscalls.
 - **Consolidated Process Status Polling**:
   - Lifecycle state and exit codes for active sessions are retrieved using a single consolidated `try_wait` invocation per session, eliminating redundant duplicate `waitpid` syscalls and mutex locking in the render loop.
 - **Zero-Allocation VT Cell Rendering & High-Throughput Performance**:
@@ -325,6 +330,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Unmodified Carriage Return (`KeyCode::Char('\r')` with no modifiers): `\r` (`0x0D`, CR).
     - Ctrl+J (`KeyCode::Char('j')` with Ctrl, or unmodified `\n`): `0x0A` (LF).
     - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`; `Super+Enter` -> `\x1b[13;9u`).
+    - **CSI-u Unmodified Enter Normalization**:
+      - Terminals supporting Kitty keyboard protocol with `DISAMBIGUATE_ESCAPE_CODES` (such as iTerm2 3.7.2, Ghostty) send `\x1b[13u` or `\x1b[13;1u` for unmodified Enter instead of raw CR (`\r`).
+      - In `RawAction::Passthrough`, CSI-u unmodified Enter sequences (`\x1b[13u`, `\x1b[13;1u`, `\x1b[13;1:1u`, `\x1b[13:10u`, `\x1b[13:10;1u`, `\x1b[13:10;1:1u`, as well as `\x1b[10u`, `\x1b[10;1u`, and keypad Enter `\x1b[57414u`, `\x1b[57414;1u`) are normalized to `b"\r"` before writing to the child PTY. This ensures child shells and AI agent CLI processes receive standard carriage returns for command submission rather than unrecognized escape sequences. In addition, CSI-u unmodified Enter sequences dismiss active errored session banners.
     - **Seamless Agent-Aware Shift+Enter Multiline Routing**:
       - Inspects the active session (`active.project_session.agent`) when receiving raw Shift+Enter sequences (Kitty CSI-u `\x1b[13;<mod>u` with Shift bit, sub-parameters `\x1b[13;2:1u`, alternate codepoints `\x1b[13:10;2u`, or xterm modifyOtherKeys `\x1b[27;<mod>;13~`):
         - For `claude` (or non-Kitty agents): Sends `b"\n"` (`0x0A` / Line Feed) so Claude Code inserts a clean multiline newline instead of submitting.
@@ -376,7 +384,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Last / Only Session Scenario (Context-Aware Exit)**:
     - If `botai` was launched from the dashboard, terminating the last session automatically transitions back to the interactive project dashboard (with refreshed project directories).
     - If `botai` was launched directly via CLI (`botai create --attach` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
-  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
+  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed. Pressing Enter (including raw CR `\r`, LF `\n`, plain Space, or Kitty CSI-u unmodified Enter sequences such as `\x1b[13u`, `\x1b[13;1u`, and keypad Enter `\x1b[57414u`) or `Ctrl+Space w` dismisses the errored session tab.
 - **Child Process Lifecycle Management & Process Reaping (`PtySession`)**:
   - `PtySession` implements `Drop` to kill and reap child processes automatically when dropped (or when an active session, `SessionEntry`, or `SessionRegistry` is removed or dropped), preventing orphaned or zombie processes in the operating system process table.
   - `PtySession::kill()` explicitly terminates running processes and invokes `child.wait()` to reap process entries from the OS process table.

@@ -625,6 +625,29 @@ fn test_integration_shift_enter_multiline_support_claude_vs_agy_and_enter() {
         app.registry.active_session().unwrap().status(),
         SessionStatus::Busy
     );
+
+    // CSI-u unmodified Enter normalization (\x1b[13u, \x1b[13;1u)
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\x1b[13u");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
+
+    app.registry
+        .active_session_mut()
+        .unwrap()
+        .project_session
+        .set_status(SessionStatus::WaitingForInput);
+    app.handle_raw_bytes(b"\x1b[13;1u");
+    assert_eq!(
+        app.registry.active_session().unwrap().status(),
+        SessionStatus::Busy
+    );
 }
 
 #[test]

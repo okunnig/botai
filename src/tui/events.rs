@@ -241,12 +241,19 @@ pub fn is_shift_enter(bytes: &[u8]) -> bool {
                 .unwrap_or("");
             if key_code == "13" || key_code == "10" {
                 if let Some(mod_part) = parts.get(1) {
-                    if let Some(mod_str) = mod_part.split(':').next() {
-                        if let Ok(m) = mod_str.parse::<u32>() {
-                            let mod_bits = m.saturating_sub(1);
-                            if (mod_bits & 1) != 0 {
-                                return true;
-                            }
+                    let mut mod_subparts = mod_part.split(':');
+                    let mod_str = mod_subparts.next().unwrap_or("");
+                    let event_type = mod_subparts.next();
+
+                    // If event type is present, reject release events (event_type 3)
+                    if event_type == Some("3") {
+                        return false;
+                    }
+
+                    if let Ok(m) = mod_str.parse::<u32>() {
+                        let mod_bits = m.saturating_sub(1);
+                        if (mod_bits & 1) != 0 {
+                            return true;
                         }
                     }
                 }
@@ -270,6 +277,59 @@ pub fn is_shift_enter(bytes: &[u8]) -> bool {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Returns whether the given raw byte sequence represents an unmodified Enter CSI-u escape sequence.
+///
+/// Terminals supporting Kitty keyboard protocol with `DISAMBIGUATE_ESCAPE_CODES` (such as
+/// iTerm2 3.7.2, Ghostty) send `\x1b[13u` or `\x1b[13;1u` for unmodified Enter instead of raw CR (`\r`).
+pub fn is_unmodified_enter(bytes: &[u8]) -> bool {
+    // Must be a CSI-u sequence: \x1b[...u
+    if !bytes.starts_with(b"\x1b[") || !bytes.ends_with(b"u") || bytes.len() < 4 {
+        return false;
+    }
+
+    if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
+        let parts: Vec<&str> = param_str.split(';').collect();
+        let key_code = parts
+            .first()
+            .and_then(|s| s.split(':').next())
+            .unwrap_or("");
+
+        if key_code == "13" || key_code == "10" || key_code == "57414" {
+            // Case 1: No modifiers specified (\x1b[13u, \x1b[13:10u, \x1b[10u)
+            if parts.len() == 1 {
+                return true;
+            }
+
+            // Case 2: Modifiers specified (\x1b[13;1u, \x1b[13;1:1u, etc.)
+            if let Some(mod_part) = parts.get(1) {
+                let mut mod_subparts = mod_part.split(':');
+                let mod_str = mod_subparts.next().unwrap_or("");
+                let event_type = mod_subparts.next();
+
+                // If event type is present, reject release events (event_type 3)
+                if event_type == Some("3") {
+                    return false;
+                }
+
+                // Unmodified modifier is 1 (or omitted/empty)
+                if mod_str.is_empty() || mod_str == "1" {
+                    return true;
+                }
+
+                // If numeric, check whether any actual modifier key (Shift=1, Alt=2, Ctrl=4, Super=8) is pressed
+                if let Ok(m) = mod_str.parse::<u32>() {
+                    let mod_bits = m.saturating_sub(1);
+                    if (mod_bits & (1 | 2 | 4 | 8)) == 0 {
+                        return true;
                     }
                 }
             }
@@ -558,7 +618,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
 
                     if let Some(cp) = codepoint {
                         let code = match cp {
-                            13 => KeyCode::Enter,
+                            13 | 57414 => KeyCode::Enter,
                             9 => {
                                 if modifiers.contains(KeyModifiers::SHIFT) {
                                     KeyCode::BackTab
@@ -1622,9 +1682,56 @@ mod tests {
         // Negative cases
         assert!(!is_shift_enter(b"\x1b[13;5u")); // Ctrl+Enter
         assert!(!is_shift_enter(b"\x1b[13;1u")); // Unmodified Enter
+        assert!(!is_shift_enter(b"\x1b[13;2:3u")); // Shift+Enter release event
+        assert!(!is_shift_enter(b"\x1b[10;2:3u")); // Shift+LF release event
+        assert!(!is_shift_enter(b"\x1b[13:10;2:3u")); // Alternate Shift+Enter release event
         assert!(!is_shift_enter(b"\r"));
         assert!(!is_shift_enter(b"\n"));
         assert!(!is_shift_enter(b"\x1b[32;5u")); // Ctrl+Space
+    }
+
+    #[test]
+    fn test_is_unmodified_enter() {
+        // Positive cases: Kitty keyboard protocol unmodified enter variants
+        assert!(is_unmodified_enter(b"\x1b[13u"));
+        assert!(is_unmodified_enter(b"\x1b[13;1u"));
+        assert!(is_unmodified_enter(b"\x1b[13;1:1u"));
+        assert!(is_unmodified_enter(b"\x1b[13:10u"));
+        assert!(is_unmodified_enter(b"\x1b[13:10;1u"));
+        assert!(is_unmodified_enter(b"\x1b[13:10;1:1u"));
+        assert!(is_unmodified_enter(b"\x1b[10u"));
+        assert!(is_unmodified_enter(b"\x1b[10;1u"));
+        assert!(is_unmodified_enter(b"\x1b[10;1:1u"));
+        assert!(is_unmodified_enter(b"\x1b[13;1:2u")); // Repeat event
+
+        // Positive cases: Keypad Enter (codepoint 57414 in Kitty keyboard protocol)
+        assert!(is_unmodified_enter(b"\x1b[57414u"));
+        assert!(is_unmodified_enter(b"\x1b[57414;1u"));
+        assert!(is_unmodified_enter(b"\x1b[57414;1:1u"));
+
+        // Positive cases: lock keys active with no modifier keys pressed
+        assert!(is_unmodified_enter(b"\x1b[13;65u")); // CapsLock (64 + 1)
+        assert!(is_unmodified_enter(b"\x1b[13;129u")); // NumLock (128 + 1)
+
+        // Negative cases: Modified Enter
+        assert!(!is_unmodified_enter(b"\x1b[13;2u")); // Shift+Enter
+        assert!(!is_unmodified_enter(b"\x1b[13;2:1u")); // Shift+Enter with event type
+        assert!(!is_unmodified_enter(b"\x1b[13;3u")); // Alt+Enter
+        assert!(!is_unmodified_enter(b"\x1b[13;5u")); // Ctrl+Enter
+        assert!(!is_unmodified_enter(b"\x1b[13;9u")); // Super+Enter
+        assert!(!is_unmodified_enter(b"\x1b[57414;2u")); // Shift+Keypad Enter
+
+        // Negative cases: Key release event (event type 3)
+        assert!(!is_unmodified_enter(b"\x1b[13;1:3u"));
+        assert!(!is_unmodified_enter(b"\x1b[57414;1:3u"));
+
+        // Negative cases: Raw non-escape characters and other keys
+        assert!(!is_unmodified_enter(b"\r"));
+        assert!(!is_unmodified_enter(b"\n"));
+        assert!(!is_unmodified_enter(b"\x1b[32;1u")); // Space
+        assert!(!is_unmodified_enter(b"\x1b[13~"));
+        assert!(!is_unmodified_enter(b""));
+        assert!(!is_unmodified_enter(b"hello"));
     }
 
     #[test]

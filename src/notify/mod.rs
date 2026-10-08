@@ -346,17 +346,6 @@ impl NotificationService {
 
         self.last_notified.insert(key, now);
 
-        // Attempt delivery via notify-rust (gracefully handle headless/mock environments)
-        #[cfg(not(test))]
-        {
-            let _ = notify_rust::Notification::new()
-                .summary(&event.title())
-                .body(&event.body())
-                .appname("botai")
-                .timeout(notify_rust::Timeout::Milliseconds(5000))
-                .show();
-        }
-
         Ok(true)
     }
 }
