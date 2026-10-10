@@ -483,5 +483,5 @@ repos = []
 
     assert!(rendered.contains("svc-running"));
     assert!(rendered.contains("svc-stopped"));
-    assert!(rendered.contains("●"));
+    assert!(rendered.contains("○"));
 }

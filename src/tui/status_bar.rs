@@ -123,8 +123,72 @@ impl<'a> Widget for &TopBar<'a> {
     }
 }
 
+/// Truncates a label string to at most `max_chars` characters, appending an ellipsis `…` if truncated.
+pub fn truncate_label(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return s.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let take_count = max_chars.saturating_sub(1);
+    let mut truncated: String = s.chars().take(take_count).collect();
+    truncated.push('…');
+    truncated
+}
+
+/// Dynamically and gracefully truncates template and project names to fit within `max_tab_width`.
+///
+/// Prioritizes keeping the project name clear for agent session identification while shrinking
+/// or omitting template names when horizontal space is constrained.
+pub fn smart_truncate_tab_title(
+    template: &str,
+    project: &str,
+    max_tab_width: usize,
+) -> (String, String) {
+    let tpl_trimmed = template.trim();
+    if tpl_trimmed.is_empty() {
+        let overhead = 8; // "  ● 1 proj  " (sym, hotkey, spaces)
+        let max_proj = max_tab_width.saturating_sub(overhead);
+        return (String::new(), truncate_label(project, max_proj));
+    }
+
+    let overhead = 11; // "  ● 1 [tpl] proj  "
+    let tpl_len = tpl_trimmed.chars().count();
+    let proj_len = project.chars().count();
+
+    if tpl_len + proj_len + overhead <= max_tab_width {
+        return (tpl_trimmed.to_string(), project.to_string());
+    }
+
+    let budget = max_tab_width.saturating_sub(overhead);
+    // If budget is very tight, omit template to preserve maximum project clarity
+    if budget < 8 {
+        let max_proj = max_tab_width.saturating_sub(8);
+        return (String::new(), truncate_label(project, max_proj));
+    }
+
+    // Attempt to keep project intact and truncate template down to at least 4 chars
+    if budget >= proj_len.saturating_add(4) {
+        let tpl_alloc = budget.saturating_sub(proj_len);
+        (truncate_label(tpl_trimmed, tpl_alloc), project.to_string())
+    } else {
+        // If both need truncation, allocate a compact 4..6 chars to template and the rest to project
+        let tpl_alloc = 5.min(budget / 3).max(3);
+        let proj_alloc = budget.saturating_sub(tpl_alloc);
+        (
+            truncate_label(tpl_trimmed, tpl_alloc),
+            truncate_label(project, proj_alloc),
+        )
+    }
+}
+
 /// Computes the sliding window `(start, end)` of visible tab indices centered around `active_idx`
 /// such that the total length of visible tabs fits within `max_width`.
+///
+/// When tabs overflow `max_width`, 4 columns are reserved to accommodate overflow indicator arrows
+/// (`"◀ "` on the left and `" ▶"` on the right).
 pub fn compute_visible_tab_range(
     tab_lens: &[usize],
     active_idx: usize,
@@ -139,6 +203,8 @@ pub fn compute_visible_tab_range(
         return (0, tab_lens.len());
     }
 
+    // Reserve 4 columns for overflow arrows ("◀ " and " ▶")
+    let budget = max_width.saturating_sub(4);
     let act = active_idx.min(tab_lens.len().saturating_sub(1));
     let mut start = act;
     let mut end = act + 1;
@@ -147,7 +213,7 @@ pub fn compute_visible_tab_range(
     // Expand rightwards as much as possible
     while end < tab_lens.len() {
         let next_len = tab_lens[end] as u16;
-        if used_width + next_len <= max_width {
+        if used_width.saturating_add(next_len) <= budget {
             used_width += next_len;
             end += 1;
         } else {
@@ -158,7 +224,7 @@ pub fn compute_visible_tab_range(
     // Expand leftwards as much as possible
     while start > 0 {
         let prev_len = tab_lens[start - 1] as u16;
-        if used_width + prev_len <= max_width {
+        if used_width.saturating_add(prev_len) <= budget {
             used_width += prev_len;
             start -= 1;
         } else {
@@ -206,13 +272,14 @@ impl<'a> StatusBar<'a> {
             "-".to_string()
         };
 
+        let sym = session.status().status_symbol();
         let proj = session.project_name();
         let tpl = session.template_name().trim();
 
         if tpl.is_empty() {
-            format!("  ● {hotkey} {proj}  ")
+            format!("  {sym} {hotkey} {proj}  ")
         } else {
-            format!("  ● {hotkey} [{tpl}] {proj}  ")
+            format!("  {sym} {hotkey} [{tpl}] {proj}  ")
         }
     }
 
@@ -230,7 +297,13 @@ impl<'a> StatusBar<'a> {
         };
 
         let proj = session.project_name();
-        let dot_color = session.status().status_color(theme);
+        let mut dot_color = session.status().status_color(theme);
+        // Contrast fallback guard on active tabs: if dot color collides with active tab bg, use active tab fg
+        if is_active && dot_color == theme.tab_active_bg {
+            dot_color = theme.tab_active_fg;
+        }
+
+        let sym = session.status().status_symbol();
         let tpl = session.template_name().trim();
         let label = if tpl.is_empty() {
             format!(" {hotkey} {proj}  ")
@@ -250,7 +323,7 @@ impl<'a> StatusBar<'a> {
 
             vec![
                 Span::styled("  ", active_style),
-                Span::styled("●", dot_style_active),
+                Span::styled(sym, dot_style_active),
                 Span::styled(label, active_style),
             ]
         } else {
@@ -261,7 +334,7 @@ impl<'a> StatusBar<'a> {
 
             vec![
                 Span::styled("  ", inactive_style),
-                Span::styled("●", dot_style_inactive),
+                Span::styled(sym, dot_style_inactive),
                 Span::styled(label, inactive_style),
             ]
         }
@@ -274,7 +347,7 @@ impl<'a> StatusBar<'a> {
         max_width: u16,
         theme: &'b Theme,
     ) -> Line<'b> {
-        if sessions.is_empty() {
+        if sessions.is_empty() || max_width == 0 {
             return Line::default();
         }
 
@@ -319,7 +392,7 @@ impl<'a> StatusBar<'a> {
 
         if visible_end < tab_spans_list.len() {
             spans.push(Span::styled(
-                "▶",
+                " ▶",
                 Style::default()
                     .fg(theme.leader_bg)
                     .bg(theme.status_bar_bg)
@@ -386,11 +459,6 @@ impl<'a> StatusBar<'a> {
         let active_idx = registry.active_index().unwrap_or(0);
         let sessions = registry.list();
 
-        let tabs_line = Self::build_tabs_line(&sessions, active_idx, area.width, theme);
-        let tabs_width = tabs_line.width() as u16;
-
-        let mut top_bar = TopBar::new(tabs_line).with_theme(theme);
-
         if leader_active {
             let leader_msg =
                 "[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
@@ -400,24 +468,41 @@ impl<'a> StatusBar<'a> {
                 .bg(theme.leader_bg)
                 .add_modifier(Modifier::BOLD);
 
-            if area.width >= tabs_width + leader_len + 2 {
+            let needed_leader_width = leader_len + 1;
+            let tabs_max_width = area.width.saturating_sub(needed_leader_width);
+
+            let tabs_line = Self::build_tabs_line(&sessions, active_idx, tabs_max_width, theme);
+            let mut top_bar = TopBar::new(tabs_line).with_theme(theme);
+
+            if area.width >= needed_leader_width {
                 let leader_line = Line::from(Span::styled(leader_msg, leader_style));
                 top_bar = top_bar.with_right_and_padding(leader_line, leader_len, true);
             } else if area.width >= leader_len {
                 let leader_line = Line::from(Span::styled(leader_msg, leader_style));
                 top_bar = top_bar.with_right_and_padding(leader_line, leader_len, false);
             }
+
+            top_bar.render_to_buffer(area, buf);
         } else {
             let hint = "Ctrl+Space: Actions";
             let hint_len = hint.chars().count() as u16;
-            if area.width >= tabs_width + hint_len + 2 {
+            let needed_hint_width = hint_len + 1;
+
+            let full_tabs_line = Self::build_tabs_line(&sessions, active_idx, area.width, theme);
+            let full_tabs_width = full_tabs_line.width() as u16;
+
+            if area.width > full_tabs_width + needed_hint_width {
                 let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
                 let hint_line = Line::from(Span::styled(hint, hint_style));
-                top_bar = top_bar.with_right_and_padding(hint_line, hint_len, true);
+                let top_bar = TopBar::new(full_tabs_line)
+                    .with_theme(theme)
+                    .with_right_and_padding(hint_line, hint_len, true);
+                top_bar.render_to_buffer(area, buf);
+            } else {
+                let top_bar = TopBar::new(full_tabs_line).with_theme(theme);
+                top_bar.render_to_buffer(area, buf);
             }
         }
-
-        top_bar.render_to_buffer(area, buf);
     }
 }
 
@@ -537,7 +622,7 @@ mod tests {
             assert_eq!(active_spans[0].style.fg, Some(theme.tab_active_fg));
             assert_eq!(active_spans[0].style.bg, Some(theme.tab_active_bg));
 
-            assert_eq!(active_spans[1].content, "●");
+            assert_eq!(active_spans[1].content, status.status_symbol());
             assert_eq!(active_spans[1].style.fg, Some(expected_color));
             assert_eq!(active_spans[1].style.bg, Some(theme.tab_active_bg));
 
@@ -552,7 +637,7 @@ mod tests {
             assert_eq!(inactive_spans[0].style.fg, Some(theme.tab_inactive_fg));
             assert_eq!(inactive_spans[0].style.bg, Some(theme.tab_inactive_bg));
 
-            assert_eq!(inactive_spans[1].content, "●");
+            assert_eq!(inactive_spans[1].content, status.status_symbol());
             assert_eq!(inactive_spans[1].style.fg, Some(expected_color));
             assert_eq!(inactive_spans[1].style.bg, Some(theme.tab_inactive_bg));
 
@@ -622,7 +707,7 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("● 1 [ws] proj-backend"));
-        assert!(rendered.contains("● 2 [ws] proj-frontend"));
+        assert!(rendered.contains("? 2 [ws] proj-frontend"));
         assert!(rendered.contains("Ctrl+Space: Actions"));
 
         // Verify status dot colors in buffer cells
@@ -636,7 +721,7 @@ mod tests {
         // Tab 1 length: "  ● 1 [ws] proj-backend  ".chars().count() = 25, + 1 separator space = 26
         // Tab 2 starts at x = 26: "  " (2 chars) -> dot at x = 28
         let dot_cell_2 = buffer.cell((28, 0)).unwrap();
-        assert_eq!(dot_cell_2.symbol(), "●");
+        assert_eq!(dot_cell_2.symbol(), "?");
         assert_eq!(dot_cell_2.fg, theme.status_waiting);
         assert_eq!(dot_cell_2.bg, theme.tab_inactive_bg);
     }
@@ -682,7 +767,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered_wide.contains("● 1 [ws] p1"));
-        assert!(rendered_wide.contains("● 2 [ws] p2"));
+        assert!(rendered_wide.contains("? 2 [ws] p2"));
         assert!(rendered_wide.contains("Ctrl+Space: Actions"));
 
         // 2. Tight buffer (35 cols) -> Tabs visible, hint cleanly omitted
@@ -719,9 +804,9 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        // Active tab 8 MUST be rendered
+        // Active tab 8 MUST be rendered with Done checkmark symbol '✓'
         assert!(
-            rendered60.contains("● 8 [ws] service-long-name-8"),
+            rendered60.contains("✓ 8 [ws] service-long-name-8"),
             "Rendered output must contain active tab 8, got: {rendered60}"
         );
     }
@@ -812,13 +897,15 @@ mod tests {
 
                 // Dot cell is at (2, 0)
                 let dot_cell = buffer.cell((2, 0)).unwrap();
-                assert_eq!(dot_cell.symbol(), "●");
+                assert_eq!(dot_cell.symbol(), status.status_symbol());
+                let mut expected_fg = status.status_color(theme);
+                if expected_fg == theme.tab_active_bg {
+                    expected_fg = theme.tab_active_fg;
+                }
                 assert_eq!(
-                    dot_cell.fg,
-                    status.status_color(theme),
+                    dot_cell.fg, expected_fg,
                     "Status color mismatch for {:?} under theme {}",
-                    status,
-                    theme.name
+                    status, theme.name
                 );
                 assert_eq!(dot_cell.bg, theme.tab_active_bg);
             }
@@ -847,8 +934,138 @@ mod tests {
         // Start at 5 (len 10), expand right: 6 (20), 7 (30), 8 (40), stop right. Left 4 cannot fit (50 > 45) -> (5, 9)
         assert_eq!(compute_visible_tab_range(&ten_tabs, 5, 45), (5, 9));
 
-        // 6. Active index out of bounds clamped safely
-        assert_eq!(compute_visible_tab_range(&ten_tabs, 99, 30), (7, 10));
+        // 6. Active index out of bounds clamped safely (budget = 30 - 4 = 26, fits 2 tabs: 8 and 9)
+        assert_eq!(compute_visible_tab_range(&ten_tabs, 99, 30), (8, 10));
+    }
+
+    #[test]
+    fn test_status_bar_contrast_fallback_guard_on_active_tab() {
+        // Create a custom theme where status_busy collides with tab_active_bg
+        let mut colliding_theme = Theme::tokyo_night();
+        colliding_theme.status_busy = colliding_theme.tab_active_bg;
+
+        let (ps, pty, vt) =
+            create_test_session_with_status("colliding-tab", "ws", "claude", SessionStatus::Busy);
+        let entry = SessionEntry::new(ps, pty, vt);
+
+        // Active tab format spans must fall back to tab_active_fg
+        let active_spans = StatusBar::format_tab_spans(0, &entry, true, &colliding_theme);
+        let dot_span = &active_spans[1];
+        assert_eq!(dot_span.content, "●");
+        assert_eq!(dot_span.style.fg, Some(colliding_theme.tab_active_fg));
+        assert_eq!(dot_span.style.bg, Some(colliding_theme.tab_active_bg));
+
+        // Inactive tab keeps original status color against tab_inactive_bg
+        let inactive_spans = StatusBar::format_tab_spans(1, &entry, false, &colliding_theme);
+        assert_eq!(
+            inactive_spans[1].style.fg,
+            Some(colliding_theme.tab_active_bg)
+        );
+    }
+
+    #[test]
+    fn test_smart_truncate_tab_title_and_label() {
+        // truncate_label tests
+        assert_eq!(truncate_label("short", 10), "short");
+        assert_eq!(truncate_label("exact", 5), "exact");
+        assert_eq!(truncate_label("toolongstring", 8), "toolong…");
+        assert_eq!(truncate_label("abc", 0), "");
+        assert_eq!(truncate_label("abc", 1), "…");
+
+        // smart_truncate_tab_title tests
+        // Fits comfortably
+        let (tpl, proj) = smart_truncate_tab_title("ecommerce", "payment-api", 35);
+        assert_eq!(tpl, "ecommerce");
+        assert_eq!(proj, "payment-api");
+
+        // Moderate constraint: template truncated, project preserved intact
+        let (tpl_trunc, proj_intact) =
+            smart_truncate_tab_title("microservices-platform", "auth-gateway", 27);
+        assert_eq!(proj_intact, "auth-gateway");
+        assert!(tpl_trunc.ends_with('…'));
+
+        // Very tight constraint: template omitted or compact, project shortened
+        let (tpl_omitted, proj_trunc) =
+            smart_truncate_tab_title("backend", "feature-long-name", 15);
+        assert!(proj_trunc.ends_with('…'));
+        assert!(tpl_omitted.is_empty() || tpl_omitted.ends_with('…'));
+
+        // Empty template fallback
+        let (tpl_empty, proj_short) = smart_truncate_tab_title("", "my-feature-branch", 18);
+        assert!(tpl_empty.is_empty());
+        assert!(proj_short.ends_with('…'));
+    }
+
+    #[test]
+    fn test_status_bar_leader_mode_constrained_tabs_width() {
+        let mut registry = SessionRegistry::new();
+        for i in 1..=5 {
+            let name = format!("service-{}", i);
+            let (ps, pty, vt) =
+                create_test_session_with_status(&name, "template", "claude", SessionStatus::Busy);
+            registry.add(ps, pty, vt).unwrap();
+        }
+        registry.set_active_index(2).unwrap(); // Active is service-3
+
+        let theme = Theme::tokyo_night();
+        // Buffer width 110: leader menu is 73 (+ 1 = 74 cols). Available for tabs = 110 - 74 = 36 cols.
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 110, 1));
+        StatusBar::render_to_buffer_with_theme(
+            &registry,
+            true,
+            &theme,
+            Rect::new(0, 0, 110, 1),
+            &mut buffer,
+        );
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        // Must render leader command menu on the right
+        assert!(rendered
+            .contains("[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]"));
+        // Active tab service-3 MUST be visible on the left
+        assert!(rendered.contains("3 [template] service-3"));
+    }
+
+    #[test]
+    fn test_status_bar_overflow_arrow_reservation_and_formatting() {
+        let mut registry = SessionRegistry::new();
+        for i in 1..=8 {
+            let (ps, pty, vt) = create_test_session_with_status(
+                &format!("proj-{}", i),
+                "ws",
+                "claude",
+                SessionStatus::Busy,
+            );
+            registry.add(ps, pty, vt).unwrap();
+        }
+        registry.set_active_index(3).unwrap(); // 4th tab is active (middle)
+
+        let theme = Theme::tokyo_night();
+        // Constrain width so overflow arrows appear on both sides
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 50, 1));
+        StatusBar::render_to_buffer_with_theme(
+            &registry,
+            false,
+            &theme,
+            Rect::new(0, 0, 50, 1),
+            &mut buffer,
+        );
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        // Left overflow arrow formatted as "◀ "
+        assert!(rendered.contains("◀ "));
+        // Right overflow arrow symmetrically formatted as " ▶"
+        assert!(rendered.contains(" ▶"));
     }
 
     #[test]

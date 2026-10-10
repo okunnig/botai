@@ -505,7 +505,10 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
                             .bg(theme.selection_bg)
                             .add_modifier(Modifier::BOLD);
                     }
-                    spans.push(Span::styled("● ", dot_style));
+                    spans.push(Span::styled(
+                        format!("{} ", status.status_symbol()),
+                        dot_style,
+                    ));
                 } else {
                     spans.push(Span::styled("  ", base_style));
                 }
@@ -1280,17 +1283,17 @@ command = "claude"
 
         // Row 2 (y = 3): proj-wait (unselected) -> prefix "   ", dot at x = 4
         let cell_wait_dot = buf.cell((4, 3)).unwrap();
-        assert_eq!(cell_wait_dot.symbol(), "●");
+        assert_eq!(cell_wait_dot.symbol(), "?");
         assert_eq!(cell_wait_dot.fg, theme.status_waiting);
 
         // Row 3 (y = 4): proj-done -> dot at x = 4
         let cell_done_dot = buf.cell((4, 4)).unwrap();
-        assert_eq!(cell_done_dot.symbol(), "●");
+        assert_eq!(cell_done_dot.symbol(), "✓");
         assert_eq!(cell_done_dot.fg, theme.status_done);
 
         // Row 4 (y = 5): proj-err -> dot at x = 4
         let cell_err_dot = buf.cell((4, 5)).unwrap();
-        assert_eq!(cell_err_dot.symbol(), "●");
+        assert_eq!(cell_err_dot.symbol(), "✗");
         assert_eq!(cell_err_dot.fg, theme.status_error);
 
         // Row 5 (y = 6): proj-inactive -> no dot, spaces at x = 4 and x = 5, project name starts at x = 6
