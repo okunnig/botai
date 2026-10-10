@@ -351,7 +351,7 @@ impl<'a> StatusBar<'a> {
 
     /// Builds the styled `Line` for all visible session tabs within the given available width.
     pub fn build_tabs_line<'b>(
-        sessions: &[&SessionEntry],
+        sessions: &[SessionEntry],
         active_idx: usize,
         max_width: u16,
         theme: &'b Theme,
@@ -480,7 +480,7 @@ impl<'a> StatusBar<'a> {
             let needed_leader_width = leader_len + 1;
             let tabs_max_width = area.width.saturating_sub(needed_leader_width);
 
-            let tabs_line = Self::build_tabs_line(&sessions, active_idx, tabs_max_width, theme);
+            let tabs_line = Self::build_tabs_line(sessions, active_idx, tabs_max_width, theme);
             let mut top_bar = TopBar::new(tabs_line).with_theme(theme);
 
             if area.width >= needed_leader_width {
@@ -497,7 +497,7 @@ impl<'a> StatusBar<'a> {
             let hint_len = hint.chars().count() as u16;
             let needed_hint_width = hint_len + 1;
 
-            let full_tabs_line = Self::build_tabs_line(&sessions, active_idx, area.width, theme);
+            let full_tabs_line = Self::build_tabs_line(sessions, active_idx, area.width, theme);
             let full_tabs_width = full_tabs_line.width() as u16;
 
             if area.width > full_tabs_width + needed_hint_width {
@@ -1156,6 +1156,36 @@ mod tests {
 
         assert_eq!(str1, str2);
         assert!(str1.contains("Test Bar"));
+    }
+
+    #[test]
+    fn test_status_bar_build_tabs_line_slice_input() {
+        let theme = Theme::tokyo_night();
+        let mut registry = SessionRegistry::new();
+        let (ps1, pty1, vt1) =
+            create_test_session_with_status("slice-tab1", "ws", "claude", SessionStatus::Busy);
+        let (ps2, pty2, vt2) = create_test_session_with_status(
+            "slice-tab2",
+            "ws",
+            "agy",
+            SessionStatus::WaitingForInput,
+        );
+
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        // Pass registry.list() directly as &[SessionEntry] slice
+        let sessions_slice: &[SessionEntry] = registry.list();
+        let tabs_line = StatusBar::build_tabs_line(sessions_slice, 0, 100, &theme);
+
+        let rendered = tabs_line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+
+        assert!(rendered.contains("● 1 [ws] slice-tab1"));
+        assert!(rendered.contains("? 2 [ws] slice-tab2"));
     }
 
     #[test]

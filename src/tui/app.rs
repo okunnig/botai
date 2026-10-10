@@ -480,7 +480,6 @@ impl TuiApp {
     /// Extracts a map of project names to their current session status from the registry.
     pub fn running_sessions_map(&self) -> HashMap<String, SessionStatus> {
         self.registry
-            .list()
             .iter()
             .map(|s| (s.project_name().to_string(), s.status()))
             .collect()
@@ -945,7 +944,6 @@ impl TuiApp {
             DashboardAction::Attach(project) => {
                 if let Some(pos) = self
                     .registry
-                    .list()
                     .iter()
                     .position(|s| s.project_name() == project)
                 {
@@ -1172,7 +1170,6 @@ impl TuiApp {
     pub fn attach_project(&mut self, project_name: &str) -> anyhow::Result<()> {
         if let Some(pos) = self
             .registry
-            .list()
             .iter()
             .position(|s| s.project_name() == project_name)
         {

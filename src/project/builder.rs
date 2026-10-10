@@ -550,35 +550,126 @@ impl ProjectBuilder {
             let project_dir_canon =
                 dunce::canonicalize(&project_dir).unwrap_or_else(|_| project_dir.clone());
 
-            let mut created_mappings: Vec<RepoMapping> = Vec::new();
-            for repo in &resolved_repos {
-                let worktree_path = project_dir_canon.join(&repo.name);
-                progress_sink(ProjectSetupEvent::Log(format!(
-                    "[3/4] Creating git worktree for '{}' at {}...",
-                    repo.name,
-                    worktree_path.display()
-                )));
+            // Group repositories by backing repository path (`repo.local_path`) so distinct
+            // backing repos run concurrently in std::thread::scope, while multiple worktrees
+            // sharing the same backing repo run sequentially to prevent git index.lock collisions.
+            let mut repo_groups: HashMap<PathBuf, Vec<(usize, &ResolvedRepo)>> = HashMap::new();
+            for (idx, repo) in resolved_repos.iter().enumerate() {
+                repo_groups
+                    .entry(repo.local_path.clone())
+                    .or_default()
+                    .push((idx, repo));
+            }
 
-                if let Err(err) =
-                    create_worktree(&repo.local_path, &worktree_path, trimmed_project_name)
-                {
-                    rollback_worktrees(&created_mappings, trimmed_project_name);
-                    // `create_worktree` returns BranchAlreadyExists before invoking git, so
-                    // for any other error the branch of this name is one it just created.
-                    // Reachable for a repo cloned in step 2, which `validate` could not check.
-                    if !matches!(err, GitError::BranchAlreadyExists { .. }) {
-                        let _ = delete_branch(&repo.local_path, trimmed_project_name);
-                    }
-                    let _ = fs::remove_dir_all(&project_dir);
-                    anyhow::bail!("Failed to create worktree for '{}': {}", repo.name, err);
+            enum WorktreeMsg {
+                Log(String),
+                Success(usize, RepoMapping),
+                Failure {
+                    index: usize,
+                    name: String,
+                    local_path: PathBuf,
+                    error: GitError,
+                },
+            }
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut created_mappings_indexed: Vec<(usize, RepoMapping)> = Vec::new();
+            let mut failed_creations: Vec<(usize, String, PathBuf, GitError)> = Vec::new();
+
+            std::thread::scope(|s| {
+                for repos in repo_groups.values() {
+                    let thread_tx = tx.clone();
+                    let project_dir_canon = &project_dir_canon;
+                    s.spawn(move || {
+                        for (idx, repo) in repos {
+                            let worktree_path = project_dir_canon.join(&repo.name);
+                            let _ = thread_tx.send(WorktreeMsg::Log(format!(
+                                "[3/4] Creating git worktree for '{}' at {}...",
+                                repo.name,
+                                worktree_path.display()
+                            )));
+
+                            match create_worktree(
+                                &repo.local_path,
+                                &worktree_path,
+                                trimmed_project_name,
+                            ) {
+                                Ok(()) => {
+                                    let mapping = RepoMapping::new(
+                                        repo.name.clone(),
+                                        repo.local_path.clone(),
+                                        worktree_path,
+                                    );
+                                    let _ = thread_tx.send(WorktreeMsg::Success(*idx, mapping));
+                                }
+                                Err(err) => {
+                                    let _ = thread_tx.send(WorktreeMsg::Failure {
+                                        index: *idx,
+                                        name: repo.name.clone(),
+                                        local_path: repo.local_path.clone(),
+                                        error: err,
+                                    });
+                                    // Stop creating further worktrees for this backing repository
+                                    break;
+                                }
+                            }
+                        }
+                    });
                 }
 
-                created_mappings.push(RepoMapping::new(
-                    repo.name.clone(),
-                    repo.local_path.clone(),
-                    worktree_path,
-                ));
+                drop(tx);
+
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        WorktreeMsg::Log(log) => {
+                            progress_sink(ProjectSetupEvent::Log(log));
+                        }
+                        WorktreeMsg::Success(idx, mapping) => {
+                            created_mappings_indexed.push((idx, mapping));
+                        }
+                        WorktreeMsg::Failure {
+                            index,
+                            name,
+                            local_path,
+                            error,
+                        } => {
+                            failed_creations.push((index, name, local_path, error));
+                        }
+                    }
+                }
+            });
+
+            if !failed_creations.is_empty() {
+                let created_mappings: Vec<RepoMapping> = created_mappings_indexed
+                    .into_iter()
+                    .map(|(_, m)| m)
+                    .collect();
+                rollback_worktrees(&created_mappings, trimmed_project_name);
+
+                for (_, name, local_path, err) in &failed_creations {
+                    if !matches!(err, GitError::BranchAlreadyExists { .. }) {
+                        let _ = delete_branch(local_path, trimmed_project_name);
+                    }
+                    let _ = remove_worktree_auto(&project_dir_canon.join(name), true);
+                }
+
+                let _ = fs::remove_dir_all(&project_dir);
+
+                failed_creations.sort_by_key(|f| f.0);
+                let error_msgs: Vec<String> = failed_creations
+                    .iter()
+                    .map(|(_, name, _, err)| {
+                        format!("Failed to create worktree for '{name}': {err}")
+                    })
+                    .collect();
+                anyhow::bail!("{}", error_msgs.join("; "));
             }
+
+            created_mappings_indexed.sort_by_key(|(idx, _)| *idx);
+            let created_mappings: Vec<RepoMapping> = created_mappings_indexed
+                .into_iter()
+                .map(|(_, m)| m)
+                .collect();
 
             // Step 4: Execute per-repository setup hooks in parallel across worktrees
             let repos_with_hooks: Vec<(&ResolvedRepo, PathBuf)> = resolved_repos
@@ -1006,19 +1097,60 @@ where
             )));
         }
 
-        if !force {
-            for child_path in &child_paths {
-                let repo_name = child_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown");
-                if crate::git::has_uncommitted_changes(child_path)? {
-                    let err_msg = format!(
-                        "Worktree '{repo_name}' ({child_path:?}) has uncommitted changes. Use --force to destroy anyway."
-                    );
-                    anyhow::bail!("{err_msg}");
+        if !force && !child_paths.is_empty() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::scope(|s| {
+                for child_path in &child_paths {
+                    let thread_tx = tx.clone();
+                    let path = child_path.clone();
+                    s.spawn(move || {
+                        let repo_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let result = crate::git::has_uncommitted_changes(&path);
+                        let _ = thread_tx.send((repo_name, path, result));
+                    });
                 }
-            }
+                drop(tx);
+
+                let mut dirty_worktrees = Vec::new();
+                let mut check_errors = Vec::new();
+
+                while let Ok((repo_name, path, result)) = rx.recv() {
+                    match result {
+                        Ok(true) => {
+                            dirty_worktrees.push((repo_name, path));
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            check_errors.push(format!("'{repo_name}': {err}"));
+                        }
+                    }
+                }
+
+                if !check_errors.is_empty() {
+                    anyhow::bail!(
+                        "Failed to check uncommitted changes: {}",
+                        check_errors.join("; ")
+                    );
+                }
+
+                if !dirty_worktrees.is_empty() {
+                    dirty_worktrees.sort_by(|a, b| a.0.cmp(&b.0));
+                    let dirty_list: Vec<String> = dirty_worktrees
+                        .iter()
+                        .map(|(name, path)| format!("'{name}' ({})", path.display()))
+                        .collect();
+                    anyhow::bail!(
+                        "Worktree(s) have uncommitted changes: {}. Use --force to destroy anyway.",
+                        dirty_list.join(", ")
+                    );
+                }
+
+                Ok::<(), anyhow::Error>(())
+            })?;
         }
         progress_sink(ProjectDestroyEvent::Log(
             "Worktree validation passed.".to_string(),
@@ -1031,26 +1163,51 @@ where
             message: "Removing git worktrees...".to_string(),
         });
 
-        for child_path in &child_paths {
-            let repo_name = child_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown");
-            progress_sink(ProjectDestroyEvent::Log(format!(
-                "Removing worktree '{repo_name}'..."
-            )));
-            match crate::git::remove_worktree_auto(child_path, force) {
-                Ok(_) => {
-                    progress_sink(ProjectDestroyEvent::Log(format!(
-                        "✓ Removed worktree '{repo_name}' and pruned metadata."
-                    )));
-                }
-                Err(err) => {
-                    progress_sink(ProjectDestroyEvent::Log(format!(
-                        "⚠ Warning removing worktree '{repo_name}': {err}"
-                    )));
-                }
+        if !child_paths.is_empty() {
+            let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+            for child_path in &child_paths {
+                let main_repo = crate::git::resolve_main_repo(child_path)
+                    .unwrap_or_else(|_| child_path.clone());
+                groups
+                    .entry(main_repo)
+                    .or_default()
+                    .push(child_path.clone());
             }
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::scope(|s| {
+                for group in groups.into_values() {
+                    let thread_tx = tx.clone();
+                    s.spawn(move || {
+                        for child_path in group {
+                            let repo_name = child_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let _ = thread_tx.send(ProjectDestroyEvent::Log(format!(
+                                "Removing worktree '{repo_name}'..."
+                            )));
+                            match crate::git::remove_worktree_auto(&child_path, force) {
+                                Ok(_) => {
+                                    let _ = thread_tx.send(ProjectDestroyEvent::Log(format!(
+                                        "✓ Removed worktree '{repo_name}' and pruned metadata."
+                                    )));
+                                }
+                                Err(err) => {
+                                    let _ = thread_tx.send(ProjectDestroyEvent::Log(format!(
+                                        "⚠ Warning removing worktree '{repo_name}': {err}"
+                                    )));
+                                }
+                            }
+                        }
+                    });
+                }
+                drop(tx);
+                while let Ok(event) = rx.recv() {
+                    progress_sink(event);
+                }
+            });
         }
 
         // Step 4: Removing project directory
@@ -2902,6 +3059,284 @@ mod tests {
         assert!(
             error_events.iter().any(|e| e.contains("missing_beta")),
             "Expected missing_beta error event"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_worktree_creation_multiple_repositories() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_a = repos_dir.join("repo_a");
+        let repo_b = repos_dir.join("repo_b");
+        let repo_c = repos_dir.join("repo_c");
+        create_mock_git_repo(&repo_a);
+        create_mock_git_repo(&repo_b);
+        create_mock_git_repo(&repo_c);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.multi_tpl]
+            repos = ["repo_a", "repo_b", "repo_c"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder =
+            ProjectBuilder::new(config, "multi_tpl", "parallel-proj").with_cwd(&project_cwd);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = builder.create_workspace(move |ev| {
+            events_clone.lock().unwrap().push(ev);
+        });
+
+        assert!(
+            res.is_ok(),
+            "create_workspace should succeed for multiple repos"
+        );
+        let (project_dir, mappings) = res.unwrap();
+        assert_eq!(mappings.len(), 3);
+        assert_eq!(mappings[0].name, "repo_a");
+        assert_eq!(mappings[1].name, "repo_b");
+        assert_eq!(mappings[2].name, "repo_c");
+
+        for m in &mappings {
+            assert!(m.worktree_path.exists(), "worktree must exist on disk");
+            assert!(
+                crate::git::branch_exists(&m.original_path, "parallel-proj").unwrap(),
+                "branch parallel-proj must exist in backing repo"
+            );
+        }
+
+        assert!(project_dir.join("AGENTS.md").exists());
+
+        let evs = events.lock().unwrap();
+        let log_count = evs
+            .iter()
+            .filter(|e| match e {
+                ProjectSetupEvent::Log(msg) => msg.contains("Creating git worktree for"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(log_count, 3, "must stream creation logs for all 3 repos");
+    }
+
+    #[test]
+    fn test_concurrent_worktree_creation_failure_rollback_and_branch_deletion() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_ok1 = repos_dir.join("repo_ok1");
+        let repo_ok2 = repos_dir.join("repo_ok2");
+        let repo_bad = repos_dir.join("repo_bad");
+        create_mock_git_repo(&repo_ok1);
+        create_mock_git_repo(&repo_ok2);
+        // Exists on disk, but not initialized as a git repo -> create_worktree fails
+        fs::create_dir_all(&repo_bad).unwrap();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.fail_tpl]
+            repos = ["repo_ok1", "repo_ok2", "repo_bad"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder = ProjectBuilder::new(config, "fail_tpl", "fail-proj").with_cwd(&project_cwd);
+
+        let res = builder.create_workspace(|_| {});
+        assert!(
+            res.is_err(),
+            "create_workspace must fail when a repo cannot be created"
+        );
+
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("repo_bad"));
+
+        // Verify atomic rollback:
+        // 1. Branches created in repo_ok1 and repo_ok2 must be deleted
+        assert!(
+            !crate::git::branch_exists(&repo_ok1, "fail-proj").unwrap(),
+            "rollback must delete branch in repo_ok1"
+        );
+        assert!(
+            !crate::git::branch_exists(&repo_ok2, "fail-proj").unwrap(),
+            "rollback must delete branch in repo_ok2"
+        );
+
+        // 2. Project directory must be completely removed
+        assert!(
+            !project_cwd.join("fail-proj").exists(),
+            "rollback must remove project directory"
+        );
+    }
+
+    #[test]
+    fn test_two_phase_concurrent_teardown_clean_repos() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_1 = repos_dir.join("repo_1");
+        let repo_2 = repos_dir.join("repo_2");
+        let repo_3 = repos_dir.join("repo_3");
+        create_mock_git_repo(&repo_1);
+        create_mock_git_repo(&repo_2);
+        create_mock_git_repo(&repo_3);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.clean_tpl]
+            repos = ["repo_1", "repo_2", "repo_3"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder =
+            ProjectBuilder::new(config.clone(), "clean_tpl", "clean-proj").with_cwd(&project_cwd);
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+        assert!(project_dir.exists());
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = destroy_project_workspace_with_progress(
+            Some(&config),
+            &project_cwd,
+            "clean-proj",
+            false,
+            move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            },
+        );
+
+        assert!(
+            res.is_ok(),
+            "destroying clean workspace without force must succeed"
+        );
+        assert!(!project_dir.exists(), "project directory must be removed");
+
+        let evs = events.lock().unwrap();
+        // Validation step passed
+        assert!(evs.iter().any(|e| match e {
+            ProjectDestroyEvent::Log(msg) => msg.contains("Worktree validation passed"),
+            _ => false,
+        }));
+        // All 3 worktrees removed in Step 3
+        for r in &["repo_1", "repo_2", "repo_3"] {
+            assert!(evs.iter().any(|e| match e {
+                ProjectDestroyEvent::Log(msg) => msg.contains(&format!("Removed worktree '{r}'")),
+                _ => false,
+            }));
+        }
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectDestroyEvent::Success)));
+    }
+
+    #[test]
+    fn test_two_phase_concurrent_teardown_aborts_and_reports_multiple_dirty_repos() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_clean = repos_dir.join("repo_clean");
+        let repo_dirty_a = repos_dir.join("repo_dirty_a");
+        let repo_dirty_b = repos_dir.join("repo_dirty_b");
+        create_mock_git_repo(&repo_clean);
+        create_mock_git_repo(&repo_dirty_a);
+        create_mock_git_repo(&repo_dirty_b);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.dirty_tpl]
+            repos = ["repo_clean", "repo_dirty_a", "repo_dirty_b"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder =
+            ProjectBuilder::new(config.clone(), "dirty_tpl", "dirty-proj").with_cwd(&project_cwd);
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+        assert!(project_dir.exists());
+
+        // Introduce uncommitted changes in both dirty_a and dirty_b
+        fs::write(
+            project_dir.join("repo_dirty_a").join("uncommitted.txt"),
+            "changes in a",
+        )
+        .unwrap();
+        fs::write(
+            project_dir.join("repo_dirty_b").join("README.md"),
+            "# Modified dirty b\n",
+        )
+        .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        // Teardown without force must abort at validation phase
+        let res = destroy_project_workspace_with_progress(
+            Some(&config),
+            &project_cwd,
+            "dirty-proj",
+            false,
+            move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            },
+        );
+
+        assert!(
+            res.is_err(),
+            "must abort when dirty repos exist without force"
+        );
+        let err_msg = res.unwrap_err().to_string();
+
+        // Safety Barrier: must report both dirty repos in aggregated message
+        assert!(err_msg.contains("Worktree(s) have uncommitted changes:"));
+        assert!(err_msg.contains("'repo_dirty_a'"));
+        assert!(err_msg.contains("'repo_dirty_b'"));
+        assert!(!err_msg.contains("'repo_clean'"));
+        assert!(err_msg.contains("Use --force to destroy anyway"));
+
+        // Safety Barrier: NONE of the worktrees should have been removed!
+        assert!(project_dir.exists());
+        assert!(project_dir.join("repo_clean").exists());
+        assert!(project_dir.join("repo_dirty_a").exists());
+        assert!(project_dir.join("repo_dirty_b").exists());
+
+        // Now destroy with force -> must succeed and remove everything
+        let res_force = destroy_project_workspace_with_progress(
+            Some(&config),
+            &project_cwd,
+            "dirty-proj",
+            true,
+            |_| {},
+        );
+        assert!(res_force.is_ok(), "destroy with force must succeed");
+        assert!(
+            !project_dir.exists(),
+            "project directory must be removed after forced destroy"
         );
     }
 }
