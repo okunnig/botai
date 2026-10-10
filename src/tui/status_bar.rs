@@ -138,6 +138,9 @@ pub fn truncate_label(s: &str, max_chars: usize) -> String {
     truncated
 }
 
+/// Maximum width in columns for an individual session tab in the status bar.
+pub const MAX_TAB_WIDTH: usize = 32;
+
 /// Dynamically and gracefully truncates template and project names to fit within `max_tab_width`.
 ///
 /// Prioritizes keeping the project name clear for agent session identification while shrinking
@@ -273,8 +276,11 @@ impl<'a> StatusBar<'a> {
         };
 
         let sym = session.status().status_symbol();
-        let proj = session.project_name();
-        let tpl = session.template_name().trim();
+        let (tpl, proj) = smart_truncate_tab_title(
+            session.template_name(),
+            session.project_name(),
+            MAX_TAB_WIDTH,
+        );
 
         if tpl.is_empty() {
             format!("  {sym} {hotkey} {proj}  ")
@@ -296,7 +302,6 @@ impl<'a> StatusBar<'a> {
             "-".to_string()
         };
 
-        let proj = session.project_name();
         let mut dot_color = session.status().status_color(theme);
         // Contrast fallback guard on active tabs: if dot color collides with active tab bg, use active tab fg
         if is_active && dot_color == theme.tab_active_bg {
@@ -304,7 +309,11 @@ impl<'a> StatusBar<'a> {
         }
 
         let sym = session.status().status_symbol();
-        let tpl = session.template_name().trim();
+        let (tpl, proj) = smart_truncate_tab_title(
+            session.template_name(),
+            session.project_name(),
+            MAX_TAB_WIDTH,
+        );
         let label = if tpl.is_empty() {
             format!(" {hotkey} {proj}  ")
         } else {
@@ -1147,5 +1156,83 @@ mod tests {
 
         assert_eq!(str1, str2);
         assert!(str1.contains("Test Bar"));
+    }
+
+    #[test]
+    fn test_status_bar_tab_truncation_with_max_tab_width() {
+        let theme = Theme::tokyo_night();
+
+        // 1. Normal / short names remain untouched
+        let (ps_short, pty_short, vt_short) =
+            create_test_session_with_status("my-api", "backend", "claude", SessionStatus::Busy);
+        let entry_short = SessionEntry::new(ps_short, pty_short, vt_short);
+
+        let short_tab = StatusBar::format_tab(0, &entry_short, true);
+        assert_eq!(short_tab, "  ● 1 [backend] my-api  ");
+        assert!(short_tab.chars().count() <= MAX_TAB_WIDTH);
+
+        let short_spans = StatusBar::format_tab_spans(0, &entry_short, true, &theme);
+        assert_eq!(short_spans[2].content, " 1 [backend] my-api  ");
+
+        // 2. Long project name (50+ chars) is cleanly truncated to fit within MAX_TAB_WIDTH
+        let long_proj =
+            "very-long-project-name-exceeding-fifty-characters-in-total-length-for-testing";
+        assert!(long_proj.chars().count() > 50);
+        let (ps_long_proj, pty_long_proj, vt_long_proj) =
+            create_test_session_with_status(long_proj, "tpl", "claude", SessionStatus::Busy);
+        let entry_long_proj = SessionEntry::new(ps_long_proj, pty_long_proj, vt_long_proj);
+
+        let long_proj_tab = StatusBar::format_tab(0, &entry_long_proj, true);
+        assert!(
+            long_proj_tab.chars().count() <= MAX_TAB_WIDTH,
+            "Formatted tab width {} exceeds MAX_TAB_WIDTH {}",
+            long_proj_tab.chars().count(),
+            MAX_TAB_WIDTH
+        );
+        assert!(long_proj_tab.contains('…'));
+        assert!(long_proj_tab.contains("[tpl]"));
+
+        let long_proj_spans = StatusBar::format_tab_spans(0, &entry_long_proj, true, &theme);
+        let long_proj_spans_len: usize = long_proj_spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        assert!(long_proj_spans_len <= MAX_TAB_WIDTH);
+
+        // 3. Long template name (50+ chars) is cleanly truncated to fit within MAX_TAB_WIDTH
+        let long_tpl = "extra-long-template-name-exceeding-fifty-characters-in-length-easily";
+        assert!(long_tpl.chars().count() > 50);
+        let (ps_long_tpl, pty_long_tpl, vt_long_tpl) =
+            create_test_session_with_status("service", long_tpl, "claude", SessionStatus::Busy);
+        let entry_long_tpl = SessionEntry::new(ps_long_tpl, pty_long_tpl, vt_long_tpl);
+
+        let long_tpl_tab = StatusBar::format_tab(0, &entry_long_tpl, true);
+        assert!(
+            long_tpl_tab.chars().count() <= MAX_TAB_WIDTH,
+            "Formatted tab width {} exceeds MAX_TAB_WIDTH {}",
+            long_tpl_tab.chars().count(),
+            MAX_TAB_WIDTH
+        );
+        assert!(long_tpl_tab.contains('…'));
+        assert!(long_tpl_tab.contains("service"));
+
+        // 4. Both template and project 50+ chars
+        let (ps_both_long, pty_both_long, vt_both_long) =
+            create_test_session_with_status(long_proj, long_tpl, "claude", SessionStatus::Busy);
+        let entry_both_long = SessionEntry::new(ps_both_long, pty_both_long, vt_both_long);
+
+        let both_long_tab = StatusBar::format_tab(0, &entry_both_long, true);
+        assert!(both_long_tab.chars().count() <= MAX_TAB_WIDTH);
+        assert!(both_long_tab.contains('…'));
+
+        // 5. Long project with empty template omits brackets and fits MAX_TAB_WIDTH
+        let (ps_no_tpl, pty_no_tpl, vt_no_tpl) =
+            create_test_session_with_status(long_proj, "", "claude", SessionStatus::Busy);
+        let entry_no_tpl = SessionEntry::new(ps_no_tpl, pty_no_tpl, vt_no_tpl);
+
+        let no_tpl_tab = StatusBar::format_tab(0, &entry_no_tpl, true);
+        assert!(no_tpl_tab.chars().count() <= MAX_TAB_WIDTH);
+        assert!(!no_tpl_tab.contains('[') && !no_tpl_tab.contains(']'));
+        assert!(no_tpl_tab.contains('…'));
     }
 }

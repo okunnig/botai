@@ -111,7 +111,6 @@ pub struct ActivityTracker {
     scanner: StreamScanner,
     command_in_flight: bool,
     debounce_duration: Duration,
-    pending_wait_since: Option<Instant>,
 }
 
 impl Default for ActivityTracker {
@@ -130,7 +129,6 @@ impl ActivityTracker {
             scanner: StreamScanner::new(),
             command_in_flight: false,
             debounce_duration: Duration::from_millis(500),
-            pending_wait_since: None,
         }
     }
 
@@ -158,15 +156,11 @@ impl ActivityTracker {
     /// Manually sets the command in-flight flag.
     pub fn set_command_in_flight(&mut self, in_flight: bool) {
         self.command_in_flight = in_flight;
-        if in_flight {
-            self.pending_wait_since = None;
-        }
     }
 
     /// Records that bytes were received or sent, marking the session as busy.
     pub fn record_activity(&mut self) -> SessionStatus {
         self.last_activity = Instant::now();
-        self.pending_wait_since = None;
         self.last_status = SessionStatus::Busy;
         SessionStatus::Busy
     }
@@ -180,7 +174,6 @@ impl ActivityTracker {
         }
 
         self.last_activity = Instant::now();
-        self.pending_wait_since = None;
         let stream_events = self.scanner.scan(bytes);
 
         if stream_events.is_empty() {
@@ -257,7 +250,6 @@ impl ActivityTracker {
     ) -> (SessionStatus, Option<NotificationEvent>, &str) {
         let (status, notif) = if !is_alive {
             self.command_in_flight = false;
-            self.pending_wait_since = None;
             match exit_code {
                 Some(0) => {
                     let notif = if self.last_status != SessionStatus::Done {
@@ -296,11 +288,10 @@ impl ActivityTracker {
         } else if self.last_status == SessionStatus::Busy {
             if self.command_in_flight {
                 // Command in flight: suppress idle threshold transition to WaitingForInput
-                self.pending_wait_since = None;
                 (SessionStatus::Busy, None)
-            } else if now.saturating_duration_since(self.last_activity) >= self.idle_threshold {
-                if self.debounce_duration.is_zero() {
-                    self.pending_wait_since = None;
+            } else {
+                let total_idle = self.idle_threshold.saturating_add(self.debounce_duration);
+                if now.saturating_duration_since(self.last_activity) >= total_idle {
                     (
                         SessionStatus::WaitingForInput,
                         Some(NotificationEvent::WaitingForInput {
@@ -308,29 +299,10 @@ impl ActivityTracker {
                         }),
                     )
                 } else {
-                    let wait_start = *self.pending_wait_since.get_or_insert(now);
-                    if now.saturating_duration_since(wait_start) >= self.debounce_duration
-                        || now.saturating_duration_since(self.last_activity)
-                            >= self.idle_threshold.saturating_add(self.debounce_duration)
-                    {
-                        self.pending_wait_since = None;
-                        (
-                            SessionStatus::WaitingForInput,
-                            Some(NotificationEvent::WaitingForInput {
-                                project_name: String::new(),
-                            }),
-                        )
-                    } else {
-                        // Still within debounce window: suppress flip to prevent flicker
-                        (SessionStatus::Busy, None)
-                    }
+                    (SessionStatus::Busy, None)
                 }
-            } else {
-                self.pending_wait_since = None;
-                (SessionStatus::Busy, None)
             }
         } else {
-            self.pending_wait_since = None;
             (self.last_status, None)
         };
 
