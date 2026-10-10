@@ -29,7 +29,7 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
 | **Multi-Repo Workflows** | Manual cloning, switching branches across multiple repos, accidental dirty working tree clobbering. | **Declarative Templates & Git Worktrees**: One command provisions isolated worktrees across all template repos under `CWD/<project_name>`. |
 | **Agent Context & Orientation** | Agents lack awareness of peer repositories, cross-project dependencies, and service contracts. | **Automated Context Synthesis**: Automatically generates `AGENTS.md` with directory trees, repo purposes, and custom template rules. |
 | **Multiplexing Dependencies** | Requires installing, configuring, and maintaining external multiplexers (`tmux`, `zellij`). | **Native Built-in Multiplexer**: Full terminal session multiplexing with `Ctrl+Space` leader navigation, tab switching, and mouse scroll support. |
-| **Agent Monitoring** | Constantly switching terminals to check if long-running agent tasks have finished or need input. | **Real-Time Visual Badges & OS Notifications**: Tab indicators (`● Thinking`, `● Waiting`, `● Done`, `● Error`) and native desktop alerts. |
+| **Agent Monitoring** | Constantly switching terminals to check if long-running agent tasks have finished or need input. | **Real-Time Visual Badges**: Tab indicators (`● Thinking`, `● Waiting`, `● Done`, `● Error`) track agent lifecycles and idle states across sessions at a glance. |
 
 ---
 
@@ -47,7 +47,6 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
   - **Waiting for Input**: Agent requires user approval or prompt response.
   - **Done / Idle**: Agent finished its task cleanly.
   - **Error / Interrupted**: Process crashed or exited with a non-zero status code (output preserved for inspection).
-  Native OS desktop notifications alert you immediately when tasks finish or need attention.
 - **Multiple Built-in Color Themes**  
   Ship with carefully crafted palettes: **Tokyo Night** (default), **Catppuccin Mocha**, **Cyberpunk**, **Gruvbox Dark**, **Monochrome / Slate**, and standard **ANSI 16-color**.
 - **Interactive TUI Dashboard & CLI Suite**  
