@@ -189,6 +189,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Executes `git worktree prune` prior to creating new worktrees to automatically clear stale worktree metadata from manually deleted directories.
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
   - Checks out a new branch named `<project_name>`.
+  - **Concurrent Worktree Checkout**: Worktrees across distinct backing repositories are checked out concurrently in parallel using scoped threads (`std::thread::scope`). Worktrees sharing the same backing repository are serialized per repository path to prevent Git index lock contention.
+  - **Thread-Safe Event Streaming & Atomic Rollback**: Progress logs and errors stream over an `mpsc::channel` to the setup sink. If any worker thread fails, all spawned threads are joined to completion before executing atomic rollback across all successfully created worktrees and newly created branches.
 - **Lifecycle Command Hooks Execution Model**:
   - **Per-Repository Setup Hooks (`setup`)**:
     - Runs in the checked-out worktree directory (`CWD/<project_name>/<repo_name>`) immediately after worktree creation.
@@ -389,6 +391,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `PtySession` implements `Drop` to kill and reap child processes automatically when dropped (or when an active session, `SessionEntry`, or `SessionRegistry` is removed or dropped), preventing orphaned or zombie processes in the operating system process table.
   - `PtySession::kill()` explicitly terminates running processes and invokes `child.wait()` to reap process entries from the OS process table.
   - `PtySession::process_id()` exposes the underlying OS child process identifier (`Option<u32>`) when available.
+- **Zero-Allocation Session Registry Access**:
+  - `SessionRegistry` exposes direct slice accessors (`list(&self) -> &[SessionEntry]` and `list_mut(&mut self) -> &mut [SessionEntry]`) as well as `iter(&self)` and `iter_mut(&mut self)` slice iterators without allocating intermediate heap vectors (`Vec<&SessionEntry>`) on each query.
+  - Eliminates heap vector churn on every tick of the 30ms TUI event loop in `TuiApp` and during status bar frame rendering.
 - **Session Detachment & Background Persistence**:
   - Detaching from an active session (`Ctrl + Space` then `x`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
@@ -534,6 +539,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Two-Step Dialog Progression**:
     1. **Step 1: Searchable Template Selection (`CreationStep::SelectTemplate`)**:
        - **Top Filter Search Bar**: Real-time search filter powered by the reusable `TextInput` component (`Filter: <query>`), supporting in-line character cursor positioning, full readline editing keybindings (`Home`/`Ctrl+A`, `End`/`Ctrl+E`, `Left`/`Right`, `Ctrl+Left`/`Alt+B`, `Ctrl+Right`/`Alt+F`, `Backspace`, `Delete`, `Ctrl+U`, `Ctrl+K`, `Ctrl+W`), paste sanitization, and hardware terminal cursor synchronization.
+       - **Zero-Allocation In-Place Editing**: `TextInput` maintains the cursor as a 0-based Unicode character count for display rendering and test compatibility, while performing in-place `String` editing (`insert`, `remove`, `splice`) mapped via `.char_indices()`, eliminating intermediate `Vec<char>` and `String` heap allocations on every keypress and word navigation.
        - **Matching Criteria**: Strictly case-insensitive substring matching against template names only (descriptions and constituent repository names/sources are not matched).
        - **Selection Synchronization Rules**:
          - *Query Changes (typing, backspacing, pasting)*: If the currently selected template is still among the matching results, preserve its selection; otherwise reset selection to index 0 (top hit).
@@ -628,8 +634,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Structured Progress Events**: Emits sequential `ProjectDestroyEvent` events (`Step`, `Log`, `Success`, `Error`) over an `mpsc::channel` to drive the modal UI.
   - **Destruction Lifecycle Steps**:
     1. `Step [1/4]`: Executing template `pre_destroy` lifecycle hooks (streaming hook command output).
-    2. `Step [2/4]`: Validating worktrees and checking uncommitted changes (enforcing safety unless forced).
-    3. `Step [3/4]`: Removing git worktrees and pruning metadata across backing central repositories via `remove_worktree_auto`.
+    2. `Step [2/4]`: Validating worktrees and checking uncommitted changes across all child worktrees concurrently using scoped threads (`std::thread::scope`). If any worktrees have uncommitted changes and `force` is false, aborts before any deletion and aggregates all dirty repository paths into a single descriptive error.
+    3. `Step [3/4]`: Concurrently removing git worktrees and pruning metadata across backing central repositories via `remove_worktree_auto` in parallel across distinct repositories.
     4. `Step [4/4]`: Recursively deleting the project workspace directory.
   - **Rich Modal Presentation**:
     - Centered floating dialog styled with active theme colors.
