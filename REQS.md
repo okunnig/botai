@@ -252,9 +252,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
       - `\x1b]133;C\x07` (Command output stream): Records active output stream processing.
       - `\x1b]133;D[;<exit_code>]\x07` (Command finished): Evaluates exit status to transition to `SessionStatus::Done` or `SessionStatus::Error`.
     - **Transparent Passthrough**: Control sequence decoding operates non-destructively; raw bytes are passed intact to the virtual terminal (`vt100`) parser.
-    - **Silence / Inactivity Timeout Fallback**: Employs an idle threshold (default 1,500 ms) as a robust baseline fallback for legacy tools or raw command output not emitting explicit control sequences.
+    - **Silence / Inactivity Timeout Fallback & Command Suppression**:
+      - Employs an idle threshold (default 1,500 ms) as a baseline fallback for legacy tools or raw command output not emitting explicit control sequences.
+      - **Command-Aware Timeout Suppression (`command_in_flight`)**: Tracks command execution state. When `StreamControlEvent::CommandStart` (`133;B`) or `CommandOutput` (`133;C`) is processed, `command_in_flight = true`. When `StreamControlEvent::CommandFinished` (`133;D`), `PromptStart` (`133;A`), or `Bell` (`\x07`) is received, `command_in_flight = false`. During `evaluate()`, if `command_in_flight == true`, the 1,500 ms idle timeout transition to `WaitingForInput` is suppressed, ensuring long-running tool executions and compilation commands never flip prematurely to waiting.
+      - **State Debouncing**: Employs a 500 ms debounce window (`debounce_duration`) computed as `idle_threshold + debounce_duration` before transitioning from `Busy` to `WaitingForInput`. If stream activity resumes before total idle time reaches this combined threshold, the session remains `Busy`, eliminating visual indicator flicker during bursty LLM token generation.
   - **Per-Session Activity Tracking**:
-    - Each project session maintains an isolated, independent `ActivityTracker` instance with its own activity clock and state machine, preventing cross-session timer crosstalk.
+    - Each project session maintains an isolated, independent `ActivityTracker` instance with its own activity clock, command-in-flight tracker, debounce configuration, and stream scanner, preventing cross-session timer crosstalk.
 - **In-Memory Notification Tracking & Debouncing**:
   - Desktop notifications via `notify-rust` are removed to prevent macOS main-thread hangs (where native notification dispatchers block or hang when invoked outside the main Cocoa/AppKit runloop), while real-time TUI status badges, status banners, semantic stream scanning (OSC 133, OSC 9, OSC 777, BEL, inactivity timeouts), and in-memory event tracking are fully preserved.
   - `NotificationService` maintains in-memory event tracking, per-project debouncing, and cooldown:
@@ -262,13 +265,15 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - An agent CLI process completes a task or exits.
     - An agent transitions to an idle state awaiting user input / approval, or emits a `BEL` / OSC notification.
   - **Focus-Aware Notification Filtering**: Attention events for waiting states are suppressed if the user is actively viewing and interacting with that specific session, triggering tracking only when the session is running in the background (different project tab, modal dialog, or dashboard open).
-- **Real-Time Session Indicators in TUI**:
-  - Live status indicators formatted as a leading solid round dot symbol (`●` U+25CF) inside project tabs in the status bar (e.g., `  ● 1 [ecommerce] payment-api  `, falling back to `  ● 1 payment-api  ` if template name is empty, with active/inactive styling):
-    - ● **Busy / Thinking**: Themed Busy color (`theme.status_busy`, e.g., Cyan / Electric Blue / Amber) when agent is actively executing.
-    - ● **Waiting for Input**: Themed Waiting color (`theme.status_waiting`, e.g., Peach / Amber / Sky Blue) when agent is awaiting user response, confirmation, or attention.
-    - ● **Done / Idle**: Themed Done color (`theme.status_done`, e.g., Green) when agent finished its assigned prompt or task.
-    - ● **Error / Interrupted**: Themed Error color (`theme.status_error`, e.g., Red) on non-zero exit code or process failure.
-    - ● **Initializing / Terminated**: Themed status bar foreground color (`theme.status_bar_fg`).
+- **Real-Time Semantic Session Indicators in TUI**:
+  - Live status indicators rendered using dedicated semantic status glyphs and themed contextual colors inside project tabs in the status bar and running session lists (e.g., `  ● 1 [ecommerce] payment-api  `, falling back to `  ● 1 payment-api  ` if template name is empty, with active/inactive styling):
+    - ○ **Initializing (`○` U+25CB)**: Rendered in `status_bar_fg` while the session worktree, PTY, or initial processes are spawning.
+    - ● **Busy / Thinking (`●` U+25CF)**: Themed Busy color (`theme.status_busy`, e.g., Warm Amber Gold, Electric Neon Yellow) when the agent is actively executing, thinking, or running commands.
+    - ? **Waiting for Input (`?`)**: Themed Waiting color (`theme.status_waiting`, e.g., Warm Peach / Orange / Acid Yellow) when the agent is awaiting user response, confirmation, or tool permission.
+    - ✓ **Done / Idle (`✓` U+2713)**: Themed Done color (`theme.status_done`, e.g., Green) when the agent finished its assigned prompt or task.
+    - ✗ **Error / Interrupted (`✗` U+2717)**: Themed Error color (`theme.status_error`, e.g., Red) on non-zero exit code or process failure.
+    - — **Terminated (`—` U+2014)**: Rendered in `status_bar_fg` when the session was closed or detached.
+  - **Active Tab Contrast Fallback Guard**: On active tabs where a status color matches or collides with the active tab background (`dot_color == theme.tab_active_bg`), the indicator automatically falls back to `theme.tab_active_fg` to guarantee high contrast.
 
 ---
 
@@ -393,7 +398,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Detaching from an active session (`Ctrl + Space` then `x`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
     - When launched directly from CLI (`botai create --attach` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
-- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, and streamlined key hints. Each session tab displays its index hotkey, template name in brackets, and project name: `● <Hotkey> [<Template>] <Project>` (or `● <Hotkey> <Project>` if template name is empty). In normal state, it displays a concise right-aligned `'Ctrl+Space: Actions'` hint (omitted gracefully on narrow viewports). When the leader key is triggered (`leader_active`), it displays the focused actionable commands menu `'[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]'` in high-contrast leader styling. When no active sessions exist, it displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'`, transitioning to the active leader menu when `Ctrl+Space` is pressed.
+- **Status Bar & Project Indicators**:
+  - **Tab Structure & Semantic Indicators**: Top/bottom status bar displaying active sessions, status badges, and streamlined key hints. Each session tab displays its leading semantic status symbol (`○` Initializing, `●` Busy, `?` Waiting, `✓` Done, `✗` Error, `—` Terminated), hotkey index (1..9), template name in brackets, and project name: `  <Symbol> <Hotkey> [<Template>] <Project>  ` (falling back to `  <Symbol> <Hotkey> <Project>  ` if template is blank).
+  - **Dynamic Title Truncation (`smart_truncate_tab_title`, `MAX_TAB_WIDTH = 32`)**: Gracefully truncates template names and project names to fit within `MAX_TAB_WIDTH` (32 columns) or when horizontal space is limited, shrinking or omitting the template name first so that the active tab's project identity remains clear and prominent while omitting brackets when template names are blank.
+  - **Overflow Arrow Reservation (`◀ ` and ` ▶`)**: In `compute_visible_tab_range`, reserves 4 columns for overflow arrows whenever tabs exceed available width, ensuring tabs never clip against the right edge. Symmetrically formats right overflow indicators as `" ▶"`.
+  - **Responsive Tab Line Layout in Leader Mode**: When leader mode is active (`leader_active`), available width for tabs is computed first by subtracting the 74 columns required for the 73-character leader commands menu (`[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]`) plus trailing padding. Tabs are automatically re-windowed centered on the active tab alongside the leader menu rather than being clipped.
+  - **Responsive Key Hints**: In normal mode, displays a concise right-aligned `'Ctrl+Space: Actions'` hint when available width allows, cleanly omitting the hint on narrower viewports to maximize tab space. When no active sessions exist, it displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'`, transitioning to the active leader menu when `Ctrl+Space` is pressed.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
     - `Ctrl + Space` then `1` .. `9`: Directly switch to project session 1 to 9.
@@ -669,16 +679,16 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Defaults to `"tokyo-night"` if omitted or unrecognized.
   - Theme names are normalized case-insensitively and support aliases (e.g., `"catppuccin"` / `"catppuccin-mocha"`, `"gruvbox"` / `"gruvbox-dark"`, `"monochrome"` / `"slate"` / `"minimal"`, `"ansi"` / `"default"` / `"classic"`).
 - **Supported Built-in Palettes**:
-  - **`tokyo-night`** (Default): Modern deep slate/navy chrome (`#1a1b26`), electric cyan & blue tab highlights (`#7aa2f7`), vibrant purple borders (`#bb9af7`), and warm amber gold leader mode (`#e0af68`).
-  - **`catppuccin` / `catppuccin-mocha`**: Soothing dark pastel palette (`#1e1e2e`), mauve borders (`#cba6f7`), sky blue selections (`#89dceb`), peach input highlights (`#fab387`), and crust backgrounds.
-  - **`cyberpunk` / `synthwave`**: High-contrast dark cyber aesthetic (`#0a0a0f`), hot neon magenta (`#ff007f`), electric neon cyan (`#00f0ff`), and vivid acid yellow leader indicator (`#ffe600`).
+  - **`tokyo-night`** (Default): Modern deep slate/navy chrome (`#1a1b26`), electric cyan & blue tab highlights (`#7aa2f7`), vibrant purple borders (`#bb9af7`), warm amber gold leader mode (`#e0af68`), and warm peach/orange waiting indicator (`#ff9e64`) non-colliding with active tabs.
+  - **`catppuccin` / `catppuccin-mocha`**: Soothing dark pastel palette (`#1e1e2e`), mauve borders (`#cba6f7`), sky blue selections (`#89dceb`), peach input highlights and non-colliding waiting indicator (`#fab387`), and crust backgrounds.
+  - **`cyberpunk` / `synthwave`**: High-contrast dark cyber aesthetic (`#0a0a0f`), hot neon magenta (`#ff007f`), electric neon cyan (`#00f0ff`), and vivid acid yellow leader indicator and waiting status (`#ffe600`).
   - **`gruvbox` / `gruvbox-dark`**: Warm retro earthy palette (`#282828`), rust orange active tabs (`#fe8019`), warm cream text (`#ebdbb2`), forest green selections (`#b8bb26`), and bright yellow leader mode (`#fabd2f`).
-  - **`monochrome` / `slate`**: Minimalist zinc/slate dark tones (`#18181b` / `#27272a`), ice blue accents, crisp white active text and borders (`#f4f4f5`).
-  - **`ansi` / `default`**: Standard 16-color ANSI terminal fallback palette using native terminal cyan, yellow, green, red, dark gray, and white without 24-bit TrueColor RGB definitions.
+  - **`monochrome` / `slate`**: Minimalist zinc/slate dark tones (`#18181b` / `#27272a`), crisp white active text and borders (`#f4f4f5`), high-contrast sky blue waiting status (`#0284c7`), and balanced green done status (`#16a34a`).
+  - **`ansi` / `default`**: Standard 16-color ANSI terminal fallback palette using native terminal cyan, yellow, light yellow waiting indicator, green, red, dark gray, and white without 24-bit TrueColor RGB definitions.
 - **Complete TUI Element Coverage**:
   - **Status Bar**: Background, default text, active session tab, inactive tabs, tab index numbers (1..9), leader mode indicator badge and hints.
-  - **Agent Status Indicators**: Distinct contextual theme colors applied to the leading round status dot (`●`) for Thinking / Busy (`status_busy`), Waiting for Input (`status_waiting`), Done / Idle (`status_done`), and Error / Interrupted (`status_error`), with Initializing and Terminated states rendered in `status_bar_fg`.
-  - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, and top header status bar key hints.
+  - **Agent Status Indicators**: Distinct contextual theme colors applied to semantic status glyphs (`○` Initializing, `●` Busy, `?` Waiting for Input, `✓` Done, `✗` Error, `—` Terminated), with Initializing and Terminated states rendered in `status_bar_fg`. Active tabs employ an automatic contrast guard fallback to `tab_active_fg` if the status indicator color matches `tab_active_bg`.
+  - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, top header status bar key hints, and live semantic status glyphs.
   - **Modals (Creation Modal, Setup Progress Modal & Destroy Modal)**: Dialog borders, focused input borders/prompts, placeholder text, field labels, and button/key hints.
   - **Exit & Crash Banners**: High-visibility error notification banners rendered across the bottom line upon non-zero process exits.
 

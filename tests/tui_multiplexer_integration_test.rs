@@ -108,7 +108,7 @@ fn test_integration_tui_multiplexer_navigation_and_rendering() {
         .collect::<String>();
 
     assert!(rendered_text.contains("● 1 [workspace] backend-api"));
-    assert!(rendered_text.contains("● 2 [workspace] frontend-ui"));
+    assert!(rendered_text.contains("? 2 [workspace] frontend-ui"));
     assert!(rendered_text.contains("API server running on port 8080"));
 }
 
