@@ -706,7 +706,10 @@ mod tests {
         assert_eq!(names, vec!["alpha", "beta", "gamma"]);
 
         // 3. Iterator combinators
-        let count_ws = registry.iter().filter(|s| s.template_name() == "ws").count();
+        let count_ws = registry
+            .iter()
+            .filter(|s| s.template_name() == "ws")
+            .count();
         assert_eq!(count_ws, 3);
     }
 

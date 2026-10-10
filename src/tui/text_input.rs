@@ -140,7 +140,9 @@ impl TextInput {
     /// Inserts a string at the current cursor offset, stripping newlines and control characters.
     pub fn insert_str(&mut self, text: &str) -> bool {
         let (byte_idx, clamped_cursor) = self.char_to_byte_idx(self.cursor);
-        let has_control = text.chars().any(|c| c == '\n' || c == '\r' || c.is_control());
+        let has_control = text
+            .chars()
+            .any(|c| c == '\n' || c == '\r' || c.is_control());
         if !has_control {
             if text.is_empty() {
                 return false;
