@@ -49,65 +49,153 @@ impl TextInput {
         self.cursor = cursor.min(self.value.chars().count());
     }
 
+    /// Returns the byte index corresponding to `char_pos` and the clamped character offset.
+    /// If `char_pos` exceeds the total number of characters, returns `(self.value.len(), total_chars)`.
+    fn char_to_byte_idx(&self, char_pos: usize) -> (usize, usize) {
+        let byte_idx = self.value.len();
+        let mut clamped_char = 0;
+        for (i, (b, _)) in self.value.char_indices().enumerate() {
+            if i == char_pos {
+                return (b, i);
+            }
+            clamped_char = i + 1;
+        }
+        (byte_idx, clamped_char)
+    }
+
+    /// Scans backward from `cursor_byte` across one word boundary (skipping non-alphanumeric, then alphanumeric).
+    /// Returns `(start_byte, skipped_chars)`.
+    fn scan_word_backward_boundary(&self, cursor_byte: usize) -> (usize, usize) {
+        let prefix = &self.value[..cursor_byte];
+        let mut iter = prefix.char_indices().rev().peekable();
+        let mut skipped_chars = 0;
+        let mut start_byte = cursor_byte;
+
+        // Phase 1: skip non-alphanumeric
+        while let Some(&(_, c)) = iter.peek() {
+            if !c.is_alphanumeric() {
+                let (b, _) = iter.next().unwrap();
+                start_byte = b;
+                skipped_chars += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Phase 2: skip alphanumeric
+        while let Some(&(_, c)) = iter.peek() {
+            if c.is_alphanumeric() {
+                let (b, _) = iter.next().unwrap();
+                start_byte = b;
+                skipped_chars += 1;
+            } else {
+                break;
+            }
+        }
+
+        (start_byte, skipped_chars)
+    }
+
+    /// Scans forward from `cursor_byte` across one word boundary (skipping non-alphanumeric, then alphanumeric).
+    /// Returns the number of characters advanced.
+    fn scan_word_forward_chars(&self, cursor_byte: usize) -> usize {
+        let suffix = &self.value[cursor_byte..];
+        let mut iter = suffix.chars().peekable();
+        let mut advanced_chars = 0;
+
+        // Phase 1: skip non-alphanumeric
+        while let Some(&c) = iter.peek() {
+            if !c.is_alphanumeric() {
+                iter.next();
+                advanced_chars += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Phase 2: skip alphanumeric
+        while let Some(&c) = iter.peek() {
+            if c.is_alphanumeric() {
+                iter.next();
+                advanced_chars += 1;
+            } else {
+                break;
+            }
+        }
+
+        advanced_chars
+    }
+
     /// Inserts a single character at the current cursor offset.
     /// Newlines (`\r`, `\n`) and control characters are ignored.
     pub fn insert_char(&mut self, c: char) {
         if c == '\n' || c == '\r' || c.is_control() {
             return;
         }
-        let mut chars: Vec<char> = self.value.chars().collect();
-        let idx = self.cursor.min(chars.len());
-        chars.insert(idx, c);
-        self.value = chars.into_iter().collect();
-        self.cursor = idx + 1;
+        let (byte_idx, clamped_cursor) = self.char_to_byte_idx(self.cursor);
+        self.value.insert(byte_idx, c);
+        self.cursor = clamped_cursor + 1;
     }
 
     /// Inserts a string at the current cursor offset, stripping newlines and control characters.
     pub fn insert_str(&mut self, text: &str) -> bool {
-        let mut cleaned = Vec::new();
-        for c in text.chars() {
-            if c != '\n' && c != '\r' && !c.is_control() {
-                cleaned.push(c);
+        let (byte_idx, clamped_cursor) = self.char_to_byte_idx(self.cursor);
+        let has_control = text.chars().any(|c| c == '\n' || c == '\r' || c.is_control());
+        if !has_control {
+            if text.is_empty() {
+                return false;
             }
+            let count = text.chars().count();
+            self.value.insert_str(byte_idx, text);
+            self.cursor = clamped_cursor + count;
+            true
+        } else {
+            let mut cleaned = String::with_capacity(text.len());
+            let mut count = 0;
+            for c in text.chars() {
+                if c != '\n' && c != '\r' && !c.is_control() {
+                    cleaned.push(c);
+                    count += 1;
+                }
+            }
+            if cleaned.is_empty() {
+                return false;
+            }
+            self.value.insert_str(byte_idx, &cleaned);
+            self.cursor = clamped_cursor + count;
+            true
         }
-        if cleaned.is_empty() {
-            return false;
-        }
-        let mut chars: Vec<char> = self.value.chars().collect();
-        let idx = self.cursor.min(chars.len());
-        let count = cleaned.len();
-        chars.splice(idx..idx, cleaned);
-        self.value = chars.into_iter().collect();
-        self.cursor = idx + count;
-        true
     }
 
     /// Deletes the character before the cursor (Backspace).
     /// Returns `true` if a character was removed, or `false` if cursor is at position 0.
     pub fn delete_char_backward(&mut self) -> bool {
-        if self.cursor == 0 {
+        if self.cursor == 0 || self.value.is_empty() {
             return false;
         }
-        let mut chars: Vec<char> = self.value.chars().collect();
-        let idx = self.cursor.min(chars.len());
-        if idx > 0 {
-            chars.remove(idx - 1);
-            self.value = chars.into_iter().collect();
-            self.cursor = idx - 1;
+        let target_idx = self.cursor - 1;
+        if let Some((byte_idx, _)) = self.value.char_indices().nth(target_idx) {
+            self.value.remove(byte_idx);
+            self.cursor = target_idx;
             true
         } else {
-            false
+            // Cursor was out of bounds (> char count). Remove the last character.
+            if let Some((last_byte, _)) = self.value.char_indices().last() {
+                self.value.remove(last_byte);
+                self.cursor = self.value.chars().count();
+                true
+            } else {
+                self.cursor = 0;
+                false
+            }
         }
     }
 
     /// Deletes the character under the cursor (Delete).
     /// Returns `true` if a character was removed, or `false` if cursor is at the end.
     pub fn delete_char_forward(&mut self) -> bool {
-        let mut chars: Vec<char> = self.value.chars().collect();
-        let idx = self.cursor;
-        if idx < chars.len() {
-            chars.remove(idx);
-            self.value = chars.into_iter().collect();
+        if let Some((byte_idx, _)) = self.value.char_indices().nth(self.cursor) {
+            self.value.remove(byte_idx);
             true
         } else {
             false
@@ -140,14 +228,17 @@ impl TextInput {
     /// Deletes text from the cursor to the beginning of the line (Ctrl+U).
     /// Returns `true` if any characters were deleted.
     pub fn delete_to_start(&mut self) -> bool {
-        let chars: Vec<char> = self.value.chars().collect();
-        let idx = self.cursor.min(chars.len());
-        if idx > 0 {
-            let remaining: String = chars[idx..].iter().collect();
-            self.value = remaining;
+        if self.cursor == 0 || self.value.is_empty() {
+            self.cursor = 0;
+            return false;
+        }
+        let (byte_idx, _) = self.char_to_byte_idx(self.cursor);
+        if byte_idx > 0 {
+            self.value.replace_range(..byte_idx, "");
             self.cursor = 0;
             true
         } else {
+            self.cursor = 0;
             false
         }
     }
@@ -155,11 +246,8 @@ impl TextInput {
     /// Deletes text from the cursor to the end of the line (Ctrl+K).
     /// Returns `true` if any characters were deleted.
     pub fn delete_to_end(&mut self) -> bool {
-        let chars: Vec<char> = self.value.chars().collect();
-        let idx = self.cursor.min(chars.len());
-        if idx < chars.len() {
-            let remaining: String = chars[..idx].iter().collect();
-            self.value = remaining;
+        if let Some((byte_idx, _)) = self.value.char_indices().nth(self.cursor) {
+            self.value.truncate(byte_idx);
             true
         } else {
             false
@@ -169,60 +257,43 @@ impl TextInput {
     /// Deletes the word immediately preceding the cursor (Ctrl+W).
     /// Returns `true` if any characters were deleted.
     pub fn delete_word_backward(&mut self) -> bool {
-        let chars: Vec<char> = self.value.chars().collect();
-        let idx = self.cursor.min(chars.len());
-        if idx == 0 {
+        if self.cursor == 0 || self.value.is_empty() {
             return false;
         }
-        let mut pos = idx;
-        while pos > 0 && !chars[pos - 1].is_alphanumeric() {
-            pos -= 1;
-        }
-        while pos > 0 && chars[pos - 1].is_alphanumeric() {
-            pos -= 1;
-        }
-        if pos == idx {
+        let (cursor_byte, clamped_cursor) = self.char_to_byte_idx(self.cursor);
+        if cursor_byte == 0 {
+            self.cursor = 0;
             return false;
         }
-        let mut new_chars = Vec::new();
-        new_chars.extend_from_slice(&chars[..pos]);
-        new_chars.extend_from_slice(&chars[idx..]);
-        self.value = new_chars.into_iter().collect();
-        self.cursor = pos;
+        let (start_byte, skipped_chars) = self.scan_word_backward_boundary(cursor_byte);
+        if skipped_chars == 0 {
+            return false;
+        }
+        self.value.replace_range(start_byte..cursor_byte, "");
+        self.cursor = clamped_cursor - skipped_chars;
         true
     }
 
     /// Moves the cursor backward one word (Ctrl+Left / Alt+B).
     pub fn move_word_backward(&mut self) {
-        let chars: Vec<char> = self.value.chars().collect();
-        let mut pos = self.cursor.min(chars.len());
-        if pos == 0 {
+        if self.cursor == 0 || self.value.is_empty() {
+            self.cursor = 0;
             return;
         }
-        while pos > 0 && !chars[pos - 1].is_alphanumeric() {
-            pos -= 1;
-        }
-        while pos > 0 && chars[pos - 1].is_alphanumeric() {
-            pos -= 1;
-        }
-        self.cursor = pos;
+        let (cursor_byte, clamped_cursor) = self.char_to_byte_idx(self.cursor);
+        let (_, skipped_chars) = self.scan_word_backward_boundary(cursor_byte);
+        self.cursor = clamped_cursor - skipped_chars;
     }
 
     /// Moves the cursor forward one word (Ctrl+Right / Alt+F).
     pub fn move_word_forward(&mut self) {
-        let chars: Vec<char> = self.value.chars().collect();
-        let len = chars.len();
-        let mut pos = self.cursor.min(len);
-        if pos >= len {
+        let (cursor_byte, clamped_cursor) = self.char_to_byte_idx(self.cursor);
+        if cursor_byte >= self.value.len() {
+            self.cursor = clamped_cursor;
             return;
         }
-        while pos < len && !chars[pos].is_alphanumeric() {
-            pos += 1;
-        }
-        while pos < len && chars[pos].is_alphanumeric() {
-            pos += 1;
-        }
-        self.cursor = pos;
+        let advanced = self.scan_word_forward_chars(cursor_byte);
+        self.cursor = clamped_cursor + advanced;
     }
 
     /// Handles a keyboard event. Returns `true` if the input text was modified.
@@ -628,5 +699,277 @@ mod tests {
         assert_eq!(input.len(), 11);
         assert!(!input.is_empty());
         assert_eq!(format!("{input}"), "hello-world");
+    }
+
+    #[test]
+    fn test_text_input_multibyte_swedish() {
+        let mut input = TextInput::new();
+        input.insert_char('å');
+        input.insert_char('ä');
+        input.insert_char('ö');
+        assert_eq!(input.value(), "åäö");
+        assert_eq!(input.cursor(), 3);
+        assert_eq!(input.value().len(), 6); // 2 bytes per char
+
+        // Navigate left and insert in middle
+        input.move_cursor_left();
+        assert_eq!(input.cursor(), 2);
+        input.insert_char('k');
+        assert_eq!(input.value(), "åäkö");
+        assert_eq!(input.cursor(), 3);
+
+        // Delete backward (removes 'k')
+        assert!(input.delete_char_backward());
+        assert_eq!(input.value(), "åäö");
+        assert_eq!(input.cursor(), 2);
+
+        // Delete forward (removes 'ö')
+        assert!(input.delete_char_forward());
+        assert_eq!(input.value(), "åä");
+        assert_eq!(input.cursor(), 2);
+
+        // Move to start and delete forward (removes 'å')
+        input.move_cursor_home();
+        assert_eq!(input.cursor(), 0);
+        assert!(input.delete_char_forward());
+        assert_eq!(input.value(), "ä");
+        assert_eq!(input.cursor(), 0);
+
+        // Insert at start
+        input.insert_char('ö');
+        assert_eq!(input.value(), "öä");
+        assert_eq!(input.cursor(), 1);
+
+        // Delete backward (removes 'ö')
+        assert!(input.delete_char_backward());
+        assert_eq!(input.value(), "ä");
+        assert_eq!(input.cursor(), 0);
+
+        // Delete backward at start returns false
+        assert!(!input.delete_char_backward());
+    }
+
+    #[test]
+    fn test_text_input_multibyte_cyrillic_and_emojis() {
+        let mut input = TextInput::new();
+        // Cyrillic: each letter is 2 bytes
+        assert!(input.insert_str("Привет, мир!"));
+        assert_eq!(input.value(), "Привет, мир!");
+        assert_eq!(input.cursor(), 12);
+
+        // Move left 5 characters to cursor 7 (before space)
+        for _ in 0..5 {
+            input.move_cursor_left();
+        }
+        assert_eq!(input.cursor(), 7);
+
+        // Insert a 4-byte emoji
+        input.insert_char('🦀');
+        assert_eq!(input.value(), "Привет,🦀 мир!");
+        assert_eq!(input.cursor(), 8);
+
+        // Delete backward removes the entire 4-byte emoji
+        assert!(input.delete_char_backward());
+        assert_eq!(input.value(), "Привет, мир!");
+        assert_eq!(input.cursor(), 7);
+
+        // Delete forward removes the space
+        assert!(input.delete_char_forward());
+        assert_eq!(input.value(), "Привет,мир!");
+        assert_eq!(input.cursor(), 7);
+
+        // Insert multi-byte emoji string
+        assert!(input.insert_str("🚀🎉"));
+        assert_eq!(input.value(), "Привет,🚀🎉мир!");
+        assert_eq!(input.cursor(), 9);
+
+        // Delete backward twice removes both emojis
+        assert!(input.delete_char_backward());
+        assert_eq!(input.value(), "Привет,🚀мир!");
+        assert_eq!(input.cursor(), 8);
+        assert!(input.delete_char_backward());
+        assert_eq!(input.value(), "Привет,мир!");
+        assert_eq!(input.cursor(), 7);
+    }
+
+    #[test]
+    fn test_text_input_edge_cases_empty_and_boundaries() {
+        let mut input = TextInput::new();
+
+        // On empty input:
+        assert!(!input.delete_char_backward());
+        assert!(!input.delete_char_forward());
+        assert!(!input.delete_to_start());
+        assert!(!input.delete_to_end());
+        assert!(!input.delete_word_backward());
+        input.move_word_backward();
+        assert_eq!(input.cursor(), 0);
+        input.move_word_forward();
+        assert_eq!(input.cursor(), 0);
+        input.move_cursor_left();
+        assert_eq!(input.cursor(), 0);
+        input.move_cursor_right();
+        assert_eq!(input.cursor(), 0);
+        assert_eq!(input.value(), "");
+
+        // Single character boundaries
+        input.insert_char('x');
+        assert_eq!(input.cursor(), 1);
+        // At end: delete forward returns false
+        assert!(!input.delete_char_forward());
+        assert_eq!(input.value(), "x");
+        // Move to start
+        input.move_cursor_left();
+        assert_eq!(input.cursor(), 0);
+        // At start: delete backward returns false
+        assert!(!input.delete_char_backward());
+        assert_eq!(input.value(), "x");
+        // Delete forward deletes 'x'
+        assert!(input.delete_char_forward());
+        assert_eq!(input.value(), "");
+        assert_eq!(input.cursor(), 0);
+
+        // Out-of-bounds cursor robustness:
+        input.set_value("alpha");
+        input.cursor = 100; // Directly set out-of-bounds cursor
+        input.insert_char('!');
+        assert_eq!(input.value(), "alpha!");
+        assert_eq!(input.cursor(), 6);
+
+        input.cursor = 200;
+        assert!(input.insert_str(" beta"));
+        assert_eq!(input.value(), "alpha! beta");
+        assert_eq!(input.cursor(), 11);
+
+        input.cursor = 500;
+        assert!(input.delete_char_backward());
+        assert_eq!(input.value(), "alpha! bet");
+        assert_eq!(input.cursor(), 10);
+
+        input.cursor = 500;
+        assert!(!input.delete_char_forward());
+        assert_eq!(input.value(), "alpha! bet");
+
+        input.cursor = 500;
+        assert!(!input.delete_to_end());
+        assert_eq!(input.value(), "alpha! bet");
+
+        input.cursor = 500;
+        assert!(input.delete_to_start());
+        assert_eq!(input.value(), "");
+        assert_eq!(input.cursor(), 0);
+    }
+
+    #[test]
+    fn test_text_input_multibyte_word_navigation_and_deletions() {
+        let mut input = TextInput::new().with_value("hallå-där_vännen! 123");
+        assert_eq!(input.cursor(), 21);
+
+        // Word backward jumps across Swedish and punctuation
+        input.move_word_backward();
+        assert_eq!(input.cursor(), 18); // at '1' in "123"
+
+        input.move_word_backward();
+        assert_eq!(input.cursor(), 10); // at 'v' in "vännen"
+
+        input.move_word_backward();
+        assert_eq!(input.cursor(), 6); // at 'd' in "där"
+
+        input.move_word_backward();
+        assert_eq!(input.cursor(), 0); // at 'h' in "hallå"
+
+        input.move_word_backward();
+        assert_eq!(input.cursor(), 0);
+
+        // Word forward jumps across Swedish and punctuation
+        input.move_word_forward();
+        assert_eq!(input.cursor(), 5); // after "hallå"
+
+        input.move_word_forward();
+        assert_eq!(input.cursor(), 9); // after "där"
+
+        input.move_word_forward();
+        assert_eq!(input.cursor(), 16); // after "vännen"
+
+        input.move_word_forward();
+        assert_eq!(input.cursor(), 21); // after "123"
+
+        input.move_word_forward();
+        assert_eq!(input.cursor(), 21);
+
+        // Deleting words backward with mixed Swedish characters
+        assert!(input.delete_word_backward());
+        assert_eq!(input.value(), "hallå-där_vännen! ");
+        assert_eq!(input.cursor(), 18);
+
+        assert!(input.delete_word_backward());
+        assert_eq!(input.value(), "hallå-där_");
+        assert_eq!(input.cursor(), 10);
+
+        assert!(input.delete_word_backward());
+        assert_eq!(input.value(), "hallå-");
+        assert_eq!(input.cursor(), 6);
+
+        assert!(input.delete_word_backward());
+        assert_eq!(input.value(), "");
+        assert_eq!(input.cursor(), 0);
+
+        assert!(!input.delete_word_backward());
+    }
+
+    #[test]
+    fn test_text_input_multibyte_paste_and_readline_kills() {
+        let mut input = TextInput::new();
+        // Paste with Swedish, Cyrillic, emojis and stripped newlines
+        assert!(input.handle_paste("smörgås\r\nПривет\x00🦀"));
+        assert_eq!(input.value(), "smörgåsПривет🦀");
+        assert_eq!(input.cursor(), 14);
+
+        // Ctrl+K from middle:
+        // Set cursor to 7 (after "smörgås")
+        input.set_cursor(7);
+        assert!(input.delete_to_end());
+        assert_eq!(input.value(), "smörgås");
+        assert_eq!(input.cursor(), 7);
+
+        // Ctrl+U from cursor 4 (before 'g')
+        input.set_cursor(4);
+        assert!(input.delete_to_start());
+        assert_eq!(input.value(), "gås");
+        assert_eq!(input.cursor(), 0);
+    }
+
+    #[test]
+    fn test_text_input_rapid_insertions_and_deletions() {
+        let mut input = TextInput::new();
+        let samples = ['a', 'å', 'б', '🎉', 'z', 'ö', 'д', '🚀'];
+
+        // Rapidly insert characters
+        for &c in &samples {
+            input.insert_char(c);
+        }
+        assert_eq!(input.cursor(), 8);
+        assert_eq!(input.value().chars().count(), 8);
+
+        // Move to middle and insert more
+        input.set_cursor(4);
+        for &c in &samples {
+            input.insert_char(c);
+        }
+        assert_eq!(input.cursor(), 12);
+        assert_eq!(input.value().chars().count(), 16);
+
+        // Rapid deletions from middle
+        for _ in 0..6 {
+            assert!(input.delete_char_backward());
+        }
+        assert_eq!(input.cursor(), 6);
+        assert_eq!(input.value().chars().count(), 10);
+
+        for _ in 0..4 {
+            assert!(input.delete_char_forward());
+        }
+        assert_eq!(input.cursor(), 6);
+        assert_eq!(input.value().chars().count(), 6);
     }
 }
