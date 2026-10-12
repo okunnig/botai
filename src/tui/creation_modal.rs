@@ -1109,99 +1109,6 @@ impl ProjectCreationModal {
             .min(self.project_name_input.chars().count());
     }
 
-    /// Inserts a character into the project name input at the current cursor offset.
-    pub fn insert_project_name_char(&mut self, c: char) {
-        self.sync_project_name_cursor();
-        self.project_name_input.insert_char(c);
-        self.project_name_cursor = self.project_name_input.cursor;
-        self.revalidate();
-    }
-
-    /// Deletes the character before the project name cursor (Backspace).
-    pub fn delete_project_name_char_backward(&mut self) {
-        self.sync_project_name_cursor();
-        if self.project_name_input.delete_char_backward() {
-            self.project_name_cursor = self.project_name_input.cursor;
-            self.revalidate();
-        }
-    }
-
-    /// Deletes the character under the project name cursor (Delete).
-    pub fn delete_project_name_char_forward(&mut self) {
-        self.sync_project_name_cursor();
-        if self.project_name_input.delete_char_forward() {
-            self.project_name_cursor = self.project_name_input.cursor;
-            self.revalidate();
-        }
-    }
-
-    /// Deletes characters from the project name cursor to the beginning of the line (Ctrl+U).
-    pub fn delete_project_name_to_start(&mut self) {
-        self.sync_project_name_cursor();
-        if self.project_name_input.delete_to_start() {
-            self.project_name_cursor = self.project_name_input.cursor;
-            self.revalidate();
-        }
-    }
-
-    /// Deletes characters from the project name cursor to the end of the line (Ctrl+K).
-    pub fn delete_project_name_to_end(&mut self) {
-        self.sync_project_name_cursor();
-        if self.project_name_input.delete_to_end() {
-            self.project_name_cursor = self.project_name_input.cursor;
-            self.revalidate();
-        }
-    }
-
-    /// Deletes the word immediately preceding the project name cursor (Ctrl+W).
-    pub fn delete_project_name_word_backward(&mut self) {
-        self.sync_project_name_cursor();
-        if self.project_name_input.delete_word_backward() {
-            self.project_name_cursor = self.project_name_input.cursor;
-            self.revalidate();
-        }
-    }
-
-    /// Moves the project name cursor backward one word (Ctrl+Left / Alt+B).
-    pub fn move_project_name_word_backward(&mut self) {
-        self.sync_project_name_cursor();
-        self.project_name_input.move_word_backward();
-        self.project_name_cursor = self.project_name_input.cursor;
-    }
-
-    /// Moves the project name cursor forward one word (Ctrl+Right / Alt+F).
-    pub fn move_project_name_word_forward(&mut self) {
-        self.sync_project_name_cursor();
-        self.project_name_input.move_word_forward();
-        self.project_name_cursor = self.project_name_input.cursor;
-    }
-
-    /// Moves the project name cursor left by one character.
-    pub fn move_project_name_cursor_left(&mut self) {
-        self.sync_project_name_cursor();
-        self.project_name_input.move_cursor_left();
-        self.project_name_cursor = self.project_name_input.cursor;
-    }
-
-    /// Moves the project name cursor right by one character.
-    pub fn move_project_name_cursor_right(&mut self) {
-        self.sync_project_name_cursor();
-        self.project_name_input.move_cursor_right();
-        self.project_name_cursor = self.project_name_input.cursor;
-    }
-
-    /// Moves the project name cursor to the start of the line (Home / Ctrl+A).
-    pub fn move_project_name_cursor_home(&mut self) {
-        self.project_name_input.move_cursor_home();
-        self.project_name_cursor = self.project_name_input.cursor;
-    }
-
-    /// Moves the project name cursor to the end of the line (End / Ctrl+E).
-    pub fn move_project_name_cursor_end(&mut self) {
-        self.project_name_input.move_cursor_end();
-        self.project_name_cursor = self.project_name_input.cursor;
-    }
-
     /// Calculates the hardware cursor position within the modal area when an editable text input is focused.
     pub fn cursor_position(&self, area: Rect) -> Option<Position> {
         let modal_area = modal_area(area)?;
@@ -1436,73 +1343,20 @@ impl ProjectCreationModal {
                         _ => CreationModalAction::None,
                     }
                 } else if self.focus == CreationFocus::ProjectName {
-                    if (key.code == KeyCode::Left && (has_ctrl || has_alt))
-                        || ((key.code == KeyCode::Char('b') || key.code == KeyCode::Char('B'))
-                            && has_alt)
-                    {
-                        self.move_project_name_word_backward();
-                        return CreationModalAction::None;
-                    }
-
-                    if (key.code == KeyCode::Right && (has_ctrl || has_alt))
-                        || ((key.code == KeyCode::Char('f') || key.code == KeyCode::Char('F'))
-                            && has_alt)
-                    {
-                        self.move_project_name_word_forward();
-                        return CreationModalAction::None;
-                    }
-
                     match key.code {
-                        KeyCode::Up => {
-                            self.prev_focus();
-                            CreationModalAction::None
-                        }
-                        KeyCode::Down => {
-                            self.next_focus();
-                            CreationModalAction::None
-                        }
-                        KeyCode::Left => {
-                            self.move_project_name_cursor_left();
-                            CreationModalAction::None
-                        }
-                        KeyCode::Right => {
-                            self.move_project_name_cursor_right();
-                            CreationModalAction::None
-                        }
-                        KeyCode::Home => {
-                            self.move_project_name_cursor_home();
-                            CreationModalAction::None
-                        }
-                        KeyCode::End => {
-                            self.move_project_name_cursor_end();
-                            CreationModalAction::None
-                        }
-                        KeyCode::Backspace => {
-                            self.delete_project_name_char_backward();
-                            CreationModalAction::None
-                        }
-                        KeyCode::Delete => {
-                            self.delete_project_name_char_forward();
-                            CreationModalAction::None
-                        }
-                        KeyCode::Enter => self.try_submit(),
-                        KeyCode::Char(c) if has_ctrl => {
-                            match c {
-                                'a' | 'A' => self.move_project_name_cursor_home(),
-                                'e' | 'E' => self.move_project_name_cursor_end(),
-                                'u' | 'U' => self.delete_project_name_to_start(),
-                                'k' | 'K' => self.delete_project_name_to_end(),
-                                'w' | 'W' => self.delete_project_name_word_backward(),
-                                _ => {}
+                        KeyCode::Up => self.prev_focus(),
+                        KeyCode::Down => self.next_focus(),
+                        KeyCode::Enter => return self.try_submit(),
+                        _ => {
+                            self.sync_project_name_cursor();
+                            let modified = self.project_name_input.handle_key(key);
+                            self.project_name_cursor = self.project_name_input.cursor;
+                            if modified {
+                                self.revalidate();
                             }
-                            CreationModalAction::None
                         }
-                        KeyCode::Char(c) if !has_ctrl && !has_alt => {
-                            self.insert_project_name_char(c);
-                            CreationModalAction::None
-                        }
-                        _ => CreationModalAction::None,
                     }
+                    CreationModalAction::None
                 } else if self.focus == CreationFocus::Repositories {
                     match key.code {
                         KeyCode::Up | KeyCode::Char('k') if !has_ctrl && !has_alt => {
@@ -4003,7 +3857,7 @@ mod tests {
         modal.set_project_name("test-project");
         assert_eq!(modal.cursor_position(area), Some(Position::new(41, 6)));
 
-        modal.move_project_name_cursor_home();
+        modal.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!(modal.cursor_position(area), Some(Position::new(29, 6)));
 
         modal.project_name_cursor = 5;
