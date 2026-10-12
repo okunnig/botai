@@ -898,25 +898,22 @@ impl TuiApp {
 
     /// Dispatches a key event to the dashboard and processes the resulting `DashboardAction`.
     pub fn handle_dashboard_key(&mut self, key: crossterm::event::KeyEvent) {
-        if let Some(mut dashboard) = self.dashboard.take() {
-            let action = dashboard.handle_key(key);
-            if self.config.as_ref() != Some(&dashboard.config) {
-                self.config = Some(dashboard.config.clone());
-                if self.config_path.is_none() && dashboard.config_path.is_some() {
-                    self.config_path = dashboard.config_path.clone();
-                }
-                self.config_last_modified = dashboard.config_last_modified;
-                self.config_file_len = dashboard.config_file_len;
-            }
-            self.dashboard = Some(dashboard);
-            self.handle_dashboard_action(action);
-        }
+        self.dispatch_to_dashboard(|dashboard| dashboard.handle_key(key));
     }
 
     /// Dispatches a mouse event to the dashboard and processes the resulting `DashboardAction`.
     pub fn handle_dashboard_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        self.dispatch_to_dashboard(|dashboard| dashboard.handle_mouse(mouse));
+    }
+
+    /// Runs `handler` on the dashboard, adopts any configuration it reloaded, then processes
+    /// the resulting `DashboardAction`.
+    fn dispatch_to_dashboard(
+        &mut self,
+        handler: impl FnOnce(&mut DashboardState) -> DashboardAction,
+    ) {
         if let Some(mut dashboard) = self.dashboard.take() {
-            let action = dashboard.handle_mouse(mouse);
+            let action = handler(&mut dashboard);
             if self.config.as_ref() != Some(&dashboard.config) {
                 self.config = Some(dashboard.config.clone());
                 if self.config_path.is_none() && dashboard.config_path.is_some() {

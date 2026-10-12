@@ -272,32 +272,8 @@ impl DashboardState {
         }
 
         if let Some(mut modal) = self.creation_modal.take() {
-            match modal.handle_key(key) {
-                CreationModalAction::Cancel => {
-                    self.creation_modal = None;
-                    return DashboardAction::None;
-                }
-                CreationModalAction::Submit {
-                    template,
-                    project,
-                    agent_override,
-                    prompt,
-                    selected_repos,
-                } => {
-                    self.creation_modal = None;
-                    return DashboardAction::CreateProject {
-                        template,
-                        project,
-                        agent_override,
-                        prompt,
-                        selected_repos,
-                    };
-                }
-                CreationModalAction::None => {
-                    self.creation_modal = Some(modal);
-                    return DashboardAction::None;
-                }
-            }
+            let action = modal.handle_key(key);
+            return self.resolve_creation_modal_action(modal, action);
         }
 
         match key.code {
@@ -345,6 +321,34 @@ impl DashboardState {
         }
     }
 
+    /// Maps a creation modal result to a `DashboardAction`, putting `modal` back only while it stays open.
+    fn resolve_creation_modal_action(
+        &mut self,
+        modal: ProjectCreationModal,
+        action: CreationModalAction,
+    ) -> DashboardAction {
+        match action {
+            CreationModalAction::Cancel => DashboardAction::None,
+            CreationModalAction::Submit {
+                template,
+                project,
+                agent_override,
+                prompt,
+                selected_repos,
+            } => DashboardAction::CreateProject {
+                template,
+                project,
+                agent_override,
+                prompt,
+                selected_repos,
+            },
+            CreationModalAction::None => {
+                self.creation_modal = Some(modal);
+                DashboardAction::None
+            }
+        }
+    }
+
     /// Handles pasted text into the dashboard or any active creation modal.
     pub fn handle_paste(&mut self, text: &str) {
         if let Some(modal) = &mut self.creation_modal {
@@ -358,30 +362,9 @@ impl DashboardState {
             return DashboardAction::None;
         }
 
-        if let Some(ref mut modal) = self.creation_modal {
-            match modal.handle_mouse(mouse) {
-                CreationModalAction::Cancel => {
-                    self.creation_modal = None;
-                    return DashboardAction::None;
-                }
-                CreationModalAction::Submit {
-                    template,
-                    project,
-                    agent_override,
-                    prompt,
-                    selected_repos,
-                } => {
-                    self.creation_modal = None;
-                    return DashboardAction::CreateProject {
-                        template,
-                        project,
-                        agent_override,
-                        prompt,
-                        selected_repos,
-                    };
-                }
-                CreationModalAction::None => return DashboardAction::None,
-            }
+        if let Some(mut modal) = self.creation_modal.take() {
+            let action = modal.handle_mouse(mouse);
+            return self.resolve_creation_modal_action(modal, action);
         }
 
         match mouse.kind {

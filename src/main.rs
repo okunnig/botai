@@ -4,7 +4,7 @@ use anyhow::{bail, Context, Result};
 use std::env;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use botai::cli::{resolve_cli_selected_repos, Cli, Commands};
 use botai::config::Config;
@@ -271,16 +271,7 @@ fn cmd_create(
         .build(progress_sink)
         .with_context(|| format!("Failed to create project '{project_name}'"))?;
 
-    let mut registry = SessionRegistry::new();
-    registry.add(ps, pty, vt)?;
-
-    let mut app = TuiApp::new(registry)
-        .with_config(config.clone())
-        .with_cwd(cwd);
-    let mut stdout = io::stdout();
-    app.run(&mut stdout)?;
-
-    Ok(())
+    run_tui(config, cwd, ps, pty, vt)
 }
 
 /// `botai attach <project>`
@@ -333,6 +324,17 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
         agent_name,
     );
 
+    run_tui(config, cwd, ps, pty, vt)
+}
+
+/// Registers a single session and runs the TUI multiplexer until exit.
+fn run_tui(
+    config: &Config,
+    cwd: PathBuf,
+    ps: ProjectSession,
+    pty: PtySession,
+    vt: VtScreen,
+) -> Result<()> {
     let mut registry = SessionRegistry::new();
     registry.add(ps, pty, vt)?;
 
