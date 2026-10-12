@@ -5,12 +5,13 @@ use std::borrow::Cow;
 use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect, Size},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 
+use crate::tui::modal_frame::{centered_modal, render_modal_frame};
 use crate::tui::theme::Theme;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -110,7 +111,7 @@ impl ProgressLog {
         buf: &mut Buffer,
         theme: &Theme,
     ) {
-        let Some(areas) = render_modal_frame(area, buf, title, border_color) else {
+        let Some(areas) = render_progress_frame(area, buf, title, border_color) else {
             return;
         };
         Paragraph::new(header_lines).render(areas.header, buf);
@@ -163,36 +164,14 @@ struct ProgressModalAreas {
 
 /// Clears and draws the centered, bordered modal frame and splits its interior.
 /// Returns `None` if `area` is too small to render the modal.
-fn render_modal_frame<'a>(
+fn render_progress_frame<'a>(
     area: Rect,
     buf: &mut Buffer,
     title: impl Into<Line<'a>>,
     border_color: Color,
 ) -> Option<ProgressModalAreas> {
-    let width = 76.min(area.width.saturating_sub(4));
-    let height = 18.min(area.height.saturating_sub(2));
-
-    if width < 24 || height < 8 {
-        return None;
-    }
-
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    Clear.render(modal_area, buf);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(
-            Style::default()
-                .fg(border_color)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
+    let modal_area = centered_modal(area, Size::new(76, 18), Size::new(24, 8))?;
+    let inner = render_modal_frame(modal_area, buf, title, border_color);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)

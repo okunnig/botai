@@ -6,17 +6,18 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Position, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect, Size},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        StatefulWidget, Widget, Wrap,
+        Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget,
+        Widget, Wrap,
     },
 };
 
 use crate::config::Config;
 use crate::project::{ProjectBuilder, ProjectValidation};
+use crate::tui::modal_frame::{centered_modal, render_modal_frame};
 use crate::tui::text_input::TextInput;
 use crate::tui::theme::Theme;
 
@@ -71,16 +72,11 @@ pub const MODAL_HEIGHT: u16 = 24;
 
 /// Calculates the centered modal bounding rectangle, ensuring minimum dimensions.
 pub fn modal_area(area: Rect) -> Option<Rect> {
-    let width = MODAL_WIDTH.min(area.width.saturating_sub(4));
-    let height = MODAL_HEIGHT.min(area.height.saturating_sub(2));
-
-    if width < 25 || height < 10 {
-        return None;
-    }
-
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Some(Rect::new(x, y, width, height))
+    centered_modal(
+        area,
+        Size::new(MODAL_WIDTH, MODAL_HEIGHT),
+        Size::new(25, 10),
+    )
 }
 
 /// Clamps a cursor position to the last column and row of `inner`.
@@ -89,18 +85,6 @@ fn clamp_cursor(inner: Rect, x: u16, y: u16) -> Position {
         x.min(inner.x + inner.width.saturating_sub(1)),
         y.min(inner.y + inner.height.saturating_sub(1)),
     )
-}
-
-/// Builds the bordered, titled outer block shared by both modal steps.
-fn modal_block<'a>(title: impl Into<Line<'a>>, theme: &Theme) -> Block<'a> {
-    Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(
-            Style::default()
-                .fg(theme.modal_title)
-                .add_modifier(Modifier::BOLD),
-        )
 }
 
 pub fn step1_layout(inner: Rect) -> [Rect; 5] {
@@ -1769,8 +1753,6 @@ impl ProjectCreationModal {
             None => return,
         };
 
-        Clear.render(modal_area, buf);
-
         match self.step {
             CreationStep::SelectTemplate => {
                 self.render_step1(modal_area, buf, theme);
@@ -1783,10 +1765,7 @@ impl ProjectCreationModal {
 
     /// Renders Step 1: Searchable Template Selection with master-detail split layout.
     fn render_step1(&self, modal_area: Rect, buf: &mut Buffer, theme: &Theme) {
-        let block = modal_block(" Create New Project ", theme);
-
-        let inner = block.inner(modal_area);
-        block.render(modal_area, buf);
+        let inner = render_modal_frame(modal_area, buf, " Create New Project ", theme.modal_title);
 
         if inner.height < 6 || inner.width < 20 {
             return;
@@ -2121,10 +2100,7 @@ impl ProjectCreationModal {
         let tpl_name = self.selected_template().unwrap_or("default");
         let title = format!(" Create New Project (Template: {tpl_name}) ");
 
-        let block = modal_block(title, theme);
-
-        let inner = block.inner(modal_area);
-        block.render(modal_area, buf);
+        let inner = render_modal_frame(modal_area, buf, title, theme.modal_title);
 
         if inner.height < 6 || inner.width < 20 {
             return;

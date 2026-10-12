@@ -4,15 +4,16 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Position, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect, Size},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
 };
 
 use crate::config::{Config, ConfigError};
 use crate::session::SessionStatus;
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
+use crate::tui::modal_frame::{centered_modal, render_modal_frame};
 use crate::tui::status_bar::TopBar;
 use crate::tui::theme::Theme;
 
@@ -508,31 +509,15 @@ pub fn render_destroy_modal(
     buf: &mut Buffer,
     theme: &Theme,
 ) {
-    let width = 76.min(area.width.saturating_sub(4));
-    let height = 8.min(area.height.saturating_sub(2));
-
-    if width < 20 || height < 5 {
+    let Some(modal_area) = centered_modal(area, Size::new(76, 8), Size::new(20, 5)) else {
         return;
-    }
-
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    // Clear background of modal area
-    Clear.render(modal_area, buf);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Confirm Destroy Project ")
-        .border_style(
-            Style::default()
-                .fg(theme.status_error)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
+    };
+    let inner = render_modal_frame(
+        modal_area,
+        buf,
+        " Confirm Destroy Project ",
+        theme.status_error,
+    );
 
     let lines = vec![
         Line::from(vec![
