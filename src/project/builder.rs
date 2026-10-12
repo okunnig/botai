@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::config::{Config, ConfigError, ResolvedRepo};
@@ -599,53 +599,20 @@ impl ProjectBuilder {
                                 if cmd.is_empty() {
                                     continue;
                                 }
-                                let prog = &cmd[0];
-                                let args = &cmd[1..];
                                 let cmd_display = cmd.join(" ");
                                 let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
                                     "Running setup hook for '{repo_name}': {cmd_display}"
                                 )));
 
-                                let mut command = prepare_hook_command(prog, args);
-                                command.current_dir(&wt_path);
-                                for (k, v) in tpl_env {
-                                    command.env(k, v);
-                                }
-                                for (k, v) in repo_env {
-                                    command.env(k, v);
-                                }
-
-                                match command.output() {
-                                    Ok(output) => {
-                                        if !output.status.success() {
-                                            let exit_code = output
-                                                .status
-                                                .code()
-                                                .map(|c| c.to_string())
-                                                .unwrap_or_else(|| "signal".to_string());
-                                            let stderr_snippet =
-                                                String::from_utf8_lossy(&output.stderr);
-                                            let trimmed_err = stderr_snippet.trim();
-                                            let msg = if trimmed_err.is_empty() {
-                                                format!("exit code {exit_code}")
-                                            } else {
-                                                format!("exit code {exit_code}: {trimmed_err}")
-                                            };
-                                            let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                                "⚠ Warning: Setup hook for '{repo_name}' failed: {msg}"
-                                            )));
-                                        } else {
-                                            let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                                "✓ Setup hook for '{repo_name}' completed: {cmd_display}"
-                                            )));
-                                        }
-                                    }
-                                    Err(err) => {
-                                        let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                            "⚠ Warning: Setup hook for '{repo_name}' failed: {err}"
-                                        )));
-                                    }
-                                }
+                                let log = match run_hook(cmd, &wt_path, &[tpl_env, repo_env]) {
+                                    Ok(()) => format!(
+                                        "✓ Setup hook for '{repo_name}' completed: {cmd_display}"
+                                    ),
+                                    Err(msg) => format!(
+                                        "⚠ Warning: Setup hook for '{repo_name}' failed: {msg}"
+                                    ),
+                                };
+                                let _ = thread_tx.send(ProjectSetupEvent::Log(log));
                             }
                         });
                     }
@@ -687,49 +654,16 @@ impl ProjectBuilder {
                 if cmd.is_empty() {
                     continue;
                 }
-                let prog = &cmd[0];
-                let args = &cmd[1..];
                 let cmd_display = cmd.join(" ");
                 progress_sink(ProjectSetupEvent::Log(format!(
                     "Running post_create hook: {cmd_display}"
                 )));
 
-                let mut command = prepare_hook_command(prog, args);
-                command.current_dir(&project_dir_canon);
-                for (k, v) in &tpl.env {
-                    command.env(k, v);
-                }
-
-                match command.output() {
-                    Ok(output) => {
-                        if !output.status.success() {
-                            let exit_code = output
-                                .status
-                                .code()
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| "signal".to_string());
-                            let stderr_snippet = String::from_utf8_lossy(&output.stderr);
-                            let trimmed_err = stderr_snippet.trim();
-                            let msg = if trimmed_err.is_empty() {
-                                format!("exit code {exit_code}")
-                            } else {
-                                format!("exit code {exit_code}: {trimmed_err}")
-                            };
-                            progress_sink(ProjectSetupEvent::Log(format!(
-                                "⚠ Warning: Post-create hook failed: {msg}"
-                            )));
-                        } else {
-                            progress_sink(ProjectSetupEvent::Log(format!(
-                                "✓ Post-create hook completed: {cmd_display}"
-                            )));
-                        }
-                    }
-                    Err(err) => {
-                        progress_sink(ProjectSetupEvent::Log(format!(
-                            "⚠ Warning: Post-create hook failed: {err}"
-                        )));
-                    }
-                }
+                let log = match run_hook(cmd, &project_dir_canon, &[&tpl.env]) {
+                    Ok(()) => format!("✓ Post-create hook completed: {cmd_display}"),
+                    Err(msg) => format!("⚠ Warning: Post-create hook failed: {msg}"),
+                };
+                progress_sink(ProjectSetupEvent::Log(log));
             }
 
             Ok((project_dir_canon, created_mappings))
@@ -921,49 +855,16 @@ where
                             continue;
                         }
                         ran_hooks = true;
-                        let prog = &cmd[0];
-                        let args = &cmd[1..];
                         let cmd_display = cmd.join(" ");
                         progress_sink(ProjectDestroyEvent::Log(format!(
                             "Running pre_destroy hook: {cmd_display}"
                         )));
 
-                        let mut command = prepare_hook_command(prog, args);
-                        command.current_dir(&project_dir);
-                        for (k, v) in &tpl.env {
-                            command.env(k, v);
-                        }
-
-                        match command.output() {
-                            Ok(output) => {
-                                if !output.status.success() {
-                                    let exit_code = output
-                                        .status
-                                        .code()
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "signal".to_string());
-                                    let stderr_snippet = String::from_utf8_lossy(&output.stderr);
-                                    let trimmed_err = stderr_snippet.trim();
-                                    let msg = if trimmed_err.is_empty() {
-                                        format!("exit code {exit_code}")
-                                    } else {
-                                        format!("exit code {exit_code}: {trimmed_err}")
-                                    };
-                                    progress_sink(ProjectDestroyEvent::Log(format!(
-                                        "⚠ Warning: Pre-destroy hook failed: {msg}"
-                                    )));
-                                } else {
-                                    progress_sink(ProjectDestroyEvent::Log(format!(
-                                        "✓ Pre-destroy hook completed: {cmd_display}"
-                                    )));
-                                }
-                            }
-                            Err(err) => {
-                                progress_sink(ProjectDestroyEvent::Log(format!(
-                                    "⚠ Warning: Pre-destroy hook failed: {err}"
-                                )));
-                            }
-                        }
+                        let log = match run_hook(cmd, &project_dir, &[&tpl.env]) {
+                            Ok(()) => format!("✓ Pre-destroy hook completed: {cmd_display}"),
+                            Err(msg) => format!("⚠ Warning: Pre-destroy hook failed: {msg}"),
+                        };
+                        progress_sink(ProjectDestroyEvent::Log(log));
                     }
                 }
             }
@@ -1163,6 +1064,37 @@ pub(crate) fn resolve_executable_in_paths(
     }
 
     prog_path.to_path_buf()
+}
+
+/// Runs a non-empty lifecycle hook command in `cwd` with the given environment maps applied in order.
+///
+/// Returns `Err` with a log-ready failure description: `exit code <N|signal>[: <stderr>]`,
+/// or the spawn error message.
+fn run_hook(cmd: &[String], cwd: &Path, envs: &[&HashMap<String, String>]) -> Result<(), String> {
+    let mut command = prepare_hook_command(&cmd[0], &cmd[1..]);
+    command.current_dir(cwd);
+    for env in envs {
+        for (k, v) in *env {
+            command.env(k, v);
+        }
+    }
+
+    let output = command.output().map_err(|err| err.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let exit_code = output
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    let stderr_snippet = String::from_utf8_lossy(&output.stderr);
+    let trimmed_err = stderr_snippet.trim();
+    if trimmed_err.is_empty() {
+        Err(format!("exit code {exit_code}"))
+    } else {
+        Err(format!("exit code {exit_code}: {trimmed_err}"))
+    }
 }
 
 /// Prepares a `std::process::Command` for a lifecycle hook.
