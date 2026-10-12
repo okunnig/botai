@@ -571,6 +571,12 @@ fn default_shell() -> String {
     shell.to_string()
 }
 
+/// Minimal configuration shared by unit tests.
+#[cfg(test)]
+pub(crate) fn test_config() -> Config {
+    Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap()
+}
+
 /// The built-in configuration used when no config file is available.
 impl Default for Config {
     fn default() -> Self {

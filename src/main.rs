@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use botai::cli::{resolve_cli_selected_repos, Cli, Commands};
 use botai::config::Config;
 use botai::project::{ProjectBuilder, ProjectSetupEvent};
-use botai::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen};
+use botai::session::{
+    ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen, DEFAULT_VIEWPORT,
+};
 use botai::tui::{DashboardState, TuiApp};
 
 fn main() -> Result<()> {
@@ -206,9 +208,7 @@ fn cmd_create(
     selected_repos: Vec<String>,
 ) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current working directory")?;
-    let (term_cols, term_rows) = crossterm::terminal::size()
-        .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
-        .unwrap_or((100, 30));
+    let (term_cols, term_rows) = terminal_viewport();
 
     let mut builder = ProjectBuilder::new(config.clone(), template_name, project_name)
         .with_cwd(cwd.clone())
@@ -296,9 +296,7 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
         .get_agent(agent_name)
         .with_context(|| format!("Agent '{agent_name}' not found"))?;
 
-    let (term_cols, term_rows) = crossterm::terminal::size()
-        .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
-        .unwrap_or((100, 30));
+    let (term_cols, term_rows) = terminal_viewport();
 
     let mut pty_config = PtyConfig::new(&agent.command, &project_dir)
         .with_args(agent.args.clone())
@@ -325,6 +323,13 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
     );
 
     run_tui(config, cwd, ps, pty, vt)
+}
+
+/// Returns the terminal size available to a PTY session, reserving one row for the status bar.
+fn terminal_viewport() -> (u16, u16) {
+    crossterm::terminal::size()
+        .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
+        .unwrap_or(DEFAULT_VIEWPORT)
 }
 
 /// Registers a single session and runs the TUI multiplexer until exit.

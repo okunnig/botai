@@ -31,6 +31,7 @@ use crate::notify::NotificationService;
 use crate::project::ProjectBuilder;
 use crate::session::{
     ProjectSession, PtyConfig, PtySession, PtyWaker, SessionRegistry, SessionStatus, VtScreen,
+    DEFAULT_VIEWPORT,
 };
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
 use crate::tui::dashboard::{
@@ -417,6 +418,11 @@ impl TuiApp {
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
         self.cwd = cwd;
         self
+    }
+
+    /// Returns the last known viewport size, or `DEFAULT_VIEWPORT` before the first draw.
+    fn viewport(&self) -> (u16, u16) {
+        self.viewport_size.unwrap_or(DEFAULT_VIEWPORT)
     }
 
     /// Resizes all registered sessions to the specified viewport column and row dimensions.
@@ -1114,7 +1120,7 @@ impl TuiApp {
 
         let cwd = self.cwd.clone();
         let config = self.config.clone();
-        let viewport_size = self.viewport_size.unwrap_or((100, 30));
+        let viewport_size = self.viewport();
         let tpl_name = template_name.to_string();
         let proj_name = project_name.to_string();
         let agent_owned = agent_override.map(String::from);
@@ -1157,7 +1163,7 @@ impl TuiApp {
         let agent_name = self.config.default_agent.as_str();
         let (cmd, args, env_map) = self.config.agent_launch(agent_name);
 
-        let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
+        let (cols, rows) = self.viewport();
 
         let mut pty_config = PtyConfig::new(&cmd, &project_dir)
             .with_args(args)
@@ -1185,7 +1191,7 @@ impl TuiApp {
         let _ = self.reload_config();
         let config = self.config.clone();
         let cwd = self.cwd.clone();
-        let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
+        let (cols, rows) = self.viewport();
 
         let mut builder = ProjectBuilder::new(config, template_name, project_name)
             .with_cwd(cwd)

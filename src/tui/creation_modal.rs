@@ -3343,8 +3343,7 @@ mod tests {
 
     #[test]
     fn test_creation_modal_cursor_position_calculation() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.step = CreationStep::ConfigureDetails;
@@ -3375,8 +3374,7 @@ mod tests {
 
     #[test]
     fn test_prompt_helper_methods_cursor_editing() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
 
@@ -3447,8 +3445,7 @@ mod tests {
 
     #[test]
     fn test_prompt_word_wrapping_and_coordinate_mapping() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
 
@@ -3490,8 +3487,7 @@ mod tests {
 
     #[test]
     fn test_prompt_vertical_cursor_navigation_and_focus_transitions() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.step = CreationStep::ConfigureDetails;
@@ -3533,8 +3529,7 @@ mod tests {
 
     #[test]
     fn test_prompt_vertical_scrolling_and_scroll_offset_sync() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.focus = CreationFocus::Prompt;
@@ -3570,8 +3565,7 @@ mod tests {
 
     #[test]
     fn test_prompt_shift_alt_enter_and_emacs_shortcuts() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.step = CreationStep::ConfigureDetails;
@@ -3617,8 +3611,7 @@ mod tests {
 
     #[test]
     fn test_prompt_multiline_rendering_and_placeholder() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.step = CreationStep::ConfigureDetails;
@@ -3656,8 +3649,7 @@ mod tests {
 
     #[test]
     fn test_project_name_inline_cursor_movement_and_field_isolation() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.step = CreationStep::ConfigureDetails;
@@ -3739,8 +3731,7 @@ mod tests {
 
     #[test]
     fn test_project_name_readline_kills() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.step = CreationStep::ConfigureDetails;
@@ -3775,8 +3766,7 @@ mod tests {
 
     #[test]
     fn test_project_name_insertions_and_deletions() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.step = CreationStep::ConfigureDetails;
@@ -3825,8 +3815,7 @@ mod tests {
 
     #[test]
     fn test_project_name_paste_sanitization_at_cursor() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.step = CreationStep::ConfigureDetails;
@@ -3843,8 +3832,7 @@ mod tests {
 
     #[test]
     fn test_project_name_hardware_cursor_position() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None);
         modal.step = CreationStep::ConfigureDetails;
@@ -4921,8 +4909,7 @@ mod tests {
 
     #[test]
     fn test_creation_modal_clone_and_partial_eq_with_debounce_fields() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let temp_dir = TempDir::new().unwrap();
         let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), None)
             .with_debounce_duration(Duration::from_millis(123));

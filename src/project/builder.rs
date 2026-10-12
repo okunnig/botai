@@ -172,7 +172,7 @@ impl ProjectBuilder {
             agent_override: None,
             prompt: None,
             cwd,
-            viewport_size: (100, 30),
+            viewport_size: crate::session::DEFAULT_VIEWPORT,
         }
     }
 
@@ -1174,8 +1174,7 @@ mod tests {
 
     #[test]
     fn test_project_builder_validation_empty_name() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let builder = ProjectBuilder::new(config, "ecommerce", "   ");
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
@@ -1184,8 +1183,7 @@ mod tests {
 
     #[test]
     fn test_project_builder_validation_template_not_found() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let builder = ProjectBuilder::new(config, "nonexistent", "my-project");
         let val = builder.validate_detailed();
         assert!(!val.is_valid);

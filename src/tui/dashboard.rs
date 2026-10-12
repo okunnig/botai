@@ -272,9 +272,9 @@ impl DashboardState {
             }
         }
 
-        if let Some(mut modal) = self.creation_modal.take() {
+        if let Some(modal) = &mut self.creation_modal {
             let action = modal.handle_key(key);
-            return self.resolve_creation_modal_action(modal, action);
+            return self.resolve_creation_modal_action(action);
         }
 
         match key.code {
@@ -322,31 +322,30 @@ impl DashboardState {
         }
     }
 
-    /// Maps a creation modal result to a `DashboardAction`, putting `modal` back only while it stays open.
-    fn resolve_creation_modal_action(
-        &mut self,
-        modal: ProjectCreationModal,
-        action: CreationModalAction,
-    ) -> DashboardAction {
+    /// Maps a creation modal result to a `DashboardAction`, closing the modal unless it stays open.
+    fn resolve_creation_modal_action(&mut self, action: CreationModalAction) -> DashboardAction {
         match action {
-            CreationModalAction::Cancel => DashboardAction::None,
+            CreationModalAction::Cancel => {
+                self.creation_modal = None;
+                DashboardAction::None
+            }
             CreationModalAction::Submit {
                 template,
                 project,
                 agent_override,
                 prompt,
                 selected_repos,
-            } => DashboardAction::CreateProject {
-                template,
-                project,
-                agent_override,
-                prompt,
-                selected_repos,
-            },
-            CreationModalAction::None => {
-                self.creation_modal = Some(modal);
-                DashboardAction::None
+            } => {
+                self.creation_modal = None;
+                DashboardAction::CreateProject {
+                    template,
+                    project,
+                    agent_override,
+                    prompt,
+                    selected_repos,
+                }
             }
+            CreationModalAction::None => DashboardAction::None,
         }
     }
 
@@ -363,9 +362,9 @@ impl DashboardState {
             return DashboardAction::None;
         }
 
-        if let Some(mut modal) = self.creation_modal.take() {
+        if let Some(modal) = &mut self.creation_modal {
             let action = modal.handle_mouse(mouse);
-            return self.resolve_creation_modal_action(modal, action);
+            return self.resolve_creation_modal_action(action);
         }
 
         match mouse.kind {
