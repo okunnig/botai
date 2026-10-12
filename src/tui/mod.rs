@@ -3,6 +3,7 @@ pub mod creation_modal;
 pub mod dashboard;
 pub mod destroy_progress_modal;
 pub mod events;
+mod progress_log;
 pub mod setup_modal;
 pub mod status_bar;
 pub mod text_input;

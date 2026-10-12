@@ -1,17 +1,17 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
 
 use crate::config::Config;
 use crate::project::ProjectDestroyEvent;
+use crate::tui::progress_log;
 use crate::tui::theme::Theme;
 
 /// State for the asynchronous project destruction and progress modal.
@@ -86,30 +86,17 @@ impl DestroyProgressModalState {
 
     /// Scrolls the log viewport upwards (into older log lines).
     pub fn scroll_up(&mut self, lines: usize) {
-        self.scroll_offset = self
-            .scroll_offset
-            .saturating_add(lines)
-            .min(self.logs.len());
+        progress_log::scroll_up(&mut self.scroll_offset, lines, self.logs.len());
     }
 
     /// Scrolls the log viewport downwards (towards latest log lines).
     pub fn scroll_down(&mut self, lines: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        progress_log::scroll_down(&mut self.scroll_offset, lines);
     }
 
     /// Handles mouse events (e.g. scroll wheel) on the destroy progress modal.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
-        match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                self.scroll_up(3);
-                true
-            }
-            MouseEventKind::ScrollDown => {
-                self.scroll_down(3);
-                true
-            }
-            _ => false,
-        }
+        progress_log::handle_mouse_scroll(&mut self.scroll_offset, self.logs.len(), mouse)
     }
 
     /// Handles keyboard events when the destroy progress modal is displayed.
@@ -167,20 +154,6 @@ pub fn render_destroy_progress_modal(
     buf: &mut Buffer,
     theme: &Theme,
 ) {
-    let width = 76.min(area.width.saturating_sub(4));
-    let height = 18.min(area.height.saturating_sub(2));
-
-    if width < 24 || height < 8 {
-        return;
-    }
-
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    // Clear background
-    Clear.render(modal_area, buf);
-
     let is_error = modal.error.is_some();
     let is_done = modal.is_finished && !is_error;
 
@@ -200,190 +173,69 @@ pub fn render_destroy_progress_modal(
         theme.status_busy
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(
-            Style::default()
-                .fg(border_color)
-                .add_modifier(Modifier::BOLD),
-        );
+    let Some(areas) = progress_log::render_modal_frame(area, buf, title, border_color) else {
+        return;
+    };
 
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
-
-    // Split inner area into: Step Header, Log Box, and Footer
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let header_area = chunks[0];
-    let log_area = chunks[1];
-    let footer_area = chunks[2];
-
-    // 1. Header (Progress Step)
+    let target_line = progress_log::label_value_line(
+        theme,
+        "Target: ",
+        &modal.project_name,
+        Style::default().fg(theme.status_bar_fg),
+    );
     let header_lines = if let Some(ref err) = modal.error {
-        vec![
-            Line::from(vec![
-                Span::styled(
-                    "Status: ",
-                    Style::default()
-                        .fg(theme.modal_label)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "Destruction Failed",
-                    Style::default()
-                        .fg(theme.status_error)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![Span::styled(
-                format!("Reason: {err}"),
-                Style::default().fg(theme.status_error),
-            )]),
-        ]
+        progress_log::failure_header_lines(theme, "Destruction Failed", err)
     } else if is_done {
         vec![
-            Line::from(vec![
-                Span::styled(
-                    "Status: ",
-                    Style::default()
-                        .fg(theme.modal_label)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "Destroyed Successfully",
-                    Style::default()
-                        .fg(theme.status_done)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "Target: ",
-                    Style::default()
-                        .fg(theme.modal_label)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    &modal.project_name,
-                    Style::default().fg(theme.status_bar_fg),
-                ),
-            ]),
+            progress_log::label_value_line(
+                theme,
+                "Status: ",
+                "Destroyed Successfully",
+                Style::default()
+                    .fg(theme.status_done)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            target_line,
         ]
     } else {
         vec![
-            Line::from(vec![
-                Span::styled(
-                    format!("Step [{}/{}]: ", modal.current_step, modal.total_steps),
-                    Style::default()
-                        .fg(theme.modal_label)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    &modal.status_message,
-                    Style::default()
-                        .fg(theme.status_waiting)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    "Target: ",
-                    Style::default()
-                        .fg(theme.modal_label)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    &modal.project_name,
-                    Style::default().fg(theme.status_bar_fg),
-                ),
-            ]),
+            progress_log::step_line(
+                theme,
+                modal.current_step,
+                modal.total_steps,
+                &modal.status_message,
+            ),
+            target_line,
         ]
     };
-    Paragraph::new(header_lines).render(header_area, buf);
+    Paragraph::new(header_lines).render(areas.header, buf);
 
-    // 2. Log Box
-    let log_box_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Destruction Logs ")
-        .border_style(Style::default().fg(theme.border_unfocused));
-    let log_inner = log_box_block.inner(log_area);
-    log_box_block.render(log_area, buf);
+    progress_log::render_log_box(
+        &modal.logs,
+        modal.scroll_offset,
+        " Destruction Logs ",
+        true,
+        areas.log,
+        buf,
+        theme,
+    );
 
-    let total_logs = modal.logs.len();
-    let max_lines = log_inner.height as usize;
-    let effective_offset = modal
-        .scroll_offset
-        .min(total_logs.saturating_sub(max_lines));
-    let end_idx = total_logs.saturating_sub(effective_offset);
-    let start_idx = end_idx.saturating_sub(max_lines);
-    let log_slice: Vec<&String> = if total_logs > 0 {
-        modal.logs[start_idx..end_idx].iter().collect()
-    } else {
-        Vec::new()
-    };
-
-    let log_lines: Vec<Line> = log_slice
-        .into_iter()
-        .map(|line| {
-            let style =
-                if line.starts_with('✗') || line.contains("Error") || line.contains("Failed") {
-                    Style::default().fg(theme.status_error)
-                } else if line.starts_with('⚠') || line.contains("Warning") {
-                    Style::default().fg(theme.status_waiting)
-                } else if line.starts_with('✓') {
-                    Style::default()
-                        .fg(theme.status_done)
-                        .add_modifier(Modifier::BOLD)
-                } else if line.starts_with('[') {
-                    Style::default().fg(theme.status_busy)
-                } else {
-                    Style::default().fg(theme.input_text)
-                };
-            Line::from(Span::styled(line, style))
-        })
-        .collect();
-
-    Paragraph::new(log_lines).render(log_inner, buf);
-
-    // 3. Footer
     let footer_text = if is_error || modal.is_finished {
-        Line::from(Span::styled(
-            " [Enter] / [Esc] Return to dashboard ",
-            Style::default()
-                .fg(theme.key_hint)
-                .add_modifier(Modifier::BOLD),
-        ))
+        progress_log::finished_footer(" [Enter] / [Esc] Return to dashboard ", theme)
     } else {
-        const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let spinner = SPINNER_CHARS[modal.spinner_frame % SPINNER_CHARS.len()];
-        Line::from(vec![
-            Span::styled(
-                format!(" {spinner} "),
-                Style::default()
-                    .fg(theme.status_busy)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "Destroying project in background...",
-                Style::default().fg(theme.status_bar_fg),
-            ),
-        ])
+        progress_log::spinner_footer(
+            modal.spinner_frame,
+            "Destroying project in background...",
+            theme,
+        )
     };
-    Paragraph::new(footer_text).render(footer_area, buf);
+    Paragraph::new(footer_text).render(areas.footer, buf);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use std::sync::mpsc::channel;
 
     fn key(code: KeyCode) -> KeyEvent {
