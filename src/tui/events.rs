@@ -232,28 +232,22 @@ pub fn is_shift_enter(bytes: &[u8]) -> bool {
     }
 
     // 2. Kitty keyboard protocol: \x1b[...u
-    if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"u") && bytes.len() >= 4 {
-        if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
-            let parts: Vec<&str> = param_str.split(';').collect();
-            if is_enter_codepoint(csi_param(&parts, 0))
-                && csi_modifiers(&parts, 1).contains(KeyModifiers::SHIFT)
-            {
-                return true;
-            }
+    if let Some(parts) = csi_params(bytes, b'u') {
+        if is_enter_codepoint(csi_param(&parts, 0))
+            && csi_modifiers(&parts, 1).contains(KeyModifiers::SHIFT)
+        {
+            return true;
         }
     }
 
     // 3. Xterm modifyOtherKeys format: \x1b[27;<mod>;13~ or \x1b[27;<mod>;10~
-    if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"~") && bytes.len() >= 6 {
-        if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
-            let parts: Vec<&str> = param_str.split(';').collect();
-            if parts.len() == 3
-                && csi_param(&parts, 0) == Some("27")
-                && is_enter_codepoint(csi_param(&parts, 2))
-                && csi_modifiers(&parts, 1).contains(KeyModifiers::SHIFT)
-            {
-                return true;
-            }
+    if let Some(parts) = csi_params(bytes, b'~') {
+        if parts.len() == 3
+            && csi_param(&parts, 0) == Some("27")
+            && is_enter_codepoint(csi_param(&parts, 2))
+            && csi_modifiers(&parts, 1).contains(KeyModifiers::SHIFT)
+        {
+            return true;
         }
     }
 
@@ -292,18 +286,26 @@ fn csi_param<'a>(parts: &[&'a str], idx: usize) -> Option<&'a str> {
     parts.get(idx).and_then(|s| s.split(':').next())
 }
 
-/// Parses a CSI modifier parameter value, defaulting to 1 (no modifiers) when missing or invalid.
-fn parse_csi_modifier(param: &str) -> u32 {
-    param
-        .split(':')
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(1)
+/// Returns the numeric leading value of CSI parameter `idx`, if present and valid.
+fn csi_num(parts: &[&str], idx: usize) -> Option<u32> {
+    csi_param(parts, idx).and_then(|s| s.parse().ok())
 }
 
-/// Decodes the modifiers carried by CSI parameter `idx`.
+/// Splits a CSI parameter byte string on `;`. Returns `None` if it is not UTF-8.
+fn csi_split(params: &[u8]) -> Option<Vec<&str>> {
+    std::str::from_utf8(params)
+        .ok()
+        .map(|s| s.split(';').collect())
+}
+
+/// Returns the parameters of `bytes` if it is exactly one `\x1b[<params><final_byte>` sequence.
+fn csi_params(bytes: &[u8], final_byte: u8) -> Option<Vec<&str>> {
+    csi_split(bytes.strip_prefix(b"\x1b[")?.strip_suffix(&[final_byte])?)
+}
+
+/// Decodes the modifiers carried by CSI parameter `idx`, defaulting to none when missing or invalid.
 fn csi_modifiers(parts: &[&str], idx: usize) -> KeyModifiers {
-    decode_csi_modifiers(parts.get(idx).map_or(1, |s| parse_csi_modifier(s)))
+    decode_csi_modifiers(csi_num(parts, idx).unwrap_or(1))
 }
 
 /// Returns `true` if a CSI key parameter is the Enter (13) or line feed (10) codepoint.
@@ -487,22 +489,19 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             // \x1b[15~ (F5), \x1b[17~ (F6), \x1b[18~ (F7), \x1b[19~ (F8), \x1b[20~ (F9), \x1b[21~ (F10), \x1b[23~ (F11), \x1b[24~ (F12)
             // modifyOtherKeys format: \x1b[27;<mod>;<codepoint>~
             if let Some(tilde_pos) = rest.iter().position(|&b| b == b'~') {
-                if let Ok(param_str) = std::str::from_utf8(&rest[..tilde_pos]) {
-                    let parts: Vec<&str> = param_str.split(';').collect();
+                if let Some(parts) = csi_split(&rest[..tilde_pos]) {
                     if parts.len() == 3 && csi_param(&parts, 0) == Some("27") {
                         let modifiers = csi_modifiers(&parts, 1);
-                        let cp_str = csi_param(&parts, 2).unwrap_or("");
-                        if let Ok(cp) = cp_str.parse::<u32>() {
+                        if let Some(cp) = csi_num(&parts, 2) {
                             let code = codepoint_to_keycode(cp, modifiers);
                             events.push(make_key_event(code, modifiers));
                             i += 2 + tilde_pos + 1;
                             continue;
                         }
                     } else {
-                        let key_num = csi_param(&parts, 0).and_then(|s| s.parse::<u32>().ok());
                         let modifiers = csi_modifiers(&parts, 1);
 
-                        if let Some(num) = key_num {
+                        if let Some(num) = csi_num(&parts, 0) {
                             let code = match num {
                                 1 | 7 => Some(KeyCode::Home),
                                 2 => Some(KeyCode::Insert),
@@ -533,12 +532,10 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
 
             // CSI-u modified key format: \x1b[<codepoint>;<mod>u or \x1b[<codepoint>u
             if let Some(u_pos) = rest.iter().position(|&b| b == b'u') {
-                if let Ok(param_str) = std::str::from_utf8(&rest[..u_pos]) {
-                    let parts: Vec<&str> = param_str.split(';').collect();
-                    let codepoint = csi_param(&parts, 0).and_then(|s| s.parse::<u32>().ok());
+                if let Some(parts) = csi_split(&rest[..u_pos]) {
                     let modifiers = csi_modifiers(&parts, 1);
 
-                    if let Some(cp) = codepoint {
+                    if let Some(cp) = csi_num(&parts, 0) {
                         let code = codepoint_to_keycode(cp, modifiers);
                         events.push(make_key_event(code, modifiers));
                         i += 2 + u_pos + 1;
@@ -553,7 +550,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
                 if let Some(end_idx) = after.iter().position(|&b| b.is_ascii_alphabetic()) {
                     let term = after[end_idx];
                     let mod_str = std::str::from_utf8(&after[..end_idx]).unwrap_or("");
-                    let modifiers = decode_csi_modifiers(parse_csi_modifier(mod_str));
+                    let modifiers = csi_modifiers(&[mod_str], 0);
                     if let Some(c) = nav_letter_to_keycode(term) {
                         events.push(make_key_event(c, modifiers));
                         i += 2 + 2 + end_idx + 1;
