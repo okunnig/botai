@@ -35,8 +35,7 @@ fn main() -> Result<()> {
         Config::load_from_file(&config_path)
             .with_context(|| format!("Failed to load configuration from {config_path:?}"))?
     } else {
-        Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-            .context("Failed to load fallback configuration")?
+        Config::fallback()
     };
 
     match cli.command {

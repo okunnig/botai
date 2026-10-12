@@ -574,6 +574,18 @@ impl Config {
         Theme::from_name(&self.theme)
     }
 
+    /// Returns the built-in configuration used when no config file is available.
+    pub fn fallback() -> Self {
+        Self {
+            default_agent: "claude".to_string(),
+            theme: default_theme(),
+            repos_dir: PathBuf::from(".botai_repos"),
+            repos: HashMap::new(),
+            agents: HashMap::new(),
+            templates: HashMap::new(),
+        }
+    }
+
     /// Returns the default annotated configuration template.
     pub fn default_template() -> &'static str {
         DEFAULT_CONFIG_TEMPLATE
@@ -819,6 +831,14 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_fallback_matches_minimal_toml() {
+        let parsed =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
+                .expect("Minimal config should parse");
+        assert_eq!(Config::fallback(), parsed);
+    }
 
     const SAMPLE_VALID_TOML: &str = r#"
 default_agent = "claude"

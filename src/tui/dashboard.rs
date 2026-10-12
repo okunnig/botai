@@ -80,16 +80,7 @@ pub struct DashboardState {
 impl DashboardState {
     /// Creates a new `DashboardState` with given templates and local projects.
     pub fn new(templates: Vec<String>, local_projects: Vec<String>) -> Self {
-        let mut config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    repos: HashMap::new(),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                });
+        let mut config = Config::fallback();
 
         for tpl in &templates {
             config

@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -193,17 +192,7 @@ pub fn run_setup_worker(
     tx: Sender<SetupProgressEvent>,
     selected_repos: Vec<String>,
 ) {
-    let cfg = config.unwrap_or_else(|| {
-        Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-            .unwrap_or_else(|_| Config {
-                default_agent: "claude".to_string(),
-                theme: "tokyo-night".to_string(),
-                repos_dir: PathBuf::from(".botai_repos"),
-                repos: HashMap::new(),
-                agents: HashMap::new(),
-                templates: HashMap::new(),
-            })
-    });
+    let cfg = config.unwrap_or_else(Config::fallback);
 
     let (cols, rows) = viewport_size;
     let mut builder = ProjectBuilder::new(cfg, &template_name, &project_name)

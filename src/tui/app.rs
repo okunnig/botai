@@ -849,16 +849,7 @@ impl TuiApp {
         let modal = if let Some(cfg) = &self.config {
             ProjectCreationModal::new(cfg, &cwd, None)
         } else {
-            let fallback_cfg =
-                Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                    .unwrap_or_else(|_| Config {
-                        default_agent: "claude".to_string(),
-                        theme: "tokyo-night".to_string(),
-                        repos_dir: PathBuf::from(".botai_repos"),
-                        repos: HashMap::new(),
-                        agents: HashMap::new(),
-                        templates: HashMap::new(),
-                    });
+            let fallback_cfg = Config::fallback();
             ProjectCreationModal::new(&fallback_cfg, &cwd, None)
         };
         self.creation_modal = Some(modal);
@@ -1191,23 +1182,13 @@ impl TuiApp {
         }
         let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
 
-        let default_config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .ok();
-        let config = self.config.as_ref().or(default_config.as_ref());
+        let default_config = Config::fallback();
+        let config = self.config.as_ref().unwrap_or(&default_config);
 
-        let agent_name = config.map(|c| c.default_agent.as_str()).unwrap_or("claude");
+        let agent_name = config.default_agent.as_str();
 
-        let (cmd, args, env_map) = if let Some(cfg) = config {
-            if let Some(agent) = cfg.get_agent(agent_name) {
-                (agent.command.clone(), agent.args.clone(), agent.env.clone())
-            } else {
-                #[cfg(windows)]
-                let default_shell = "cmd.exe".to_string();
-                #[cfg(not(windows))]
-                let default_shell = "sh".to_string();
-                (default_shell, Vec::new(), HashMap::new())
-            }
+        let (cmd, args, env_map) = if let Some(agent) = config.get_agent(agent_name) {
+            (agent.command.clone(), agent.args.clone(), agent.env.clone())
         } else {
             #[cfg(windows)]
             let default_shell = "cmd.exe".to_string();
@@ -1242,17 +1223,7 @@ impl TuiApp {
         prompt: Option<&str>,
     ) -> anyhow::Result<()> {
         let _ = self.reload_config();
-        let config = self.config.clone().unwrap_or_else(|| {
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    repos: HashMap::new(),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                })
-        });
+        let config = self.config.clone().unwrap_or_else(Config::fallback);
         let cwd = self
             .cwd
             .clone()
@@ -1297,16 +1268,7 @@ impl TuiApp {
         let mut new_dashboard = if let Some(cfg) = &self.config {
             DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
         } else {
-            let default_cfg =
-                Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                    .unwrap_or_else(|_| Config {
-                        default_agent: "claude".to_string(),
-                        theme: "tokyo-night".to_string(),
-                        repos_dir: PathBuf::from(".botai_repos"),
-                        repos: HashMap::new(),
-                        agents: HashMap::new(),
-                        templates: HashMap::new(),
-                    });
+            let default_cfg = Config::fallback();
             DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
         };
         if let Some(ref path) = self.config_path {
