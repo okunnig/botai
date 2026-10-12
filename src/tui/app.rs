@@ -959,10 +959,10 @@ impl TuiApp {
     pub fn poll_setup_progress(&mut self) -> bool {
         let mut changed = false;
         if let Some(modal) = &mut self.setup_modal {
-            let was_finished = modal.is_finished;
-            let old_logs = modal.logs.len();
-            let old_step = modal.current_step;
-            modal.tick();
+            let was_finished = modal.progress.is_finished;
+            let old_logs = modal.progress.logs.len();
+            let old_step = modal.progress.current_step;
+            modal.progress.tick();
             if !was_finished {
                 changed = true;
             }
@@ -973,9 +973,9 @@ impl TuiApp {
                 self.setup_modal = None;
                 self.showing_dashboard = false;
                 changed = true;
-            } else if modal.logs.len() != old_logs
-                || modal.current_step != old_step
-                || modal.is_finished != was_finished
+            } else if modal.progress.logs.len() != old_logs
+                || modal.progress.current_step != old_step
+                || modal.progress.is_finished != was_finished
             {
                 changed = true;
             }
@@ -998,7 +998,7 @@ impl TuiApp {
     /// Handles mouse events when the setup modal is active.
     pub fn handle_setup_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         if let Some(modal) = &mut self.setup_modal {
-            let _ = modal.handle_mouse(mouse);
+            let _ = modal.progress.handle_mouse(mouse);
         }
     }
 
@@ -1007,17 +1007,17 @@ impl TuiApp {
     pub fn poll_destroy_progress(&mut self) -> bool {
         let mut changed = false;
         if let Some(modal) = &mut self.destroy_progress_modal {
-            let was_finished = modal.is_finished;
-            let old_logs = modal.logs.len();
-            let old_step = modal.current_step;
-            modal.tick();
+            let was_finished = modal.progress.is_finished;
+            let old_logs = modal.progress.logs.len();
+            let old_step = modal.progress.current_step;
+            modal.progress.tick();
             if !was_finished {
                 changed = true;
             }
             modal.poll_events();
-            if modal.logs.len() != old_logs
-                || modal.current_step != old_step
-                || modal.is_finished != was_finished
+            if modal.progress.logs.len() != old_logs
+                || modal.progress.current_step != old_step
+                || modal.progress.is_finished != was_finished
             {
                 changed = true;
             }
@@ -1060,7 +1060,7 @@ impl TuiApp {
     /// Handles mouse events (such as scroll wheel) when the destruction progress modal is active.
     pub fn handle_destroy_progress_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         if let Some(modal) = &mut self.destroy_progress_modal {
-            let _ = modal.handle_mouse(mouse);
+            let _ = modal.progress.handle_mouse(mouse);
         }
     }
 
@@ -2390,7 +2390,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2548,7 +2548,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2623,7 +2623,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2688,7 +2688,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2742,7 +2742,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2908,8 +2908,8 @@ repos = ['{}']
         app.start_project_creation("ws", "active-proj", None, None, vec![]);
         assert!(app.setup_modal.is_some());
         let modal = app.setup_modal.as_ref().unwrap();
-        assert!(modal.error.is_some());
-        assert!(modal.is_finished);
+        assert!(modal.progress.error.is_some());
+        assert!(modal.progress.is_finished);
 
         // Key press other than Esc/Enter should keep modal open
         let dummy_key = crossterm::event::KeyEvent::new(
@@ -3211,7 +3211,7 @@ repos = ['{}']
         let (_tx, rx) = std::sync::mpsc::channel();
         let mut modal = SetupModalState::new("proj-modal", "tpl", None, rx);
         for i in 1..=10 {
-            modal.logs.push(format!("log {i}"));
+            modal.progress.logs.push(format!("log {i}"));
         }
         app.setup_modal = Some(modal);
 
@@ -3222,7 +3222,7 @@ repos = ['{}']
             modifiers: KeyModifiers::empty(),
         };
         app.handle_setup_modal_mouse(scroll_up);
-        assert_eq!(app.setup_modal.as_ref().unwrap().scroll_offset, 3);
+        assert_eq!(app.setup_modal.as_ref().unwrap().progress.scroll_offset, 3);
     }
 
     #[test]

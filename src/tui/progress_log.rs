@@ -6,7 +6,7 @@ use crossterm::event::{MouseEvent, MouseEventKind};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
@@ -15,49 +15,159 @@ use crate::tui::theme::Theme;
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/// Inner areas of a progress modal: step header, log box and footer.
-pub(crate) struct ProgressModalAreas {
-    pub header: Rect,
-    pub log: Rect,
-    pub footer: Rect,
+/// Whether `⚠` / "Warning" log lines get their own highlight color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WarningHighlight {
+    Plain,
+    Highlighted,
 }
 
-/// Scrolls a log viewport upwards (into older log lines), clamped to `total_logs`.
-pub(crate) fn scroll_up(scroll_offset: &mut usize, lines: usize, total_logs: usize) {
-    *scroll_offset = scroll_offset.saturating_add(lines).min(total_logs);
+/// Fixed wording and log styling of one kind of progress modal.
+pub(crate) struct ProgressModalText {
+    pub log_title: &'static str,
+    pub warnings: WarningHighlight,
+    pub running_footer: &'static str,
+    pub finished_footer: &'static str,
 }
 
-/// Scrolls a log viewport downwards (towards latest log lines).
-pub(crate) fn scroll_down(scroll_offset: &mut usize, lines: usize) {
-    *scroll_offset = scroll_offset.saturating_sub(lines);
+/// Log, step and completion state shared by the setup and destroy progress modals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressLog {
+    pub logs: Vec<String>,
+    pub current_step: usize,
+    pub total_steps: usize,
+    pub status_message: String,
+    pub is_finished: bool,
+    pub error: Option<String>,
+    pub spinner_frame: usize,
+    pub scroll_offset: usize,
 }
 
-/// Applies mouse wheel scrolling to a log viewport. Returns `true` if the event was handled.
-pub(crate) fn handle_mouse_scroll(
-    scroll_offset: &mut usize,
-    total_logs: usize,
-    mouse: MouseEvent,
-) -> bool {
-    match mouse.kind {
-        MouseEventKind::ScrollUp => {
-            scroll_up(scroll_offset, 3, total_logs);
-            true
+impl ProgressLog {
+    /// Creates an unfinished progress log at step 1 of 4 showing `status_message`.
+    pub fn new(status_message: impl Into<String>) -> Self {
+        Self {
+            logs: Vec::new(),
+            current_step: 1,
+            total_steps: 4,
+            status_message: status_message.into(),
+            is_finished: false,
+            error: None,
+            spinner_frame: 0,
+            scroll_offset: 0,
         }
-        MouseEventKind::ScrollDown => {
-            scroll_down(scroll_offset, 3);
-            true
-        }
-        _ => false,
     }
+
+    /// Advances the spinner animation frame.
+    pub fn tick(&mut self) {
+        self.spinner_frame = self.spinner_frame.wrapping_add(1);
+    }
+
+    /// Records a step progress update.
+    pub fn set_step(&mut self, current: usize, total: usize, message: String) {
+        self.current_step = current;
+        self.total_steps = total;
+        self.status_message = message;
+    }
+
+    /// Scrolls the log viewport upwards (into older log lines).
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.scroll_offset = self
+            .scroll_offset
+            .saturating_add(lines)
+            .min(self.logs.len());
+    }
+
+    /// Scrolls the log viewport downwards (towards latest log lines).
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    }
+
+    /// Applies mouse wheel scrolling to the log viewport. Returns `true` if the event was handled.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_up(3);
+                true
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_down(3);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Renders the modal frame, `header_lines`, the log box and the footer.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render<'a>(
+        &self,
+        text: &ProgressModalText,
+        title: impl Into<Line<'a>>,
+        border_color: Color,
+        header_lines: Vec<Line>,
+        area: Rect,
+        buf: &mut Buffer,
+        theme: &Theme,
+    ) {
+        let Some(areas) = render_modal_frame(area, buf, title, border_color) else {
+            return;
+        };
+        Paragraph::new(header_lines).render(areas.header, buf);
+        render_log_box(
+            &self.logs,
+            self.scroll_offset,
+            text.log_title,
+            text.warnings,
+            areas.log,
+            buf,
+            theme,
+        );
+        self.render_footer(text, areas.footer, buf, theme);
+    }
+
+    /// Renders the close hint once finished or failed, otherwise the animated spinner.
+    fn render_footer(&self, text: &ProgressModalText, area: Rect, buf: &mut Buffer, theme: &Theme) {
+        let footer = if self.error.is_some() || self.is_finished {
+            Line::from(Span::styled(
+                text.finished_footer,
+                Style::default()
+                    .fg(theme.key_hint)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else {
+            let spinner = SPINNER_CHARS[self.spinner_frame % SPINNER_CHARS.len()];
+            Line::from(vec![
+                Span::styled(
+                    format!(" {spinner} "),
+                    Style::default()
+                        .fg(theme.status_busy)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    text.running_footer,
+                    Style::default().fg(theme.status_bar_fg),
+                ),
+            ])
+        };
+        Paragraph::new(footer).render(area, buf);
+    }
+}
+
+/// Inner areas of a progress modal: step header, log box and footer.
+struct ProgressModalAreas {
+    header: Rect,
+    log: Rect,
+    footer: Rect,
 }
 
 /// Clears and draws the centered, bordered modal frame and splits its interior.
 /// Returns `None` if `area` is too small to render the modal.
-pub(crate) fn render_modal_frame(
+fn render_modal_frame<'a>(
     area: Rect,
     buf: &mut Buffer,
-    title: String,
-    border_color: ratatui::style::Color,
+    title: impl Into<Line<'a>>,
+    border_color: Color,
 ) -> Option<ProgressModalAreas> {
     let width = 76.min(area.width.saturating_sub(4));
     let height = 18.min(area.height.saturating_sub(2));
@@ -158,11 +268,12 @@ pub(crate) fn step_line<'a>(
 }
 
 /// Returns the style for a log line based on its status prefix or keywords.
-/// `highlight_warnings` colors `⚠` / "Warning" lines with the waiting color.
-pub(crate) fn log_line_style(line: &str, theme: &Theme, highlight_warnings: bool) -> Style {
+fn log_line_style(line: &str, theme: &Theme, warnings: WarningHighlight) -> Style {
     if line.starts_with('✗') || line.contains("Error") || line.contains("Failed") {
         Style::default().fg(theme.status_error)
-    } else if highlight_warnings && (line.starts_with('⚠') || line.contains("Warning")) {
+    } else if warnings == WarningHighlight::Highlighted
+        && (line.starts_with('⚠') || line.contains("Warning"))
+    {
         Style::default().fg(theme.status_waiting)
     } else if line.starts_with('✓') {
         Style::default()
@@ -176,11 +287,11 @@ pub(crate) fn log_line_style(line: &str, theme: &Theme, highlight_warnings: bool
 }
 
 /// Renders the bordered log box showing the visible window of `logs` for `scroll_offset`.
-pub(crate) fn render_log_box(
+fn render_log_box(
     logs: &[String],
     scroll_offset: usize,
     title: &str,
-    highlight_warnings: bool,
+    warnings: WarningHighlight,
     area: Rect,
     buf: &mut Buffer,
     theme: &Theme,
@@ -203,34 +314,10 @@ pub(crate) fn render_log_box(
         .map(|line| {
             Line::from(Span::styled(
                 line.as_str(),
-                log_line_style(line, theme, highlight_warnings),
+                log_line_style(line, theme, warnings),
             ))
         })
         .collect();
 
     Paragraph::new(log_lines).render(log_inner, buf);
-}
-
-/// Builds the footer shown once the operation has finished.
-pub(crate) fn finished_footer<'a>(hint: &'a str, theme: &Theme) -> Line<'a> {
-    Line::from(Span::styled(
-        hint,
-        Style::default()
-            .fg(theme.key_hint)
-            .add_modifier(Modifier::BOLD),
-    ))
-}
-
-/// Builds the animated spinner footer shown while the operation is running.
-pub(crate) fn spinner_footer<'a>(spinner_frame: usize, text: &'a str, theme: &Theme) -> Line<'a> {
-    let spinner = SPINNER_CHARS[spinner_frame % SPINNER_CHARS.len()];
-    Line::from(vec![
-        Span::styled(
-            format!(" {spinner} "),
-            Style::default()
-                .fg(theme.status_busy)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(text, Style::default().fg(theme.status_bar_fg)),
-    ])
 }

@@ -22,6 +22,7 @@ pub use events::{
     mouse_event_to_bytes, mouse_event_to_sgr_bytes, mouse_scroll_to_bytes, parse_raw_events,
     paste_to_bytes, translate_mouse_event, RawAction, RawLeaderDecoder, TuiAction,
 };
+pub use progress_log::ProgressLog;
 pub use setup_modal::{render_setup_modal, run_setup_worker, SetupModalState, SetupProgressEvent};
 pub use status_bar::{compute_visible_tab_range, StatusBar, TopBar};
 pub use text_input::TextInput;
