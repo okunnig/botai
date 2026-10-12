@@ -235,21 +235,10 @@ pub fn is_shift_enter(bytes: &[u8]) -> bool {
     if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"u") && bytes.len() >= 4 {
         if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
             let parts: Vec<&str> = param_str.split(';').collect();
-            let key_code = parts
-                .first()
-                .and_then(|s| s.split(':').next())
-                .unwrap_or("");
-            if key_code == "13" || key_code == "10" {
-                if let Some(mod_part) = parts.get(1) {
-                    if let Some(mod_str) = mod_part.split(':').next() {
-                        if let Ok(m) = mod_str.parse::<u32>() {
-                            let mod_bits = m.saturating_sub(1);
-                            if (mod_bits & 1) != 0 {
-                                return true;
-                            }
-                        }
-                    }
-                }
+            if is_enter_codepoint(csi_param(&parts, 0))
+                && csi_modifiers(&parts, 1).contains(KeyModifiers::SHIFT)
+            {
+                return true;
             }
         }
     }
@@ -258,20 +247,12 @@ pub fn is_shift_enter(bytes: &[u8]) -> bool {
     if bytes.starts_with(b"\x1b[") && bytes.ends_with(b"~") && bytes.len() >= 6 {
         if let Ok(param_str) = std::str::from_utf8(&bytes[2..bytes.len() - 1]) {
             let parts: Vec<&str> = param_str.split(';').collect();
-            if parts.len() == 3 && parts.first().and_then(|s| s.split(':').next()) == Some("27") {
-                let key_code = parts.get(2).and_then(|s| s.split(':').next()).unwrap_or("");
-                if key_code == "13" || key_code == "10" {
-                    if let Some(mod_part) = parts.get(1) {
-                        if let Some(mod_str) = mod_part.split(':').next() {
-                            if let Ok(m) = mod_str.parse::<u32>() {
-                                let mod_bits = m.saturating_sub(1);
-                                if (mod_bits & 1) != 0 {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
+            if parts.len() == 3
+                && csi_param(&parts, 0) == Some("27")
+                && is_enter_codepoint(csi_param(&parts, 2))
+                && csi_modifiers(&parts, 1).contains(KeyModifiers::SHIFT)
+            {
+                return true;
             }
         }
     }
@@ -304,6 +285,70 @@ fn decode_csi_modifiers(m: u32) -> KeyModifiers {
         modifiers |= KeyModifiers::SUPER;
     }
     modifiers
+}
+
+/// Returns the leading value of CSI parameter `idx`, ignoring `:`-separated sub-parameters.
+fn csi_param<'a>(parts: &[&'a str], idx: usize) -> Option<&'a str> {
+    parts.get(idx).and_then(|s| s.split(':').next())
+}
+
+/// Parses a CSI modifier parameter value, defaulting to 1 (no modifiers) when missing or invalid.
+fn parse_csi_modifier(param: &str) -> u32 {
+    param
+        .split(':')
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1)
+}
+
+/// Decodes the modifiers carried by CSI parameter `idx`.
+fn csi_modifiers(parts: &[&str], idx: usize) -> KeyModifiers {
+    decode_csi_modifiers(parts.get(idx).map_or(1, |s| parse_csi_modifier(s)))
+}
+
+/// Returns `true` if a CSI key parameter is the Enter (13) or line feed (10) codepoint.
+fn is_enter_codepoint(param: Option<&str>) -> bool {
+    matches!(param, Some("13" | "10"))
+}
+
+/// Maps a CSI-u / modifyOtherKeys codepoint to a `KeyCode`.
+fn codepoint_to_keycode(cp: u32, modifiers: KeyModifiers) -> KeyCode {
+    match cp {
+        13 => KeyCode::Enter,
+        9 => {
+            if modifiers.contains(KeyModifiers::SHIFT) {
+                KeyCode::BackTab
+            } else {
+                KeyCode::Tab
+            }
+        }
+        27 => KeyCode::Esc,
+        127 => KeyCode::Backspace,
+        ch => char::from_u32(ch)
+            .map(KeyCode::Char)
+            .unwrap_or(KeyCode::Null),
+    }
+}
+
+/// Maps a cursor-key final byte (`A`-`D`, `H`, `F`) to its `KeyCode`.
+fn cursor_letter_to_keycode(term: u8) -> Option<KeyCode> {
+    match term {
+        b'A' => Some(KeyCode::Up),
+        b'B' => Some(KeyCode::Down),
+        b'C' => Some(KeyCode::Right),
+        b'D' => Some(KeyCode::Left),
+        b'H' => Some(KeyCode::Home),
+        b'F' => Some(KeyCode::End),
+        _ => None,
+    }
+}
+
+/// Maps a navigation final byte (cursor keys plus `P`-`S` for F1-F4) to its `KeyCode`.
+fn nav_letter_to_keycode(term: u8) -> Option<KeyCode> {
+    cursor_letter_to_keycode(term).or(match term {
+        b'P'..=b'S' => Some(KeyCode::F(term - b'P' + 1)),
+        _ => None,
+    })
 }
 
 /// Attempts to parse an SGR mouse sequence at the beginning of `bytes`.
@@ -430,34 +475,9 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
                 continue;
             }
 
-            // Arrow keys: Up (A), Down (B), Right (C), Left (D)
-            if rest.starts_with(b"A") {
-                events.push(make_key_event(KeyCode::Up, KeyModifiers::empty()));
-                i += 3;
-                continue;
-            }
-            if rest.starts_with(b"B") {
-                events.push(make_key_event(KeyCode::Down, KeyModifiers::empty()));
-                i += 3;
-                continue;
-            }
-            if rest.starts_with(b"C") {
-                events.push(make_key_event(KeyCode::Right, KeyModifiers::empty()));
-                i += 3;
-                continue;
-            }
-            if rest.starts_with(b"D") {
-                events.push(make_key_event(KeyCode::Left, KeyModifiers::empty()));
-                i += 3;
-                continue;
-            }
-            if rest.starts_with(b"H") {
-                events.push(make_key_event(KeyCode::Home, KeyModifiers::empty()));
-                i += 3;
-                continue;
-            }
-            if rest.starts_with(b"F") {
-                events.push(make_key_event(KeyCode::End, KeyModifiers::empty()));
+            // Unmodified cursor keys: \x1b[A..D (arrows), \x1b[H (Home), \x1b[F (End)
+            if let Some(code) = rest.first().copied().and_then(cursor_letter_to_keycode) {
+                events.push(make_key_event(code, KeyModifiers::empty()));
                 i += 3;
                 continue;
             }
@@ -469,47 +489,18 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             if let Some(tilde_pos) = rest.iter().position(|&b| b == b'~') {
                 if let Ok(param_str) = std::str::from_utf8(&rest[..tilde_pos]) {
                     let parts: Vec<&str> = param_str.split(';').collect();
-                    if parts.len() == 3
-                        && parts.first().and_then(|s| s.split(':').next()) == Some("27")
-                    {
-                        let mod_num = parts
-                            .get(1)
-                            .and_then(|s| s.split(':').next())
-                            .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(1);
-                        let modifiers = decode_csi_modifiers(mod_num);
-                        let cp_str = parts.get(2).and_then(|s| s.split(':').next()).unwrap_or("");
+                    if parts.len() == 3 && csi_param(&parts, 0) == Some("27") {
+                        let modifiers = csi_modifiers(&parts, 1);
+                        let cp_str = csi_param(&parts, 2).unwrap_or("");
                         if let Ok(cp) = cp_str.parse::<u32>() {
-                            let code = match cp {
-                                13 => KeyCode::Enter,
-                                9 => {
-                                    if modifiers.contains(KeyModifiers::SHIFT) {
-                                        KeyCode::BackTab
-                                    } else {
-                                        KeyCode::Tab
-                                    }
-                                }
-                                27 => KeyCode::Esc,
-                                127 => KeyCode::Backspace,
-                                ch => char::from_u32(ch)
-                                    .map(KeyCode::Char)
-                                    .unwrap_or(KeyCode::Null),
-                            };
+                            let code = codepoint_to_keycode(cp, modifiers);
                             events.push(make_key_event(code, modifiers));
                             i += 2 + tilde_pos + 1;
                             continue;
                         }
                     } else {
-                        let key_num = parts
-                            .first()
-                            .and_then(|s| s.split(':').next())
-                            .and_then(|s| s.parse::<u32>().ok());
-                        let mod_num = parts
-                            .get(1)
-                            .and_then(|s| s.split(':').next())
-                            .and_then(|s| s.parse::<u32>().ok())
-                            .unwrap_or(1);
-                        let modifiers = decode_csi_modifiers(mod_num);
+                        let key_num = csi_param(&parts, 0).and_then(|s| s.parse::<u32>().ok());
+                        let modifiers = csi_modifiers(&parts, 1);
 
                         if let Some(num) = key_num {
                             let code = match num {
@@ -544,34 +535,11 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             if let Some(u_pos) = rest.iter().position(|&b| b == b'u') {
                 if let Ok(param_str) = std::str::from_utf8(&rest[..u_pos]) {
                     let parts: Vec<&str> = param_str.split(';').collect();
-                    let cp_str = parts
-                        .first()
-                        .and_then(|s| s.split(':').next())
-                        .unwrap_or("");
-                    let codepoint = cp_str.parse::<u32>().ok();
-                    let mod_num = parts
-                        .get(1)
-                        .and_then(|s| s.split(':').next())
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(1);
-                    let modifiers = decode_csi_modifiers(mod_num);
+                    let codepoint = csi_param(&parts, 0).and_then(|s| s.parse::<u32>().ok());
+                    let modifiers = csi_modifiers(&parts, 1);
 
                     if let Some(cp) = codepoint {
-                        let code = match cp {
-                            13 => KeyCode::Enter,
-                            9 => {
-                                if modifiers.contains(KeyModifiers::SHIFT) {
-                                    KeyCode::BackTab
-                                } else {
-                                    KeyCode::Tab
-                                }
-                            }
-                            27 => KeyCode::Esc,
-                            127 => KeyCode::Backspace,
-                            ch => char::from_u32(ch)
-                                .map(KeyCode::Char)
-                                .unwrap_or(KeyCode::Null),
-                        };
+                        let code = codepoint_to_keycode(cp, modifiers);
                         events.push(make_key_event(code, modifiers));
                         i += 2 + u_pos + 1;
                         continue;
@@ -585,26 +553,8 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
                 if let Some(end_idx) = after.iter().position(|&b| b.is_ascii_alphabetic()) {
                     let term = after[end_idx];
                     let mod_str = std::str::from_utf8(&after[..end_idx]).unwrap_or("");
-                    let mod_num = mod_str
-                        .split(':')
-                        .next()
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(1);
-                    let modifiers = decode_csi_modifiers(mod_num);
-                    let code = match term {
-                        b'A' => Some(KeyCode::Up),
-                        b'B' => Some(KeyCode::Down),
-                        b'C' => Some(KeyCode::Right),
-                        b'D' => Some(KeyCode::Left),
-                        b'H' => Some(KeyCode::Home),
-                        b'F' => Some(KeyCode::End),
-                        b'P' => Some(KeyCode::F(1)),
-                        b'Q' => Some(KeyCode::F(2)),
-                        b'R' => Some(KeyCode::F(3)),
-                        b'S' => Some(KeyCode::F(4)),
-                        _ => None,
-                    };
-                    if let Some(c) = code {
+                    let modifiers = decode_csi_modifiers(parse_csi_modifier(mod_str));
+                    if let Some(c) = nav_letter_to_keycode(term) {
                         events.push(make_key_event(c, modifiers));
                         i += 2 + 2 + end_idx + 1;
                         continue;
@@ -617,20 +567,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
         if bytes[i..].starts_with(b"\x1bO") {
             let rest = &bytes[i + 2..];
             if !rest.is_empty() {
-                let code = match rest[0] {
-                    b'A' => Some(KeyCode::Up),
-                    b'B' => Some(KeyCode::Down),
-                    b'C' => Some(KeyCode::Right),
-                    b'D' => Some(KeyCode::Left),
-                    b'H' => Some(KeyCode::Home),
-                    b'F' => Some(KeyCode::End),
-                    b'P' => Some(KeyCode::F(1)),
-                    b'Q' => Some(KeyCode::F(2)),
-                    b'R' => Some(KeyCode::F(3)),
-                    b'S' => Some(KeyCode::F(4)),
-                    _ => None,
-                };
-                if let Some(c) = code {
+                if let Some(c) = nav_letter_to_keycode(rest[0]) {
                     events.push(make_key_event(c, KeyModifiers::empty()));
                     i += 3;
                     continue;
