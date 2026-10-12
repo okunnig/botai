@@ -245,11 +245,7 @@ impl ProjectBuilder {
         let (cmd, base_args, env) = if let Some(agent) = self.config.get_agent(&agent_name) {
             (agent.command.clone(), agent.args.clone(), agent.env.clone())
         } else {
-            #[cfg(windows)]
-            let default_shell = "cmd.exe".to_string();
-            #[cfg(not(windows))]
-            let default_shell = "sh".to_string();
-            (default_shell, Vec::new(), HashMap::new())
+            (crate::session::default_shell(), Vec::new(), HashMap::new())
         };
 
         let adapted_args = adapt_agent_args(&agent_name, &base_args, self.prompt.as_deref());
