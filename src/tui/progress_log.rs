@@ -59,12 +59,10 @@ impl ProgressLog {
         }
     }
 
-    /// Advances the spinner animation frame.
     pub fn tick(&mut self) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
     }
 
-    /// Records a step progress update.
     pub fn set_step(&mut self, current: usize, total: usize, message: String) {
         self.current_step = current;
         self.total_steps = total;
@@ -229,7 +227,6 @@ pub(crate) fn failure_header_lines<'a>(
     ]
 }
 
-/// Builds the "Step [n/m]: <message>" header line.
 pub(crate) fn step_line<'a>(
     theme: &Theme,
     current_step: usize,

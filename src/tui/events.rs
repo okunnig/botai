@@ -265,8 +265,7 @@ pub fn is_unmodified_enter(bytes: &[u8]) -> bool {
     let Some(parts) = csi_params(bytes, b'u') else {
         return false;
     };
-    let key = csi_param(&parts, 0);
-    if !is_enter_codepoint(key) && key != Some(KITTY_KEYPAD_ENTER_STR) {
+    if !is_enter_codepoint(csi_param(&parts, 0)) && csi_num(&parts, 0) != Some(KITTY_KEYPAD_ENTER) {
         return false;
     }
     if parts.len() == 1 {
@@ -316,7 +315,6 @@ fn csi_param<'a>(parts: &[&'a str], idx: usize) -> Option<&'a str> {
     parts.get(idx).and_then(|s| s.split(':').next())
 }
 
-/// Returns the numeric leading value of CSI parameter `idx`, if present and valid.
 fn csi_num(parts: &[&str], idx: usize) -> Option<u32> {
     csi_param(parts, idx).and_then(|s| s.parse().ok())
 }
@@ -340,7 +338,6 @@ fn csi_modifiers(parts: &[&str], idx: usize) -> KeyModifiers {
 
 /// Kitty keyboard protocol codepoint for keypad Enter.
 const KITTY_KEYPAD_ENTER: u32 = 57414;
-const KITTY_KEYPAD_ENTER_STR: &str = "57414";
 
 /// Returns `true` if CSI parameter `idx` carries the key-release event type (`<mod>:3`).
 fn is_release_event(parts: &[&str], idx: usize) -> bool {
@@ -355,7 +352,6 @@ fn is_enter_codepoint(param: Option<&str>) -> bool {
     matches!(param, Some("13" | "10"))
 }
 
-/// Maps a CSI-u / modifyOtherKeys codepoint to a `KeyCode`.
 fn codepoint_to_keycode(cp: u32, modifiers: KeyModifiers) -> KeyCode {
     match cp {
         13 => KeyCode::Enter,
@@ -374,7 +370,6 @@ fn codepoint_to_keycode(cp: u32, modifiers: KeyModifiers) -> KeyCode {
     }
 }
 
-/// Maps a cursor-key final byte (`A`-`D`, `H`, `F`) to its `KeyCode`.
 fn cursor_letter_to_keycode(term: u8) -> Option<KeyCode> {
     match term {
         b'A' => Some(KeyCode::Up),
@@ -387,7 +382,6 @@ fn cursor_letter_to_keycode(term: u8) -> Option<KeyCode> {
     }
 }
 
-/// Maps a navigation final byte (cursor keys plus `P`-`S` for F1-F4) to its `KeyCode`.
 fn nav_letter_to_keycode(term: u8) -> Option<KeyCode> {
     cursor_letter_to_keycode(term).or(match term {
         b'P'..=b'S' => Some(KeyCode::F(term - b'P' + 1)),
@@ -519,7 +513,6 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
                 continue;
             }
 
-            // Unmodified cursor keys: \x1b[A..D (arrows), \x1b[H (Home), \x1b[F (End)
             if let Some(code) = rest.first().copied().and_then(cursor_letter_to_keycode) {
                 events.push(make_key_event(code, KeyModifiers::empty()));
                 i += 3;
