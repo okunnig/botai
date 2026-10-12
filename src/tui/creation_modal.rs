@@ -83,6 +83,26 @@ pub fn modal_area(area: Rect) -> Option<Rect> {
     Some(Rect::new(x, y, width, height))
 }
 
+/// Clamps a cursor position to the last column and row of `inner`.
+fn clamp_cursor(inner: Rect, x: u16, y: u16) -> Position {
+    Position::new(
+        x.min(inner.x + inner.width.saturating_sub(1)),
+        y.min(inner.y + inner.height.saturating_sub(1)),
+    )
+}
+
+/// Builds the bordered, titled outer block shared by both modal steps.
+fn modal_block<'a>(title: impl Into<Line<'a>>, theme: &Theme) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(
+            Style::default()
+                .fg(theme.modal_title)
+                .add_modifier(Modifier::BOLD),
+        )
+}
+
 pub fn step1_layout(inner: Rect) -> [Rect; 5] {
     Layout::default()
         .direction(Direction::Vertical)
@@ -428,51 +448,47 @@ impl ProjectCreationModal {
 
     /// Cycles to the next available template and updates default agent override and repository selection.
     pub fn cycle_template_next(&mut self) {
-        match self.step {
-            CreationStep::SelectTemplate => {
-                let matching = self.matching_template_indices();
-                if !matching.is_empty() {
-                    self.selected_template_idx = (self.selected_template_idx + 1) % matching.len();
-                    self.sync_agent_with_template();
-                    self.sync_repos_with_template();
-                    self.revalidate();
-                }
-            }
-            CreationStep::ConfigureDetails => {
-                if !self.templates.is_empty() {
-                    self.selected_template_idx =
-                        (self.selected_template_idx + 1) % self.templates.len();
-                    self.sync_agent_with_template();
-                    self.sync_repos_with_template();
-                    self.revalidate();
-                }
-            }
+        let len = self.cyclable_template_count();
+        if len > 0 {
+            self.selected_template_idx = (self.selected_template_idx + 1) % len;
+            self.on_template_changed();
         }
     }
 
     /// Cycles to the previous available template and updates default agent override and repository selection.
     pub fn cycle_template_prev(&mut self) {
+        let len = self.cyclable_template_count();
+        if len > 0 {
+            self.selected_template_idx = (self.selected_template_idx + len - 1) % len;
+            self.on_template_changed();
+        }
+    }
+
+    /// Number of templates `selected_template_idx` cycles over: filtered matches in step 1,
+    /// all templates in step 2.
+    fn cyclable_template_count(&self) -> usize {
         match self.step {
-            CreationStep::SelectTemplate => {
-                let matching = self.matching_template_indices();
-                if !matching.is_empty() {
-                    self.selected_template_idx =
-                        (self.selected_template_idx + matching.len() - 1) % matching.len();
-                    self.sync_agent_with_template();
-                    self.sync_repos_with_template();
-                    self.revalidate();
-                }
-            }
-            CreationStep::ConfigureDetails => {
-                if !self.templates.is_empty() {
-                    self.selected_template_idx =
-                        (self.selected_template_idx + self.templates.len() - 1)
-                            % self.templates.len();
-                    self.sync_agent_with_template();
-                    self.sync_repos_with_template();
-                    self.revalidate();
-                }
-            }
+            CreationStep::SelectTemplate => self.matching_template_indices().len(),
+            CreationStep::ConfigureDetails => self.templates.len(),
+        }
+    }
+
+    /// Re-syncs agent, repository selection and validation after the selected template changes.
+    fn on_template_changed(&mut self) {
+        self.sync_agent_with_template();
+        self.sync_repos_with_template();
+        self.revalidate();
+    }
+
+    /// Confirms the highlighted step 1 template and advances to step 2.
+    fn confirm_template_selection(&mut self) {
+        let matching = self.matching_template_indices();
+        if !matching.is_empty() {
+            let target_idx = matching[self.selected_template_idx.min(matching.len() - 1)];
+            self.step = CreationStep::ConfigureDetails;
+            self.selected_template_idx = target_idx;
+            self.on_template_changed();
+            self.focus = CreationFocus::ProjectName;
         }
     }
 
@@ -506,9 +522,7 @@ impl ProjectCreationModal {
         } else {
             0
         };
-        self.sync_agent_with_template();
-        self.sync_repos_with_template();
-        self.revalidate();
+        self.on_template_changed();
     }
 
     /// Synchronizes the selected agent with the newly selected template's default agent.
@@ -1220,14 +1234,7 @@ impl ProjectCreationModal {
                 let chunks = step1_layout(inner);
                 let cursor_x = chunks[0].x + prefix_len + self.template_search_query.cursor as u16;
                 let cursor_y = chunks[0].y;
-                if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
-                    Some(Position::new(cursor_x, cursor_y))
-                } else {
-                    Some(Position::new(
-                        cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                        cursor_y,
-                    ))
-                }
+                Some(clamp_cursor(inner, cursor_x, cursor_y))
             }
             CreationStep::ConfigureDetails => {
                 let has_desc = self
@@ -1245,14 +1252,7 @@ impl ProjectCreationModal {
                         let cursor_offset = self.project_name_cursor.min(total_chars) as u16;
                         let cursor_x = body_area.x + prefix_len + cursor_offset;
                         let cursor_y = body_area.y;
-                        if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height {
-                            Some(Position::new(cursor_x, cursor_y))
-                        } else {
-                            Some(Position::new(
-                                cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                                cursor_y,
-                            ))
-                        }
+                        Some(clamp_cursor(inner, cursor_x, cursor_y))
                     }
                     CreationFocus::Prompt => {
                         let prompt_text_width =
@@ -1264,15 +1264,7 @@ impl ProjectCreationModal {
                             let repos_rows = 1 + self.repos_rendered_rows() as u16;
                             let cursor_x = body_area.x + 18 + col_idx as u16;
                             let cursor_y = body_area.y + 2 + repos_rows + visible_line as u16;
-                            if cursor_x < inner.x + inner.width && cursor_y < inner.y + inner.height
-                            {
-                                Some(Position::new(cursor_x, cursor_y))
-                            } else {
-                                Some(Position::new(
-                                    cursor_x.min(inner.x + inner.width.saturating_sub(1)),
-                                    cursor_y.min(inner.y + inner.height.saturating_sub(1)),
-                                ))
-                            }
+                            Some(clamp_cursor(inner, cursor_x, cursor_y))
                         } else {
                             None
                         }
@@ -1334,17 +1326,7 @@ impl ProjectCreationModal {
                             CreationModalAction::None
                         }
                         KeyCode::Enter => {
-                            let matching = self.matching_template_indices();
-                            if !matching.is_empty() {
-                                let target_idx =
-                                    matching[self.selected_template_idx.min(matching.len() - 1)];
-                                self.step = CreationStep::ConfigureDetails;
-                                self.selected_template_idx = target_idx;
-                                self.sync_agent_with_template();
-                                self.sync_repos_with_template();
-                                self.revalidate();
-                                self.focus = CreationFocus::ProjectName;
-                            }
+                            self.confirm_template_selection();
                             CreationModalAction::None
                         }
                         _ => {
@@ -1359,17 +1341,7 @@ impl ProjectCreationModal {
                     Step1Focus::Preview => match key.code {
                         KeyCode::Esc => CreationModalAction::Cancel,
                         KeyCode::Enter => {
-                            let matching = self.matching_template_indices();
-                            if !matching.is_empty() {
-                                let target_idx =
-                                    matching[self.selected_template_idx.min(matching.len() - 1)];
-                                self.step = CreationStep::ConfigureDetails;
-                                self.selected_template_idx = target_idx;
-                                self.sync_agent_with_template();
-                                self.sync_repos_with_template();
-                                self.revalidate();
-                                self.focus = CreationFocus::ProjectName;
-                            }
+                            self.confirm_template_selection();
                             CreationModalAction::None
                         }
                         KeyCode::Up | KeyCode::Char('k') if !has_ctrl && !has_alt => {
@@ -1409,17 +1381,12 @@ impl ProjectCreationModal {
                 }
             }
             CreationStep::ConfigureDetails => {
+                if let Some(action) = self.handle_details_nav_key(key.code) {
+                    return action;
+                }
+
                 if self.focus == CreationFocus::Prompt {
                     match key.code {
-                        KeyCode::Esc => self.handle_back_or_cancel(),
-                        KeyCode::Tab => {
-                            self.next_focus();
-                            CreationModalAction::None
-                        }
-                        KeyCode::BackTab => {
-                            self.prev_focus();
-                            CreationModalAction::None
-                        }
                         KeyCode::Up => {
                             if !self.move_prompt_cursor_up() {
                                 self.prev_focus();
@@ -1502,15 +1469,6 @@ impl ProjectCreationModal {
                     }
 
                     match key.code {
-                        KeyCode::Esc => self.handle_back_or_cancel(),
-                        KeyCode::Tab => {
-                            self.next_focus();
-                            CreationModalAction::None
-                        }
-                        KeyCode::BackTab => {
-                            self.prev_focus();
-                            CreationModalAction::None
-                        }
                         KeyCode::Up => {
                             self.prev_focus();
                             CreationModalAction::None
@@ -1563,15 +1521,6 @@ impl ProjectCreationModal {
                     }
                 } else if self.focus == CreationFocus::Repositories {
                     match key.code {
-                        KeyCode::Esc => self.handle_back_or_cancel(),
-                        KeyCode::Tab => {
-                            self.next_focus();
-                            CreationModalAction::None
-                        }
-                        KeyCode::BackTab => {
-                            self.prev_focus();
-                            CreationModalAction::None
-                        }
                         KeyCode::Up | KeyCode::Char('k') if !has_ctrl && !has_alt => {
                             self.cycle_repo_prev();
                             CreationModalAction::None
@@ -1622,15 +1571,6 @@ impl ProjectCreationModal {
                     }
                 } else {
                     match key.code {
-                        KeyCode::Esc => self.handle_back_or_cancel(),
-                        KeyCode::Tab => {
-                            self.next_focus();
-                            CreationModalAction::None
-                        }
-                        KeyCode::BackTab => {
-                            self.prev_focus();
-                            CreationModalAction::None
-                        }
                         KeyCode::Up => {
                             self.prev_focus();
                             CreationModalAction::None
@@ -1666,6 +1606,22 @@ impl ProjectCreationModal {
                     }
                 }
             }
+        }
+    }
+
+    /// Handles the Esc/Tab/BackTab keys shared by every step 2 field.
+    fn handle_details_nav_key(&mut self, code: KeyCode) -> Option<CreationModalAction> {
+        match code {
+            KeyCode::Esc => Some(self.handle_back_or_cancel()),
+            KeyCode::Tab => {
+                self.next_focus();
+                Some(CreationModalAction::None)
+            }
+            KeyCode::BackTab => {
+                self.prev_focus();
+                Some(CreationModalAction::None)
+            }
+            _ => None,
         }
     }
 
@@ -1827,14 +1783,7 @@ impl ProjectCreationModal {
 
     /// Renders Step 1: Searchable Template Selection with master-detail split layout.
     fn render_step1(&self, modal_area: Rect, buf: &mut Buffer, theme: &Theme) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Create New Project ")
-            .border_style(
-                Style::default()
-                    .fg(theme.modal_title)
-                    .add_modifier(Modifier::BOLD),
-            );
+        let block = modal_block(" Create New Project ", theme);
 
         let inner = block.inner(modal_area);
         block.render(modal_area, buf);
@@ -2172,14 +2121,7 @@ impl ProjectCreationModal {
         let tpl_name = self.selected_template().unwrap_or("default");
         let title = format!(" Create New Project (Template: {tpl_name}) ");
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(
-                Style::default()
-                    .fg(theme.modal_title)
-                    .add_modifier(Modifier::BOLD),
-            );
+        let block = modal_block(title, theme);
 
         let inner = block.inner(modal_area);
         block.render(modal_area, buf);
