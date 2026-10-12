@@ -174,16 +174,14 @@ pub fn run_setup_worker(
     project_name: String,
     agent_override: Option<String>,
     prompt: Option<String>,
-    config: Option<Config>,
+    config: Config,
     cwd: PathBuf,
     viewport_size: (u16, u16),
     tx: Sender<SetupProgressEvent>,
     selected_repos: Vec<String>,
 ) {
-    let cfg = config.unwrap_or_else(Config::fallback);
-
     let (cols, rows) = viewport_size;
-    let mut builder = ProjectBuilder::new(cfg, &template_name, &project_name)
+    let mut builder = ProjectBuilder::new(config, &template_name, &project_name)
         .with_cwd(cwd)
         .with_viewport(cols, rows);
 

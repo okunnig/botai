@@ -35,7 +35,7 @@ fn main() -> Result<()> {
         Config::load_from_file(&config_path)
             .with_context(|| format!("Failed to load configuration from {config_path:?}"))?
     } else {
-        Config::fallback()
+        Config::default()
     };
 
     match cli.command {

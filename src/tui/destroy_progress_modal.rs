@@ -130,14 +130,14 @@ impl DestroyProgressModalState {
 
 /// Background worker function that executes project destruction and streams progress events.
 pub fn run_destroy_worker(
-    config: Option<Config>,
+    config: Config,
     cwd: PathBuf,
     project_name: String,
     force: bool,
     tx: Sender<ProjectDestroyEvent>,
 ) {
     let _ = crate::project::destroy_project_workspace_with_progress(
-        config.as_ref(),
+        Some(&config),
         &cwd,
         &project_name,
         force,

@@ -163,7 +163,7 @@ repos_dir = "/tmp/repos"
         terminal
             .draw(|f| {
                 let (status_area, _) = compute_layout(f.area());
-                let app_theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                let app_theme = app.config.theme();
                 f.render_widget(
                     StatusBar::new(&app.registry).with_theme(&app_theme),
                     status_area,

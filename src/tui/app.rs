@@ -59,7 +59,7 @@ pub struct TuiApp {
     pub setup_modal: Option<SetupModalState>,
     pub destroy_modal: Option<DestroyModalState>,
     pub destroy_progress_modal: Option<DestroyProgressModalState>,
-    pub config: Option<Config>,
+    pub config: Config,
     pub cwd: Option<PathBuf>,
     pub viewport_size: Option<(u16, u16)>,
     pub leader_active: bool,
@@ -276,7 +276,7 @@ impl TuiApp {
             setup_modal: None,
             destroy_modal: None,
             destroy_progress_modal: None,
-            config: None,
+            config: Config::default(),
             cwd: None,
             viewport_size: None,
             leader_active: false,
@@ -346,7 +346,7 @@ impl TuiApp {
 
     /// Sets the configuration on `TuiApp`.
     pub fn with_config(mut self, config: Config) -> Self {
-        self.config = Some(config);
+        self.config = config;
         self
     }
 
@@ -403,7 +403,7 @@ impl TuiApp {
                     dashboard.config_last_modified = curr_mtime;
                     dashboard.config_file_len = Some(curr_len);
                 }
-                self.config = Some(new_config);
+                self.config = new_config;
                 if self.config_path.is_none() {
                     self.config_path = Some(path);
                 }
@@ -596,7 +596,7 @@ impl TuiApp {
 
             // 3. Draw active frame conditionally
             if dirty {
-                let theme = self.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                let theme = self.config.theme();
                 terminal
                     .draw(|f| {
                         let (status_area, term_area) = compute_layout(f.area());
@@ -850,13 +850,7 @@ impl TuiApp {
 
         let cwd = self.effective_cwd();
 
-        let modal = if let Some(cfg) = &self.config {
-            ProjectCreationModal::new(cfg, &cwd, None)
-        } else {
-            let fallback_cfg = Config::fallback();
-            ProjectCreationModal::new(&fallback_cfg, &cwd, None)
-        };
-        self.creation_modal = Some(modal);
+        self.creation_modal = Some(ProjectCreationModal::new(&self.config, &cwd, None));
     }
 
     /// Dispatches a key event to the creation modal and handles any triggered action.
@@ -914,8 +908,8 @@ impl TuiApp {
     ) {
         if let Some(mut dashboard) = self.dashboard.take() {
             let action = handler(&mut dashboard);
-            if self.config.as_ref() != Some(&dashboard.config) {
-                self.config = Some(dashboard.config.clone());
+            if self.config != dashboard.config {
+                self.config = dashboard.config.clone();
                 if self.config_path.is_none() && dashboard.config_path.is_some() {
                     self.config_path = dashboard.config_path.clone();
                 }
@@ -1171,8 +1165,7 @@ impl TuiApp {
         }
         let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
 
-        let default_config = Config::fallback();
-        let config = self.config.as_ref().unwrap_or(&default_config);
+        let config = &self.config;
 
         let agent_name = config.default_agent.as_str();
 
@@ -1208,7 +1201,7 @@ impl TuiApp {
         prompt: Option<&str>,
     ) -> anyhow::Result<()> {
         let _ = self.reload_config();
-        let config = self.config.clone().unwrap_or_else(Config::fallback);
+        let config = self.config.clone();
         let cwd = self.effective_cwd();
         let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
 
@@ -1227,7 +1220,7 @@ impl TuiApp {
     pub fn destroy_project(&mut self, project_name: &str) -> anyhow::Result<()> {
         let cwd = self.effective_cwd();
 
-        crate::project::destroy_project_workspace(self.config.as_ref(), &cwd, project_name, true)?;
+        crate::project::destroy_project_workspace(Some(&self.config), &cwd, project_name, true)?;
 
         self.refresh_dashboard();
         Ok(())
@@ -1238,12 +1231,8 @@ impl TuiApp {
         let _ = self.reload_config();
         let cwd = self.effective_cwd();
         let running = self.running_sessions_map();
-        let mut new_dashboard = if let Some(cfg) = &self.config {
-            DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
-        } else {
-            let default_cfg = Config::fallback();
-            DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
-        };
+        let mut new_dashboard =
+            DashboardState::from_env(&self.config, &cwd).with_running_sessions(running);
         if let Some(ref path) = self.config_path {
             new_dashboard = new_dashboard.with_config_path(path.clone());
         }
@@ -1785,7 +1774,7 @@ repos = []
         terminal
             .draw(|f| {
                 if let Some(modal) = &app.creation_modal {
-                    let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                    let theme = app.config.theme();
                     modal.render_modal(f.area(), f.buffer_mut(), &theme);
                     if let Some(pos) = modal.cursor_position(f.area()) {
                         f.set_cursor_position(pos);
@@ -1809,7 +1798,7 @@ repos = []
         terminal
             .draw(|f| {
                 if let Some(modal) = &app.creation_modal {
-                    let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                    let theme = app.config.theme();
                     modal.render_modal(f.area(), f.buffer_mut(), &theme);
                     if let Some(pos) = modal.cursor_position(f.area()) {
                         f.set_cursor_position(pos);
@@ -3933,7 +3922,7 @@ repos = []
             dashboard.templates,
             vec!["added_template".to_string(), "initial_template".to_string()]
         );
-        let app_cfg = app.config.as_ref().expect("app config must exist");
+        let app_cfg = &app.config;
         assert!(app_cfg.templates.contains_key("added_template"));
         assert!(app_cfg.templates.contains_key("initial_template"));
     }

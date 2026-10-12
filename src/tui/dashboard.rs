@@ -80,7 +80,7 @@ pub struct DashboardState {
 impl DashboardState {
     /// Creates a new `DashboardState` with given templates and local projects.
     pub fn new(templates: Vec<String>, local_projects: Vec<String>) -> Self {
-        let mut config = Config::fallback();
+        let mut config = Config::default();
 
         for tpl in &templates {
             config

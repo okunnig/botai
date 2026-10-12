@@ -563,6 +563,20 @@ pub struct Config {
     pub templates: HashMap<String, TemplateConfig>,
 }
 
+/// The built-in configuration used when no config file is available.
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            default_agent: "claude".to_string(),
+            theme: default_theme(),
+            repos_dir: PathBuf::from(".botai_repos"),
+            repos: HashMap::new(),
+            agents: HashMap::new(),
+            templates: HashMap::new(),
+        }
+    }
+}
+
 impl Config {
     /// Backward compatibility accessor for `templates`.
     #[inline]
@@ -572,18 +586,6 @@ impl Config {
     /// Returns the resolved `Theme` palette configured for the application.
     pub fn theme(&self) -> Theme {
         Theme::from_name(&self.theme)
-    }
-
-    /// Returns the built-in configuration used when no config file is available.
-    pub fn fallback() -> Self {
-        Self {
-            default_agent: "claude".to_string(),
-            theme: default_theme(),
-            repos_dir: PathBuf::from(".botai_repos"),
-            repos: HashMap::new(),
-            agents: HashMap::new(),
-            templates: HashMap::new(),
-        }
     }
 
     /// Returns the default annotated configuration template.
@@ -833,11 +835,11 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_fallback_matches_minimal_toml() {
+    fn test_default_matches_minimal_toml() {
         let parsed =
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
                 .expect("Minimal config should parse");
-        assert_eq!(Config::fallback(), parsed);
+        assert_eq!(Config::default(), parsed);
     }
 
     const SAMPLE_VALID_TOML: &str = r#"
