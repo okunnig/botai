@@ -1154,15 +1154,8 @@ impl TuiApp {
         }
         let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
 
-        let config = &self.config;
-
-        let agent_name = config.default_agent.as_str();
-
-        let (cmd, args, env_map) = if let Some(agent) = config.get_agent(agent_name) {
-            (agent.command.clone(), agent.args.clone(), agent.env.clone())
-        } else {
-            (crate::session::default_shell(), Vec::new(), HashMap::new())
-        };
+        let agent_name = self.config.default_agent.as_str();
+        let (cmd, args, env_map) = self.config.agent_launch(agent_name);
 
         let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
 

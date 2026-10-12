@@ -3,7 +3,7 @@ pub mod registry;
 pub mod state;
 pub mod vt;
 
-pub use pty::{default_shell, ExitStatus, PtyConfig, PtySession, PtySize, PtyWaker};
+pub use pty::{ExitStatus, PtyConfig, PtySession, PtySize, PtyWaker};
 pub use registry::{SessionEntry, SessionRegistry};
 pub use state::{ProjectSession, SessionState, SessionStatus};
 pub use vt::{DsrResponder, VtCell, VtScreen};

@@ -563,6 +563,14 @@ pub struct Config {
     pub templates: HashMap<String, TemplateConfig>,
 }
 
+fn default_shell() -> String {
+    #[cfg(windows)]
+    let shell = "cmd.exe";
+    #[cfg(not(windows))]
+    let shell = "sh";
+    shell.to_string()
+}
+
 /// The built-in configuration used when no config file is available.
 impl Default for Config {
     fn default() -> Self {
@@ -795,6 +803,15 @@ impl Config {
         })
     }
 
+    /// Returns the command, arguments and environment used to launch the named agent,
+    /// falling back to the platform default shell when the agent is not configured.
+    pub fn agent_launch(&self, name: &str) -> (String, Vec<String>, HashMap<String, String>) {
+        match self.get_agent(name) {
+            Some(agent) => (agent.command.clone(), agent.args.clone(), agent.env.clone()),
+            None => (default_shell(), Vec::new(), HashMap::new()),
+        }
+    }
+
     /// Resolves the effective agent configuration for a given template.
     ///
     /// If the template specifies a `default_agent`, that agent is looked up.
@@ -840,6 +857,14 @@ mod tests {
             Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
                 .expect("Minimal config should parse");
         assert_eq!(Config::default(), parsed);
+    }
+
+    #[test]
+    fn test_agent_launch_falls_back_to_default_shell() {
+        let (cmd, args, env) = Config::default().agent_launch("missing");
+        assert_eq!(cmd, default_shell());
+        assert!(args.is_empty());
+        assert!(env.is_empty());
     }
 
     const SAMPLE_VALID_TOML: &str = r#"

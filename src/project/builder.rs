@@ -242,11 +242,7 @@ impl ProjectBuilder {
     /// for known agents (`agy`, `aider`, `claude`, `copilot`).
     pub fn resolve_agent_command(&self) -> (String, Vec<String>, HashMap<String, String>) {
         let agent_name = self.resolved_agent_name();
-        let (cmd, base_args, env) = if let Some(agent) = self.config.get_agent(&agent_name) {
-            (agent.command.clone(), agent.args.clone(), agent.env.clone())
-        } else {
-            (crate::session::default_shell(), Vec::new(), HashMap::new())
-        };
+        let (cmd, base_args, env) = self.config.agent_launch(&agent_name);
 
         let adapted_args = adapt_agent_args(&agent_name, &base_args, self.prompt.as_deref());
         (cmd, adapted_args, env)

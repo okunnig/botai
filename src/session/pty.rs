@@ -138,15 +138,6 @@ impl From<portable_pty::ExitStatus> for ExitStatus {
     }
 }
 
-/// Returns the platform default shell used when no agent command is configured.
-pub fn default_shell() -> String {
-    #[cfg(windows)]
-    let shell = "cmd.exe";
-    #[cfg(not(windows))]
-    let shell = "sh";
-    shell.to_string()
-}
-
 /// Configuration parameters for spawning a child process within a pseudo-terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PtyConfig {
