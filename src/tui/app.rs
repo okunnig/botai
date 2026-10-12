@@ -60,7 +60,7 @@ pub struct TuiApp {
     pub destroy_modal: Option<DestroyModalState>,
     pub destroy_progress_modal: Option<DestroyProgressModalState>,
     pub config: Config,
-    pub cwd: Option<PathBuf>,
+    pub cwd: PathBuf,
     pub viewport_size: Option<(u16, u16)>,
     pub leader_active: bool,
     pub showing_dashboard: bool,
@@ -277,7 +277,7 @@ impl TuiApp {
             destroy_modal: None,
             destroy_progress_modal: None,
             config: Config::default(),
-            cwd: None,
+            cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             viewport_size: None,
             leader_active: false,
             showing_dashboard: false,
@@ -415,7 +415,7 @@ impl TuiApp {
 
     /// Sets the working directory on `TuiApp`.
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
-        self.cwd = Some(cwd);
+        self.cwd = cwd;
         self
     }
 
@@ -836,21 +836,11 @@ impl TuiApp {
         changed
     }
 
-    /// Returns the configured working directory, falling back to the process CWD, then `.`.
-    fn effective_cwd(&self) -> PathBuf {
-        self.cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."))
-    }
-
     /// Opens the in-session project creation modal, reloading potentially updated configuration first.
     pub fn open_creation_modal(&mut self) {
         let _ = self.reload_config();
 
-        let cwd = self.effective_cwd();
-
-        self.creation_modal = Some(ProjectCreationModal::new(&self.config, &cwd, None));
+        self.creation_modal = Some(ProjectCreationModal::new(&self.config, &self.cwd, None));
     }
 
     /// Dispatches a key event to the creation modal and handles any triggered action.
@@ -1087,7 +1077,7 @@ impl TuiApp {
         let modal = DestroyProgressModalState::new(project_name, rx);
         self.destroy_progress_modal = Some(modal);
 
-        let cwd = self.effective_cwd();
+        let cwd = self.cwd.clone();
         let config = self.config.clone();
         let proj_name = project_name.to_string();
 
@@ -1122,7 +1112,7 @@ impl TuiApp {
             return;
         }
 
-        let cwd = self.effective_cwd();
+        let cwd = self.cwd.clone();
         let config = self.config.clone();
         let viewport_size = self.viewport_size.unwrap_or((100, 30));
         let tpl_name = template_name.to_string();
@@ -1157,8 +1147,7 @@ impl TuiApp {
             return Ok(());
         }
 
-        let cwd = self.effective_cwd();
-        let project_dir = cwd.join(project_name);
+        let project_dir = self.cwd.join(project_name);
 
         if !project_dir.exists() {
             anyhow::bail!("Project directory '{project_name}' does not exist in CWD");
@@ -1202,7 +1191,7 @@ impl TuiApp {
     ) -> anyhow::Result<()> {
         let _ = self.reload_config();
         let config = self.config.clone();
-        let cwd = self.effective_cwd();
+        let cwd = self.cwd.clone();
         let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
 
         let mut builder = ProjectBuilder::new(config, template_name, project_name)
@@ -1218,9 +1207,12 @@ impl TuiApp {
 
     /// Destroys a project directory and its worktrees, then refreshes the dashboard.
     pub fn destroy_project(&mut self, project_name: &str) -> anyhow::Result<()> {
-        let cwd = self.effective_cwd();
-
-        crate::project::destroy_project_workspace(Some(&self.config), &cwd, project_name, true)?;
+        crate::project::destroy_project_workspace(
+            Some(&self.config),
+            &self.cwd,
+            project_name,
+            true,
+        )?;
 
         self.refresh_dashboard();
         Ok(())
@@ -1229,10 +1221,9 @@ impl TuiApp {
     /// Refreshes the local projects and templates list within the dashboard.
     pub fn refresh_dashboard(&mut self) {
         let _ = self.reload_config();
-        let cwd = self.effective_cwd();
         let running = self.running_sessions_map();
         let mut new_dashboard =
-            DashboardState::from_env(&self.config, &cwd).with_running_sessions(running);
+            DashboardState::from_env(&self.config, &self.cwd).with_running_sessions(running);
         if let Some(ref path) = self.config_path {
             new_dashboard = new_dashboard.with_config_path(path.clone());
         }
