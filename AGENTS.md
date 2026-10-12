@@ -11,7 +11,7 @@ A cross-platform multi-repo workspace orchestrator and session multiplexer for A
 - **Template** / **Project Template**: A named collection of git repositories defined in a declarative TOML configuration (`~/.config/botai/config.toml` or `%APPDATA%\botai\config.toml`).
 - **Project**: An isolated, multi-repo work environment created inside `CWD/<project_name>`. Each repository gets a git worktree checked out to a new branch `<project_name>`.
 - **Context Synthesis**: Auto-generated multi-repo orientation context (`AGENTS.md`) at the project root for seamless agent multi-directory comprehension.
-- **Agent Instance & Monitoring**: Single AI agent CLI process per project root with desktop notifications and real-time status badges in the TUI (Thinking, Waiting for Input, Done).
+- **Agent Instance & Monitoring**: Single AI agent CLI process per project root with real-time status badges in the TUI (Thinking, Waiting for Input, Done).
 - **TUI Multiplexer**: Native Rust-powered terminal multiplexing (`portable-pty`, `ratatui`, `crossterm`) with `Ctrl+Space` leader key architecture (`Ctrl+Space` -> `1..9`, `c`, `n`/`p`, `w`, `x`, `d`, `q`).
 
 ## Architecture & Requirements

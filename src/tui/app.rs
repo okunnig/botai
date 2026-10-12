@@ -41,8 +41,8 @@ use crate::tui::destroy_progress_modal::{
     render_destroy_progress_modal, DestroyProgressModalState,
 };
 use crate::tui::events::{
-    is_incomplete_sgr_mouse, is_shift_enter, parse_raw_events, parse_sgr_mouse,
-    translate_mouse_event, RawAction, RawLeaderDecoder,
+    is_incomplete_sgr_mouse, is_shift_enter, is_unmodified_enter, parse_raw_events,
+    parse_sgr_mouse, translate_mouse_event, RawAction, RawLeaderDecoder,
 };
 use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
 use crate::tui::status_bar::StatusBar;
@@ -486,7 +486,6 @@ impl TuiApp {
     /// Extracts a map of project names to their current session status from the registry.
     pub fn running_sessions_map(&self) -> HashMap<String, SessionStatus> {
         self.registry
-            .list()
             .iter()
             .map(|s| (s.project_name().to_string(), s.status()))
             .collect()
@@ -519,6 +518,7 @@ impl TuiApp {
                             break;
                         }
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
             }
@@ -926,7 +926,6 @@ impl TuiApp {
             DashboardAction::Attach(project) => {
                 if let Some(pos) = self
                     .registry
-                    .list()
                     .iter()
                     .position(|s| s.project_name() == project)
                 {
@@ -1145,7 +1144,6 @@ impl TuiApp {
     pub fn attach_project(&mut self, project_name: &str) -> anyhow::Result<()> {
         if let Some(pos) = self
             .registry
-            .list()
             .iter()
             .position(|s| s.project_name() == project_name)
         {
@@ -1298,19 +1296,10 @@ impl TuiApp {
                 if let Some(active) = self.registry.active_session_mut() {
                     active.vt_mut().reset_scrollback();
 
-                    let bytes_to_write = if is_shift_enter(&bytes) {
-                        if active
-                            .project_session
-                            .agent_name
-                            .eq_ignore_ascii_case("agy")
-                        {
-                            b"\x1b[13;2u".to_vec()
-                        } else {
-                            b"\n".to_vec()
-                        }
-                    } else {
-                        bytes
-                    };
+                    let bytes_to_write = Self::translate_passthrough_bytes(
+                        &bytes,
+                        &active.project_session.agent_name,
+                    );
 
                     if active.pty_mut().write_all(&bytes_to_write).is_ok()
                         && active.status() != SessionStatus::Error
@@ -1320,6 +1309,24 @@ impl TuiApp {
                     }
                 }
             }
+        }
+    }
+
+    /// Translates raw passthrough bytes before writing to a child PTY.
+    ///
+    /// Normalizes Kitty CSI-u unmodified Enter sequences (\x1b[13u, \x1b[13;1u, etc.) to raw CR (`\r`).
+    /// For Shift+Enter sequences, routes multiline newline sequences appropriately based on agent name.
+    pub fn translate_passthrough_bytes(bytes: &[u8], agent_name: &str) -> Vec<u8> {
+        if is_unmodified_enter(bytes) {
+            b"\r".to_vec()
+        } else if is_shift_enter(bytes) {
+            if agent_name.eq_ignore_ascii_case("agy") {
+                b"\x1b[13;2u".to_vec()
+            } else {
+                b"\n".to_vec()
+            }
+        } else {
+            bytes.to_vec()
         }
     }
 
@@ -1338,9 +1345,10 @@ impl TuiApp {
 
         // If the active session is errored, dismiss it on Enter (\r, \n) or plain Space (when leader is inactive)
         if is_active_errored && !self.leader_active {
-            let is_dismiss = segment
-                .iter()
-                .any(|&b| b == b'\r' || b == b'\n' || b == b' ');
+            let is_dismiss = is_unmodified_enter(segment)
+                || segment
+                    .iter()
+                    .any(|&b| b == b'\r' || b == b'\n' || b == b' ');
             if is_dismiss {
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
@@ -3491,6 +3499,68 @@ repos = []
     }
 
     #[test]
+    fn test_tui_app_handle_raw_bytes_errored_session_dismissal_csi_u_enter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 1"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 1"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-err-csiu", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
+        assert_eq!(app.registry.len(), 1);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Error
+        );
+
+        // CSI-u unmodified Enter (\x1b[13u) dismisses an active errored session
+        app.handle_raw_bytes(b"\x1b[13u");
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_tui_app_process_non_mouse_bytes_errored_session_dismissal_csi_u_enter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 1"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 1"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-err-pnm", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
+        assert_eq!(app.registry.len(), 1);
+
+        // process_non_mouse_bytes returns true when dismissing active errored session with CSI-u Enter
+        assert!(app.process_non_mouse_bytes(b"\x1b[13u"));
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.should_quit);
+    }
+
+    #[test]
     fn test_tui_app_handle_raw_bytes_shift_enter_claude_and_agy() {
         let tmp = tempfile::tempdir().expect("tempdir");
         #[cfg(windows)]
@@ -3945,5 +4015,173 @@ repos = []
         let s = app.registry.get(&session_id).expect("session exists");
         assert_eq!(s.project_session.exit_code, Some(42));
         assert_eq!(s.project_session.status, SessionStatus::Error);
+    }
+
+    #[test]
+    fn test_translate_passthrough_bytes_unmodified_enter() {
+        // Kitty CSI-u unmodified Enter sequences normalized to \r
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;1:1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10;1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10;1:1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[10u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[10;1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[10;1:1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;65u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;129u", "claude"),
+            b"\r".to_vec()
+        );
+
+        // Same normalization regardless of agent
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13u", "agy"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;1u", "agy"),
+            b"\r".to_vec()
+        );
+
+        // Raw CR remains \r
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\r", "claude"),
+            b"\r".to_vec()
+        );
+
+        // Regular commands / bytes passed through untouched
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"cargo test\r", "claude"),
+            b"cargo test\r".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_translate_passthrough_bytes_shift_enter() {
+        // Claude / default agents get \n
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;2u", "claude"),
+            b"\n".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10;2u", "claude"),
+            b"\n".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[27;2;13~", "claude"),
+            b"\n".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;2u", "copilot"),
+            b"\n".to_vec()
+        );
+
+        // Agy agent gets \x1b[13;2u
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;2u", "agy"),
+            b"\x1b[13;2u".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10;2u", "agy"),
+            b"\x1b[13;2u".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[27;2;13~", "agy"),
+            b"\x1b[13;2u".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_unmodified_enter_normalization() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let mut ps = ProjectSession::new("test-unmodified-enter", "ws", "claude");
+        ps.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        // 1. \x1b[13u triggers passthrough and marks busy
+        app.handle_raw_bytes(b"\x1b[13u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 2. \x1b[13;1u triggers passthrough and marks busy
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(b"\x1b[13;1u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 3. \x1b[13:10;1u triggers passthrough and marks busy
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(b"\x1b[13:10;1u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 4. \x1b[10u triggers passthrough and marks busy
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(b"\x1b[10u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
     }
 }

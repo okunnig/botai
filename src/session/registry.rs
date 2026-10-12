@@ -183,14 +183,24 @@ impl SessionRegistry {
             .find(|s| s.project_session.project_name == name)
     }
 
-    /// Returns a list of references to all sessions in insertion order.
-    pub fn list(&self) -> Vec<&SessionEntry> {
-        self.sessions.iter().collect()
+    /// Returns a slice of references to all sessions in insertion order.
+    pub fn list(&self) -> &[SessionEntry] {
+        &self.sessions
     }
 
-    /// Returns a mutable list of references to all sessions.
-    pub fn list_mut(&mut self) -> Vec<&mut SessionEntry> {
-        self.sessions.iter_mut().collect()
+    /// Returns a mutable slice of references to all sessions.
+    pub fn list_mut(&mut self) -> &mut [SessionEntry] {
+        &mut self.sessions
+    }
+
+    /// Returns an iterator over all session entries in the registry.
+    pub fn iter(&self) -> std::slice::Iter<'_, SessionEntry> {
+        self.sessions.iter()
+    }
+
+    /// Returns a mutable iterator over all session entries in the registry.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, SessionEntry> {
+        self.sessions.iter_mut()
     }
 
     /// Removes a session by ID and adjusts the active index accordingly.
@@ -289,6 +299,33 @@ impl SessionRegistry {
             let _ = session.pty_mut().resize(cols, rows);
             session.vt_mut().resize(cols, rows);
         }
+    }
+}
+
+impl<'a> IntoIterator for &'a SessionRegistry {
+    type Item = &'a SessionEntry;
+    type IntoIter = std::slice::Iter<'a, SessionEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut SessionRegistry {
+    type Item = &'a mut SessionEntry;
+    type IntoIter = std::slice::IterMut<'a, SessionEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl IntoIterator for SessionRegistry {
+    type Item = SessionEntry;
+    type IntoIter = std::vec::IntoIter<SessionEntry>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.sessions.into_iter()
     }
 }
 
@@ -606,5 +643,149 @@ mod tests {
             counter.load(Ordering::SeqCst) > 0,
             "Waker should have been invoked by session output"
         );
+    }
+
+    #[test]
+    fn test_session_registry_list_slice_zero_allocation() {
+        let mut registry = SessionRegistry::new();
+        let empty_slice: &[SessionEntry] = registry.list();
+        assert_eq!(empty_slice.len(), 0);
+        assert!(empty_slice.is_empty());
+
+        let (ps1, pty1, vt1) = create_test_session("proj1", "ws1", "claude");
+        let (ps2, pty2, vt2) = create_test_session("proj2", "ws1", "agy");
+        let (ps3, pty3, vt3) = create_test_session("proj3", "ws2", "copilot");
+
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+        registry.add(ps3, pty3, vt3).unwrap();
+
+        let slice: &[SessionEntry] = registry.list();
+        assert_eq!(slice.len(), 3);
+        assert_eq!(slice.len(), registry.len());
+        assert!(!slice.is_empty());
+
+        // Verify indexing without heap allocation
+        assert_eq!(slice[0].project_name(), "proj1");
+        assert_eq!(slice[1].project_name(), "proj2");
+        assert_eq!(slice[2].project_name(), "proj3");
+
+        // Verify sub-slicing
+        let sub = &slice[1..3];
+        assert_eq!(sub.len(), 2);
+        assert_eq!(sub[0].project_name(), "proj2");
+        assert_eq!(sub[1].project_name(), "proj3");
+
+        // Verify memory address matches internal vector buffer (zero-allocation guarantee)
+        assert_eq!(slice.as_ptr(), registry.sessions.as_ptr());
+    }
+
+    #[test]
+    fn test_session_registry_iter_and_into_iterator() {
+        let mut registry = SessionRegistry::new();
+        let (ps1, pty1, vt1) = create_test_session("alpha", "ws", "claude");
+        let (ps2, pty2, vt2) = create_test_session("beta", "ws", "agy");
+        let (ps3, pty3, vt3) = create_test_session("gamma", "ws", "copilot");
+
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+        registry.add(ps3, pty3, vt3).unwrap();
+
+        // 1. Using registry.iter()
+        let mut iter = registry.iter();
+        assert_eq!(iter.next().unwrap().project_name(), "alpha");
+        assert_eq!(iter.next().unwrap().project_name(), "beta");
+        assert_eq!(iter.next().unwrap().project_name(), "gamma");
+        assert!(iter.next().is_none());
+
+        // 2. Using IntoIterator for &SessionRegistry
+        let mut names = Vec::new();
+        for entry in &registry {
+            names.push(entry.project_name());
+        }
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+
+        // 3. Iterator combinators
+        let count_ws = registry
+            .iter()
+            .filter(|s| s.template_name() == "ws")
+            .count();
+        assert_eq!(count_ws, 3);
+    }
+
+    #[test]
+    fn test_session_registry_list_mut_in_place_mutability() {
+        let mut registry = SessionRegistry::new();
+        let (ps1, pty1, vt1) = create_test_session("m1", "ws", "claude");
+        let (ps2, pty2, vt2) = create_test_session("m2", "ws", "agy");
+
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        // Verify list_mut returns mutable slice with matching length and buffer pointer
+        let initial_ptr = registry.sessions.as_ptr();
+        {
+            let slice_mut: &mut [SessionEntry] = registry.list_mut();
+            assert_eq!(slice_mut.len(), 2);
+            assert_eq!(slice_mut.as_ptr(), initial_ptr);
+
+            // Mutate in place via slice index
+            slice_mut[0].project_session.mark_busy();
+            slice_mut[1].project_session.mark_done(Some(0));
+        }
+
+        // Verify mutations persisted in-place in the registry
+        assert_eq!(registry.list()[0].status(), SessionStatus::Busy);
+        assert_eq!(registry.list()[1].status(), SessionStatus::Done);
+        assert_eq!(
+            registry.get_by_project("m1").unwrap().status(),
+            SessionStatus::Busy
+        );
+        assert_eq!(
+            registry.get_by_project("m2").unwrap().status(),
+            SessionStatus::Done
+        );
+    }
+
+    #[test]
+    fn test_session_registry_iter_mut_and_into_iterator_mut() {
+        let mut registry = SessionRegistry::new();
+        let (ps1, pty1, vt1) = create_test_session("it1", "ws", "claude");
+        let (ps2, pty2, vt2) = create_test_session("it2", "ws", "agy");
+
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        // 1. In-place mutation via iter_mut()
+        for session in registry.iter_mut() {
+            session.project_session.mark_busy();
+        }
+        for session in &registry {
+            assert_eq!(session.status(), SessionStatus::Busy);
+        }
+
+        // 2. In-place mutation via IntoIterator for &mut SessionRegistry
+        for session in &mut registry {
+            session.project_session.mark_done(Some(42));
+        }
+        for session in registry.iter() {
+            assert_eq!(session.status(), SessionStatus::Done);
+            assert_eq!(session.project_session.exit_code, Some(42));
+        }
+    }
+
+    #[test]
+    fn test_session_registry_into_iter_by_value() {
+        let mut registry = SessionRegistry::new();
+        let (ps1, pty1, vt1) = create_test_session("owned1", "ws", "claude");
+        let (ps2, pty2, vt2) = create_test_session("owned2", "ws", "agy");
+
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        let entries: Vec<SessionEntry> = registry.into_iter().collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].project_name(), "owned1");
+        assert_eq!(entries[1].project_name(), "owned2");
     }
 }

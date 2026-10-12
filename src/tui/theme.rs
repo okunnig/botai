@@ -44,7 +44,7 @@ impl Theme {
             leader_bg: Color::Rgb(224, 175, 104),     // #e0af68
             leader_fg: Color::Rgb(26, 27, 38),        // #1a1b26
             status_busy: Color::Rgb(224, 175, 104),   // #e0af68
-            status_waiting: Color::Rgb(122, 162, 247), // #7aa2f7
+            status_waiting: Color::Rgb(255, 158, 100), // #ff9e64 (Warm Orange/Peach)
             status_done: Color::Rgb(158, 206, 106),   // #9ece6a
             status_error: Color::Rgb(247, 118, 142),  // #f7768e
             border_focused: Color::Rgb(187, 154, 247), // #bb9af7
@@ -75,7 +75,7 @@ impl Theme {
             leader_bg: Color::Rgb(249, 226, 175),  // #f9e2af (Yellow)
             leader_fg: Color::Rgb(17, 17, 27),     // #11111b
             status_busy: Color::Rgb(249, 226, 175), // #f9e2af (Yellow)
-            status_waiting: Color::Rgb(137, 220, 235), // #89dceb (Sky)
+            status_waiting: Color::Rgb(250, 179, 135), // #fab387 (Peach)
             status_done: Color::Rgb(166, 227, 161), // #a6e3a1 (Green)
             status_error: Color::Rgb(243, 139, 168), // #f38ba8 (Red)
             border_focused: Color::Rgb(203, 166, 247), // #cba6f7 (Mauve)
@@ -106,7 +106,7 @@ impl Theme {
             leader_bg: Color::Rgb(255, 230, 0),       // #ffe600 (Acid Yellow)
             leader_fg: Color::Rgb(10, 10, 15),        // #0a0a0f
             status_busy: Color::Rgb(255, 230, 0),     // #ffe600
-            status_waiting: Color::Rgb(0, 240, 255),  // #00f0ff
+            status_waiting: Color::Rgb(255, 230, 0),  // #ffe600 (Acid Yellow)
             status_done: Color::Rgb(0, 255, 102),     // #00ff66
             status_error: Color::Rgb(255, 0, 85),     // #ff0055
             border_focused: Color::Rgb(255, 0, 127),  // #ff007f
@@ -168,8 +168,8 @@ impl Theme {
             leader_bg: Color::Rgb(228, 228, 231),  // #e4e4e7 (Zinc 200)
             leader_fg: Color::Rgb(24, 24, 27),     // #18181b
             status_busy: Color::Rgb(228, 228, 231), // #e4e4e7
-            status_waiting: Color::Rgb(186, 230, 253), // #bae6fd (Ice blue)
-            status_done: Color::Rgb(244, 244, 245), // #f4f4f5
+            status_waiting: Color::Rgb(2, 132, 199), // #0284c7 (Sky 600)
+            status_done: Color::Rgb(22, 163, 74),  // #16a34a (Green 600)
             status_error: Color::Rgb(248, 113, 113), // #f87171
             border_focused: Color::Rgb(244, 244, 245), // #f4f4f5
             border_unfocused: Color::Rgb(82, 82, 91), // #52525b (Zinc 600)
@@ -199,7 +199,7 @@ impl Theme {
             leader_bg: Color::Yellow,
             leader_fg: Color::Black,
             status_busy: Color::Yellow,
-            status_waiting: Color::Cyan,
+            status_waiting: Color::LightYellow,
             status_done: Color::Green,
             status_error: Color::Red,
             border_focused: Color::Cyan,

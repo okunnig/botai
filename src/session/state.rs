@@ -20,9 +20,22 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
-    /// Returns the solid round dot status symbol indicator (●).
+    /// Returns the semantic status symbol indicator:
+    /// - `Initializing`: `"○"` (U+25CB)
+    /// - `Busy`: `"●"` (U+25CF)
+    /// - `WaitingForInput`: `"?"`
+    /// - `Done`: `"✓"` (U+2713)
+    /// - `Error`: `"✗"` (U+2717)
+    /// - `Terminated`: `"—"` (U+2014)
     pub fn status_symbol(&self) -> &'static str {
-        "●"
+        match self {
+            SessionStatus::Initializing => "○",
+            SessionStatus::Busy => "●",
+            SessionStatus::WaitingForInput => "?",
+            SessionStatus::Done => "✓",
+            SessionStatus::Error => "✗",
+            SessionStatus::Terminated => "—",
+        }
     }
 
     /// Returns the badge icon representing this status in the TUI status bar.
@@ -196,8 +209,8 @@ mod tests {
 
     #[test]
     fn test_session_status_properties_and_badges() {
-        assert_eq!(SessionStatus::Initializing.status_symbol(), "●");
-        assert_eq!(SessionStatus::Initializing.badge_icon(), "●");
+        assert_eq!(SessionStatus::Initializing.status_symbol(), "○");
+        assert_eq!(SessionStatus::Initializing.badge_icon(), "○");
         assert_eq!(SessionStatus::Initializing.badge_text(), "Initializing");
         assert!(SessionStatus::Initializing.is_active());
         assert!(!SessionStatus::Initializing.is_terminal());
@@ -208,8 +221,8 @@ mod tests {
         assert!(SessionStatus::Busy.is_active());
         assert!(!SessionStatus::Busy.is_terminal());
 
-        assert_eq!(SessionStatus::WaitingForInput.status_symbol(), "●");
-        assert_eq!(SessionStatus::WaitingForInput.badge_icon(), "●");
+        assert_eq!(SessionStatus::WaitingForInput.status_symbol(), "?");
+        assert_eq!(SessionStatus::WaitingForInput.badge_icon(), "?");
         assert_eq!(
             SessionStatus::WaitingForInput.badge_text(),
             "Waiting for Input"
@@ -217,20 +230,20 @@ mod tests {
         assert!(SessionStatus::WaitingForInput.is_active());
         assert!(!SessionStatus::WaitingForInput.is_terminal());
 
-        assert_eq!(SessionStatus::Done.status_symbol(), "●");
-        assert_eq!(SessionStatus::Done.badge_icon(), "●");
+        assert_eq!(SessionStatus::Done.status_symbol(), "✓");
+        assert_eq!(SessionStatus::Done.badge_icon(), "✓");
         assert_eq!(SessionStatus::Done.badge_text(), "Done");
         assert!(!SessionStatus::Done.is_active());
         assert!(SessionStatus::Done.is_terminal());
 
-        assert_eq!(SessionStatus::Error.status_symbol(), "●");
-        assert_eq!(SessionStatus::Error.badge_icon(), "●");
+        assert_eq!(SessionStatus::Error.status_symbol(), "✗");
+        assert_eq!(SessionStatus::Error.badge_icon(), "✗");
         assert_eq!(SessionStatus::Error.badge_text(), "Error");
         assert!(!SessionStatus::Error.is_active());
         assert!(SessionStatus::Error.is_terminal());
 
-        assert_eq!(SessionStatus::Terminated.status_symbol(), "●");
-        assert_eq!(SessionStatus::Terminated.badge_icon(), "●");
+        assert_eq!(SessionStatus::Terminated.status_symbol(), "—");
+        assert_eq!(SessionStatus::Terminated.badge_icon(), "—");
         assert_eq!(SessionStatus::Terminated.badge_text(), "Terminated");
         assert!(!SessionStatus::Terminated.is_active());
         assert!(SessionStatus::Terminated.is_terminal());

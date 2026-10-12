@@ -189,6 +189,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Executes `git worktree prune` prior to creating new worktrees to automatically clear stale worktree metadata from manually deleted directories.
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
   - Checks out a new branch named `<project_name>`.
+  - **Concurrent Worktree Checkout**: Worktrees across distinct backing repositories are checked out concurrently in parallel using scoped threads (`std::thread::scope`). Worktrees sharing the same backing repository are serialized per repository path to prevent Git index lock contention.
+  - **Thread-Safe Event Streaming & Atomic Rollback**: Progress logs and errors stream over an `mpsc::channel` to the setup sink. If any worker thread fails, all spawned threads are joined to completion before executing atomic rollback across all successfully created worktrees and newly created branches.
 - **Lifecycle Command Hooks Execution Model**:
   - **Per-Repository Setup Hooks (`setup`)**:
     - Runs in the checked-out worktree directory (`CWD/<project_name>/<repo_name>`) immediately after worktree creation.
@@ -252,21 +254,28 @@ env = { PORT = "8080", NODE_ENV = "development" }
       - `\x1b]133;C\x07` (Command output stream): Records active output stream processing.
       - `\x1b]133;D[;<exit_code>]\x07` (Command finished): Evaluates exit status to transition to `SessionStatus::Done` or `SessionStatus::Error`.
     - **Transparent Passthrough**: Control sequence decoding operates non-destructively; raw bytes are passed intact to the virtual terminal (`vt100`) parser.
-    - **Silence / Inactivity Timeout Fallback**: Employs an idle threshold (default 1,500 ms) as a robust baseline fallback for legacy tools or raw command output not emitting explicit control sequences.
+    - **Silence / Inactivity Timeout Fallback & Command Suppression**:
+      - Employs an idle threshold (default 1,500 ms) as a baseline fallback for legacy tools or raw command output not emitting explicit control sequences.
+      - **Command-Aware Timeout Suppression (`command_in_flight`)**: Tracks command execution state. When `StreamControlEvent::CommandStart` (`133;B`) or `CommandOutput` (`133;C`) is processed, `command_in_flight = true`. When `StreamControlEvent::CommandFinished` (`133;D`), `PromptStart` (`133;A`), or `Bell` (`\x07`) is received, `command_in_flight = false`. During `evaluate()`, if `command_in_flight == true`, the 1,500 ms idle timeout transition to `WaitingForInput` is suppressed, ensuring long-running tool executions and compilation commands never flip prematurely to waiting.
+      - **State Debouncing**: Employs a 500 ms debounce window (`debounce_duration`) computed as `idle_threshold + debounce_duration` before transitioning from `Busy` to `WaitingForInput`. If stream activity resumes before total idle time reaches this combined threshold, the session remains `Busy`, eliminating visual indicator flicker during bursty LLM token generation.
   - **Per-Session Activity Tracking**:
-    - Each project session maintains an isolated, independent `ActivityTracker` instance with its own activity clock and state machine, preventing cross-session timer crosstalk.
-- **Background-Aware Desktop Notifications**:
-  - Emits native OS desktop notifications (via `notify-rust` / terminal notifications) with per-project debouncing and cooldown:
+    - Each project session maintains an isolated, independent `ActivityTracker` instance with its own activity clock, command-in-flight tracker, debounce configuration, and stream scanner, preventing cross-session timer crosstalk.
+- **In-Memory Notification Tracking & Debouncing**:
+  - Desktop notifications via `notify-rust` are removed to prevent macOS main-thread hangs (where native notification dispatchers block or hang when invoked outside the main Cocoa/AppKit runloop), while real-time TUI status badges, status banners, semantic stream scanning (OSC 133, OSC 9, OSC 777, BEL, inactivity timeouts), and in-memory event tracking are fully preserved.
+  - `NotificationService` maintains in-memory event tracking, per-project debouncing, and cooldown:
+    - Debounces duplicate notification events per project and event type (Completed, WaitingForInput, Error, Custom).
     - An agent CLI process completes a task or exits.
     - An agent transitions to an idle state awaiting user input / approval, or emits a `BEL` / OSC notification.
-  - **Focus-Aware Notification Filtering**: Desktop notifications for waiting/attention events are suppressed if the user is actively viewing and interacting with that specific session, triggering only when the session is running in the background (different project tab, modal dialog, or dashboard open).
-- **Real-Time Session Indicators in TUI**:
-  - Live status indicators formatted as a leading solid round dot symbol (`●` U+25CF) inside project tabs in the status bar (e.g., `  ● 1 [ecommerce] payment-api  `, falling back to `  ● 1 payment-api  ` if template name is empty, with active/inactive styling):
-    - ● **Busy / Thinking**: Themed Busy color (`theme.status_busy`, e.g., Cyan / Electric Blue / Amber) when agent is actively executing.
-    - ● **Waiting for Input**: Themed Waiting color (`theme.status_waiting`, e.g., Peach / Amber / Sky Blue) when agent is awaiting user response, confirmation, or attention.
-    - ● **Done / Idle**: Themed Done color (`theme.status_done`, e.g., Green) when agent finished its assigned prompt or task.
-    - ● **Error / Interrupted**: Themed Error color (`theme.status_error`, e.g., Red) on non-zero exit code or process failure.
-    - ● **Initializing / Terminated**: Themed status bar foreground color (`theme.status_bar_fg`).
+  - **Focus-Aware Notification Filtering**: Attention events for waiting states are suppressed if the user is actively viewing and interacting with that specific session, triggering tracking only when the session is running in the background (different project tab, modal dialog, or dashboard open).
+- **Real-Time Semantic Session Indicators in TUI**:
+  - Live status indicators rendered using dedicated semantic status glyphs and themed contextual colors inside project tabs in the status bar and running session lists (e.g., `  ● 1 [ecommerce] payment-api  `, falling back to `  ● 1 payment-api  ` if template name is empty, with active/inactive styling):
+    - ○ **Initializing (`○` U+25CB)**: Rendered in `status_bar_fg` while the session worktree, PTY, or initial processes are spawning.
+    - ● **Busy / Thinking (`●` U+25CF)**: Themed Busy color (`theme.status_busy`, e.g., Warm Amber Gold, Electric Neon Yellow) when the agent is actively executing, thinking, or running commands.
+    - ? **Waiting for Input (`?`)**: Themed Waiting color (`theme.status_waiting`, e.g., Warm Peach / Orange / Acid Yellow) when the agent is awaiting user response, confirmation, or tool permission.
+    - ✓ **Done / Idle (`✓` U+2713)**: Themed Done color (`theme.status_done`, e.g., Green) when the agent finished its assigned prompt or task.
+    - ✗ **Error / Interrupted (`✗` U+2717)**: Themed Error color (`theme.status_error`, e.g., Red) on non-zero exit code or process failure.
+    - — **Terminated (`—` U+2014)**: Rendered in `status_bar_fg` when the session was closed or detached.
+  - **Active Tab Contrast Fallback Guard**: On active tabs where a status color matches or collides with the active tab background (`dot_color == theme.tab_active_bg`), the indicator automatically falls back to `theme.tab_active_fg` to guarantee high contrast.
 
 ---
 
@@ -282,6 +291,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - PTY sessions define `PtyWaker = Arc<dyn Fn() + Send + Sync>` configured via `PtySession::set_waker` and `SessionRegistry::set_waker`. Whenever `pty-reader` reads bytes (`n > 0`), it invokes the waker callback.
   - In `TuiApp`, the PTY waker is connected to the raw stdin channel (`stdin_tx`), sending an empty wake-up pulse (`Vec::new()`).
   - In `run_loop_with_receiver`, incoming bytes on `stdin_rx` are demuxed: non-empty bytes are forwarded to `handle_input_bytes` (marking `dirty = true`), while empty vectors (wake-up pulses) bypass input decoding and immediately trigger `process_pty_streams()`, achieving instant event-driven terminal redrawing.
+- **EINTR Retry Resilience on Reader Threads**:
+  - Both the stdin reader thread (`src/tui/app.rs`) and child PTY reader threads (`src/session/pty.rs`) explicitly handle `std::io::ErrorKind::Interrupted` (`EINTR`) errors by retrying `read()` within their processing loops instead of exiting prematurely.
+  - Guarantees thread survival and continuous stream delivery when asynchronous POSIX signals (e.g. `SIGWINCH` on terminal resize, `SIGCHLD`, or process control signals) interrupt ongoing blocking read syscalls.
 - **Consolidated Process Status Polling**:
   - Lifecycle state and exit codes for active sessions are retrieved using a single consolidated `try_wait` invocation per session, eliminating redundant duplicate `waitpid` syscalls and mutex locking in the render loop.
 - **Zero-Allocation VT Cell Rendering & High-Throughput Performance**:
@@ -325,6 +337,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Unmodified Carriage Return (`KeyCode::Char('\r')` with no modifiers): `\r` (`0x0D`, CR).
     - Ctrl+J (`KeyCode::Char('j')` with Ctrl, or unmodified `\n`): `0x0A` (LF).
     - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`; `Super+Enter` -> `\x1b[13;9u`).
+    - **CSI-u Unmodified Enter Normalization**:
+      - Terminals supporting Kitty keyboard protocol with `DISAMBIGUATE_ESCAPE_CODES` (such as iTerm2 3.7.2, Ghostty) send `\x1b[13u` or `\x1b[13;1u` for unmodified Enter instead of raw CR (`\r`).
+      - In `RawAction::Passthrough`, CSI-u unmodified Enter sequences (`\x1b[13u`, `\x1b[13;1u`, `\x1b[13;1:1u`, `\x1b[13:10u`, `\x1b[13:10;1u`, `\x1b[13:10;1:1u`, as well as `\x1b[10u`, `\x1b[10;1u`, and keypad Enter `\x1b[57414u`, `\x1b[57414;1u`) are normalized to `b"\r"` before writing to the child PTY. This ensures child shells and AI agent CLI processes receive standard carriage returns for command submission rather than unrecognized escape sequences. In addition, CSI-u unmodified Enter sequences dismiss active errored session banners.
     - **Seamless Agent-Aware Shift+Enter Multiline Routing**:
       - Inspects the active session (`active.project_session.agent`) when receiving raw Shift+Enter sequences (Kitty CSI-u `\x1b[13;<mod>u` with Shift bit, sub-parameters `\x1b[13;2:1u`, alternate codepoints `\x1b[13:10;2u`, or xterm modifyOtherKeys `\x1b[27;<mod>;13~`):
         - For `claude` (or non-Kitty agents): Sends `b"\n"` (`0x0A` / Line Feed) so Claude Code inserts a clean multiline newline instead of submitting.
@@ -376,16 +391,24 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Last / Only Session Scenario (Context-Aware Exit)**:
     - If `botai` was launched from the dashboard, terminating the last session automatically transitions back to the interactive project dashboard (with refreshed project directories).
     - If `botai` was launched directly via CLI (`botai create --attach` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
-  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
+  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed. Pressing Enter (including raw CR `\r`, LF `\n`, plain Space, or Kitty CSI-u unmodified Enter sequences such as `\x1b[13u`, `\x1b[13;1u`, and keypad Enter `\x1b[57414u`) or `Ctrl+Space w` dismisses the errored session tab.
 - **Child Process Lifecycle Management & Process Reaping (`PtySession`)**:
   - `PtySession` implements `Drop` to kill and reap child processes automatically when dropped (or when an active session, `SessionEntry`, or `SessionRegistry` is removed or dropped), preventing orphaned or zombie processes in the operating system process table.
   - `PtySession::kill()` explicitly terminates running processes and invokes `child.wait()` to reap process entries from the OS process table.
   - `PtySession::process_id()` exposes the underlying OS child process identifier (`Option<u32>`) when available.
+- **Zero-Allocation Session Registry Access**:
+  - `SessionRegistry` exposes direct slice accessors (`list(&self) -> &[SessionEntry]` and `list_mut(&mut self) -> &mut [SessionEntry]`) as well as `iter(&self)` and `iter_mut(&mut self)` slice iterators without allocating intermediate heap vectors (`Vec<&SessionEntry>`) on each query.
+  - Eliminates heap vector churn on every tick of the 30ms TUI event loop in `TuiApp` and during status bar frame rendering.
 - **Session Detachment & Background Persistence**:
   - Detaching from an active session (`Ctrl + Space` then `x`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
     - When launched directly from CLI (`botai create --attach` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
-- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, and streamlined key hints. Each session tab displays its index hotkey, template name in brackets, and project name: `● <Hotkey> [<Template>] <Project>` (or `● <Hotkey> <Project>` if template name is empty). In normal state, it displays a concise right-aligned `'Ctrl+Space: Actions'` hint (omitted gracefully on narrow viewports). When the leader key is triggered (`leader_active`), it displays the focused actionable commands menu `'[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]'` in high-contrast leader styling. When no active sessions exist, it displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'`, transitioning to the active leader menu when `Ctrl+Space` is pressed.
+- **Status Bar & Project Indicators**:
+  - **Tab Structure & Semantic Indicators**: Top/bottom status bar displaying active sessions, status badges, and streamlined key hints. Each session tab displays its leading semantic status symbol (`○` Initializing, `●` Busy, `?` Waiting, `✓` Done, `✗` Error, `—` Terminated), hotkey index (1..9), template name in brackets, and project name: `  <Symbol> <Hotkey> [<Template>] <Project>  ` (falling back to `  <Symbol> <Hotkey> <Project>  ` if template is blank).
+  - **Dynamic Title Truncation (`smart_truncate_tab_title`, `MAX_TAB_WIDTH = 32`)**: Gracefully truncates template names and project names to fit within `MAX_TAB_WIDTH` (32 columns) or when horizontal space is limited, shrinking or omitting the template name first so that the active tab's project identity remains clear and prominent while omitting brackets when template names are blank.
+  - **Overflow Arrow Reservation (`◀ ` and ` ▶`)**: In `compute_visible_tab_range`, reserves 4 columns for overflow arrows whenever tabs exceed available width, ensuring tabs never clip against the right edge. Symmetrically formats right overflow indicators as `" ▶"`.
+  - **Responsive Tab Line Layout in Leader Mode**: When leader mode is active (`leader_active`), available width for tabs is computed first by subtracting the 74 columns required for the 73-character leader commands menu (`[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]`) plus trailing padding. Tabs are automatically re-windowed centered on the active tab alongside the leader menu rather than being clipped.
+  - **Responsive Key Hints**: In normal mode, displays a concise right-aligned `'Ctrl+Space: Actions'` hint when available width allows, cleanly omitting the hint on narrower viewports to maximize tab space. When no active sessions exist, it displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'`, transitioning to the active leader menu when `Ctrl+Space` is pressed.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
     - `Ctrl + Space` then `1` .. `9`: Directly switch to project session 1 to 9.
@@ -526,6 +549,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Two-Step Dialog Progression**:
     1. **Step 1: Searchable Template Selection (`CreationStep::SelectTemplate`)**:
        - **Top Filter Search Bar**: Real-time search filter powered by the reusable `TextInput` component (`Filter: <query>`), supporting in-line character cursor positioning, full readline editing keybindings (`Home`/`Ctrl+A`, `End`/`Ctrl+E`, `Left`/`Right`, `Ctrl+Left`/`Alt+B`, `Ctrl+Right`/`Alt+F`, `Backspace`, `Delete`, `Ctrl+U`, `Ctrl+K`, `Ctrl+W`), paste sanitization, and hardware terminal cursor synchronization.
+       - **Zero-Allocation In-Place Editing**: `TextInput` maintains the cursor as a 0-based Unicode character count for display rendering and test compatibility, while performing in-place `String` editing (`insert`, `remove`, `splice`) mapped via `.char_indices()`, eliminating intermediate `Vec<char>` and `String` heap allocations on every keypress and word navigation.
        - **Matching Criteria**: Strictly case-insensitive substring matching against template names only (descriptions and constituent repository names/sources are not matched).
        - **Selection Synchronization Rules**:
          - *Query Changes (typing, backspacing, pasting)*: If the currently selected template is still among the matching results, preserve its selection; otherwise reset selection to index 0 (top hit).
@@ -620,8 +644,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Structured Progress Events**: Emits sequential `ProjectDestroyEvent` events (`Step`, `Log`, `Success`, `Error`) over an `mpsc::channel` to drive the modal UI.
   - **Destruction Lifecycle Steps**:
     1. `Step [1/4]`: Executing template `pre_destroy` lifecycle hooks (streaming hook command output).
-    2. `Step [2/4]`: Validating worktrees and checking uncommitted changes (enforcing safety unless forced).
-    3. `Step [3/4]`: Removing git worktrees and pruning metadata across backing central repositories via `remove_worktree_auto`.
+    2. `Step [2/4]`: Validating worktrees and checking uncommitted changes across all child worktrees concurrently using scoped threads (`std::thread::scope`). If any worktrees have uncommitted changes and `force` is false, aborts before any deletion and aggregates all dirty repository paths into a single descriptive error.
+    3. `Step [3/4]`: Concurrently removing git worktrees and pruning metadata across backing central repositories via `remove_worktree_auto` in parallel across distinct repositories.
     4. `Step [4/4]`: Recursively deleting the project workspace directory.
   - **Rich Modal Presentation**:
     - Centered floating dialog styled with active theme colors.
@@ -661,16 +685,16 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Defaults to `"tokyo-night"` if omitted or unrecognized.
   - Theme names are normalized case-insensitively and support aliases (e.g., `"catppuccin"` / `"catppuccin-mocha"`, `"gruvbox"` / `"gruvbox-dark"`, `"monochrome"` / `"slate"` / `"minimal"`, `"ansi"` / `"default"` / `"classic"`).
 - **Supported Built-in Palettes**:
-  - **`tokyo-night`** (Default): Modern deep slate/navy chrome (`#1a1b26`), electric cyan & blue tab highlights (`#7aa2f7`), vibrant purple borders (`#bb9af7`), and warm amber gold leader mode (`#e0af68`).
-  - **`catppuccin` / `catppuccin-mocha`**: Soothing dark pastel palette (`#1e1e2e`), mauve borders (`#cba6f7`), sky blue selections (`#89dceb`), peach input highlights (`#fab387`), and crust backgrounds.
-  - **`cyberpunk` / `synthwave`**: High-contrast dark cyber aesthetic (`#0a0a0f`), hot neon magenta (`#ff007f`), electric neon cyan (`#00f0ff`), and vivid acid yellow leader indicator (`#ffe600`).
+  - **`tokyo-night`** (Default): Modern deep slate/navy chrome (`#1a1b26`), electric cyan & blue tab highlights (`#7aa2f7`), vibrant purple borders (`#bb9af7`), warm amber gold leader mode (`#e0af68`), and warm peach/orange waiting indicator (`#ff9e64`) non-colliding with active tabs.
+  - **`catppuccin` / `catppuccin-mocha`**: Soothing dark pastel palette (`#1e1e2e`), mauve borders (`#cba6f7`), sky blue selections (`#89dceb`), peach input highlights and non-colliding waiting indicator (`#fab387`), and crust backgrounds.
+  - **`cyberpunk` / `synthwave`**: High-contrast dark cyber aesthetic (`#0a0a0f`), hot neon magenta (`#ff007f`), electric neon cyan (`#00f0ff`), and vivid acid yellow leader indicator and waiting status (`#ffe600`).
   - **`gruvbox` / `gruvbox-dark`**: Warm retro earthy palette (`#282828`), rust orange active tabs (`#fe8019`), warm cream text (`#ebdbb2`), forest green selections (`#b8bb26`), and bright yellow leader mode (`#fabd2f`).
-  - **`monochrome` / `slate`**: Minimalist zinc/slate dark tones (`#18181b` / `#27272a`), ice blue accents, crisp white active text and borders (`#f4f4f5`).
-  - **`ansi` / `default`**: Standard 16-color ANSI terminal fallback palette using native terminal cyan, yellow, green, red, dark gray, and white without 24-bit TrueColor RGB definitions.
+  - **`monochrome` / `slate`**: Minimalist zinc/slate dark tones (`#18181b` / `#27272a`), crisp white active text and borders (`#f4f4f5`), high-contrast sky blue waiting status (`#0284c7`), and balanced green done status (`#16a34a`).
+  - **`ansi` / `default`**: Standard 16-color ANSI terminal fallback palette using native terminal cyan, yellow, light yellow waiting indicator, green, red, dark gray, and white without 24-bit TrueColor RGB definitions.
 - **Complete TUI Element Coverage**:
   - **Status Bar**: Background, default text, active session tab, inactive tabs, tab index numbers (1..9), leader mode indicator badge and hints.
-  - **Agent Status Indicators**: Distinct contextual theme colors applied to the leading round status dot (`●`) for Thinking / Busy (`status_busy`), Waiting for Input (`status_waiting`), Done / Idle (`status_done`), and Error / Interrupted (`status_error`), with Initializing and Terminated states rendered in `status_bar_fg`.
-  - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, and top header status bar key hints.
+  - **Agent Status Indicators**: Distinct contextual theme colors applied to semantic status glyphs (`○` Initializing, `●` Busy, `?` Waiting for Input, `✓` Done, `✗` Error, `—` Terminated), with Initializing and Terminated states rendered in `status_bar_fg`. Active tabs employ an automatic contrast guard fallback to `tab_active_fg` if the status indicator color matches `tab_active_bg`.
+  - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, top header status bar key hints, and live semantic status glyphs.
   - **Modals (Creation Modal, Setup Progress Modal & Destroy Modal)**: Dialog borders, focused input borders/prompts, placeholder text, field labels, and button/key hints.
   - **Exit & Crash Banners**: High-visibility error notification banners rendered across the bottom line upon non-zero process exits.
 
