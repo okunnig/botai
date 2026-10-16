@@ -76,6 +76,85 @@ impl<'a> TerminalView<'a> {
             return;
         }
 
+        #[cfg(feature = "kmp-terminal")]
+        if let Some((vt_cols, vt_rows, cells)) = self.vt.read_kmp_viewport() {
+            for row in 0..area.height {
+                for col in 0..area.width {
+                    let target_x = area.x + col;
+                    let target_y = area.y + row;
+
+                    if row < vt_rows && col < vt_cols {
+                        let idx = (row as usize) * (vt_cols as usize) + (col as usize);
+                        if let Some(cell) = cells.get(idx) {
+                            let mut style = Style::default();
+
+                            match cell.fg_raw() {
+                                kmp_terminal_rs::RawColor::Default => {}
+                                kmp_terminal_rs::RawColor::Indexed(idx) => {
+                                    style = style.fg(vt_color_to_ratatui(vt100::Color::Idx(idx)));
+                                }
+                                kmp_terminal_rs::RawColor::Rgb(r, g, b) => {
+                                    style = style.fg(RatatuiColor::Rgb(r, g, b));
+                                }
+                            }
+
+                            match cell.bg_raw() {
+                                kmp_terminal_rs::RawColor::Default => {}
+                                kmp_terminal_rs::RawColor::Indexed(idx) => {
+                                    style = style.bg(vt_color_to_ratatui(vt100::Color::Idx(idx)));
+                                }
+                                kmp_terminal_rs::RawColor::Rgb(r, g, b) => {
+                                    style = style.bg(RatatuiColor::Rgb(r, g, b));
+                                }
+                            }
+
+                            let attrs = cell.attrs();
+                            if attrs.bold() {
+                                style = style.add_modifier(Modifier::BOLD);
+                            }
+                            if attrs.dim() {
+                                style = style.add_modifier(Modifier::DIM);
+                            }
+                            if attrs.italic() {
+                                style = style.add_modifier(Modifier::ITALIC);
+                            }
+                            if attrs.underline() {
+                                style = style.add_modifier(Modifier::UNDERLINED);
+                            }
+                            if attrs.reverse() {
+                                style = style.add_modifier(Modifier::REVERSED);
+                            }
+
+                            if let Some(rat_cell) = buf.cell_mut((target_x, target_y)) {
+                                if attrs.wide_spacer() {
+                                    rat_cell.set_symbol("");
+                                    rat_cell.set_style(style);
+                                } else if cell.codepoint > 0 {
+                                    let s = cell.glyph();
+                                    if s.is_empty() {
+                                        rat_cell.set_char(' ');
+                                    } else {
+                                        rat_cell.set_symbol(&s);
+                                    }
+                                    rat_cell.set_style(style);
+                                } else {
+                                    rat_cell.set_char(' ');
+                                    rat_cell.set_style(style);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    if let Some(rat_cell) = buf.cell_mut((target_x, target_y)) {
+                        rat_cell.set_char(' ');
+                        rat_cell.set_style(Style::default());
+                    }
+                }
+            }
+            return;
+        }
+
         let screen = self.vt.screen();
 
         for row in 0..area.height {
