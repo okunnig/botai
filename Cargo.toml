@@ -21,7 +21,7 @@ vt100 = "0.16"
 tokio = { version = "1.38", features = ["full"] }
 # Canonicalize without a `\\?\` prefix: git rejects those as positional path arguments.
 dunce = "1.0"
-kmp-terminal-rs = { path = "../kmp-terminal/demo-rust", optional = true }
+kmp-terminal-rs = { path = "crates/kmp-terminal-rs", optional = true }
 
 [features]
 default = []

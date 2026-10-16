@@ -114,6 +114,9 @@ pub fn is_kmp_terminal_enabled() -> bool {
         if KMP_TERMINAL_OVERRIDE_SET.load(Ordering::SeqCst) {
             return KMP_TERMINAL_OVERRIDE.load(Ordering::SeqCst);
         }
+        if !kmp_terminal_rs::is_native_linked() {
+            return false;
+        }
         if let Ok(val) = std::env::var("BOTAI_KMP_TERMINAL") {
             let v = val.trim();
             if v == "0" || v.eq_ignore_ascii_case("false") {
@@ -200,9 +203,8 @@ impl VtScreen {
     /// Creates a virtual screen explicitly using the `kmp-terminal` engine.
     #[cfg(feature = "kmp-terminal")]
     pub fn new_kmp(cols: u16, rows: u16) -> Self {
-        Self {
-            parser: Parser::new(rows, cols, Self::DEFAULT_SCROLLBACK),
-            kmp: Some(KmpBackend {
+        let kmp = if kmp_terminal_rs::is_native_linked() {
+            Some(KmpBackend {
                 term: kmp_terminal_rs::Terminal::with_config(
                     i32::from(rows.max(1)),
                     i32::from(cols.max(1)),
@@ -210,7 +212,14 @@ impl VtScreen {
                     kmp_terminal_rs::Osc52Policy::AlwaysAllow,
                 ),
                 scrollback_offset: 0,
-            }),
+            })
+        } else {
+            None
+        };
+
+        Self {
+            parser: Parser::new(rows, cols, Self::DEFAULT_SCROLLBACK),
+            kmp,
         }
     }
 
@@ -621,7 +630,7 @@ mod tests {
     #[test]
     fn test_kmp_screen_text_and_contents() {
         let mut screen = VtScreen::new_kmp(80, 24);
-        assert!(screen.is_using_kmp());
+        assert_eq!(screen.is_using_kmp(), kmp_terminal_rs::is_native_linked());
         screen.process(b"Hello KMP Terminal\r\nSecond Line");
         screen.process(b"\r\n\x1b]133;A\x07Line 2 prompt > ");
         let text = screen.contents();
@@ -680,10 +689,12 @@ mod tests {
         assert_eq!(cell_second.text, "本");
 
         // Read viewport directly
-        let (cols, rows, packed_cells) = screen.read_kmp_viewport().expect("read_kmp_viewport");
-        assert_eq!(cols, 80);
-        assert_eq!(rows, 24);
-        assert!(packed_cells[1].attrs().wide_spacer());
+        if kmp_terminal_rs::is_native_linked() {
+            let (cols, rows, packed_cells) = screen.read_kmp_viewport().expect("read_kmp_viewport");
+            assert_eq!(cols, 80);
+            assert_eq!(rows, 24);
+            assert!(packed_cells[1].attrs().wide_spacer());
+        }
     }
 
     #[cfg(feature = "kmp-terminal")]
@@ -729,6 +740,9 @@ mod tests {
     #[cfg(feature = "kmp-terminal")]
     #[test]
     fn test_kmp_screen_mouse_mode() {
+        if !kmp_terminal_rs::is_native_linked() {
+            return;
+        }
         let mut screen = VtScreen::new_kmp(80, 24);
         assert!(!screen.is_mouse_mode_enabled());
         assert_eq!(screen.mouse_protocol_mode(), vt100::MouseProtocolMode::None);

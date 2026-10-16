@@ -334,6 +334,9 @@ mod tests {
     #[cfg(feature = "kmp-terminal")]
     #[test]
     fn test_terminal_view_renders_kmp_cells_styles_and_wide_chars() {
+        if !kmp_terminal_rs::is_native_linked() {
+            return;
+        }
         let mut vt = VtScreen::new_kmp(40, 10);
         vt.process("\x1b[1;3;4;7;31;44m日A\x1b[0m".as_bytes());
 

@@ -299,7 +299,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Zero-Allocation VT Cell Rendering & High-Throughput Performance**:
   - `TerminalView::render_to_buffer` renders virtual terminal cells directly from `vt100::Screen` borrowing `&str` symbols, mapping colors, and mapping SGR attributes bold, dim, italic, underline and inverse to ratatui modifiers without per-cell heap allocations, ensuring high-throughput 60FPS+ TUI rendering.
   - **Experimental `kmp-terminal` Dogfooding Integration**:
-    - **Optional Feature**: Configurable via Cargo `--features kmp-terminal`, introducing an optional dependency on `kmp-terminal-rs = { path = "../kmp-terminal/demo-rust", optional = true }`.
+    - **Optional Feature**: Configurable via Cargo `--features kmp-terminal`, introducing an optional dependency on `kmp-terminal-rs = { path = "crates/kmp-terminal-rs", optional = true }`.
     - **Dual Backend Architecture**: `VtScreen` encapsulates both `vt100::Parser` and `kmp-terminal-rs::Terminal`. Methods `screen()`, `parser()`, and `parser_mut()` remain backward-compatible, while explicit constructors `VtScreen::new_kmp(cols, rows)` and `VtScreen::new_vt100(cols, rows)` support targeted testing and deterministic engine selection.
     - **Runtime Activation & Toggle**:
       - Global CLI Flag: `--kmp-terminal` (`pub kmp_terminal: bool` on `Cli`).
