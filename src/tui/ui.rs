@@ -129,16 +129,8 @@ impl<'a> TerminalView<'a> {
                                 if attrs.wide_spacer() {
                                     rat_cell.set_symbol("");
                                     rat_cell.set_style(style);
-                                } else if cell.codepoint > 0 {
-                                    let s = cell.glyph();
-                                    if s.is_empty() {
-                                        rat_cell.set_char(' ');
-                                    } else {
-                                        rat_cell.set_symbol(&s);
-                                    }
-                                    rat_cell.set_style(style);
                                 } else {
-                                    rat_cell.set_char(' ');
+                                    rat_cell.set_char(cell.ch());
                                     rat_cell.set_style(style);
                                 }
                             }
@@ -337,5 +329,30 @@ mod tests {
         let cell_b = buffer.cell((12, 0)).expect("cell 12,0");
         assert_eq!(cell_b.symbol(), "B");
         assert!(!cell_b.modifier.contains(Modifier::DIM));
+    }
+
+    #[cfg(feature = "kmp-terminal")]
+    #[test]
+    fn test_terminal_view_renders_kmp_cells_styles_and_wide_chars() {
+        let mut vt = VtScreen::new_kmp(40, 10);
+        vt.process("\x1b[1;3;4;7;31;44m日A\x1b[0m".as_bytes());
+
+        let view = TerminalView::new(&vt);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 10));
+        view.render_to_buffer(Rect::new(0, 0, 40, 10), &mut buffer);
+
+        let cell_0 = buffer.cell((0, 0)).expect("cell 0,0");
+        assert_eq!(cell_0.symbol(), "日");
+        assert_eq!(cell_0.fg, RatatuiColor::Red);
+        assert_eq!(cell_0.bg, RatatuiColor::Blue);
+        assert!(cell_0.modifier.contains(
+            Modifier::BOLD | Modifier::ITALIC | Modifier::UNDERLINED | Modifier::REVERSED
+        ));
+
+        let cell_1 = buffer.cell((1, 0)).expect("cell 1,0 wide spacer");
+        assert_eq!(cell_1.symbol(), "");
+
+        let cell_2 = buffer.cell((2, 0)).expect("cell 2,0");
+        assert_eq!(cell_2.symbol(), "A");
     }
 }

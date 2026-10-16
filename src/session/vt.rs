@@ -95,6 +95,11 @@ pub fn set_kmp_terminal_enabled(enabled: bool) {
     KMP_TERMINAL_OVERRIDE_SET.store(true, Ordering::SeqCst);
 }
 
+/// Clears any explicit runtime override for `kmp-terminal`, restoring environment-variable or default behavior.
+pub fn clear_kmp_terminal_override() {
+    KMP_TERMINAL_OVERRIDE_SET.store(false, Ordering::SeqCst);
+}
+
 /// Returns whether the experimental `kmp-terminal` engine is currently active.
 ///
 /// Under `kmp-terminal` feature:
@@ -773,6 +778,8 @@ mod tests {
 
         set_kmp_terminal_enabled(false);
         assert!(!is_kmp_terminal_enabled());
+
+        clear_kmp_terminal_override();
     }
 
     #[test]
