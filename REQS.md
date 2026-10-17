@@ -188,9 +188,15 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Worktrees & Metadata Lifecycle**: For every selected repository in the project:
   - Executes `git worktree prune` prior to creating new worktrees to automatically clear stale worktree metadata from manually deleted directories.
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
-  - Checks out a new branch named `<project_name>`.
+  - Checks out branch `<project_name>` via `create_worktree_with_options(repo_path, worktree_path, branch_name, checkout_existing) -> Result<bool, GitError>`:
+    - **Active Worktree Collision Guard (`find_worktree_for_branch`)**: Queries `git worktree list --porcelain` (matching `branch refs/heads/<branch_name>`) before checkout. If the branch is already checked out in any active worktree, fails immediately with `GitError::BranchCheckedOut` / `ProjectError::BranchCheckedOut` regardless of `checkout_existing`.
+    - **Default Mode (`checkout_existing = false`)**: Rejects existing local branches with `BranchExists` and creates a brand-new branch `<project_name>` off the default branch (`git worktree add -b <branch_name> <path> <base_branch>`), returning `Ok(true)` (`created_new_branch = true`).
+    - **Checkout Existing Mode (`checkout_existing = true`)**: Supports hybrid multi-repo branch resolution where some repositories have the branch and others do not:
+      1. **Local Branch Exists**: Attaches the worktree directly to the existing local branch (`git worktree add <path> <branch_name>`) and returns `Ok(false)` (`created_new_branch = false`).
+      2. **Remote Branch Exists (`refs/remotes/origin/<branch_name>`)**: Creates a local branch tracking the remote branch (`git worktree add --track -b <branch_name> <path> origin/<branch_name>`) and returns `Ok(true)` (`created_new_branch = true`).
+      3. **Fallback New Branch**: If the branch exists neither locally nor on `origin`, creates a new branch from the default branch (`git worktree add -b <branch_name> <path> <base_branch>`) and returns `Ok(true)` (`created_new_branch = true`).
   - **Concurrent Worktree Checkout**: Worktrees across distinct backing repositories are checked out concurrently in parallel using scoped threads (`std::thread::scope`). Worktrees sharing the same backing repository are serialized per repository path to prevent Git index lock contention.
-  - **Thread-Safe Event Streaming & Atomic Rollback**: Progress logs and errors stream over an `mpsc::channel` to the setup sink. If any worker thread fails, all spawned threads are joined to completion before executing atomic rollback across all successfully created worktrees and newly created branches.
+  - **Thread-Safe Event Streaming & Atomic Rollback**: Progress logs and errors stream over an `mpsc::channel` to the setup sink. If any worker thread fails, all spawned threads are joined to completion before executing atomic rollback across all successfully created worktrees. Only newly created branches (`created_new_branch == true`) are deleted with `git branch -D`; pre-existing local branches checked out with `checkout_existing = true` (`created_new_branch == false`) are strictly preserved.
 - **Lifecycle Command Hooks Execution Model**:
   - **Per-Repository Setup Hooks (`setup`)**:
     - Runs in the checked-out worktree directory (`CWD/<project_name>/<repo_name>`) immediately after worktree creation.
@@ -209,8 +215,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Parallel Remote Repository Cloning & Upstream Fetching**:
     - During project workspace creation, missing remote repository cloning and upstream fetches execute concurrently in parallel across repositories using scoped threads (`std::thread::scope`).
     - Progress logs and error notifications are streamed back asynchronously to the setup progress sink, significantly reducing workspace initialization latency for multi-repo project templates.
-  - **Strict Branching Strategy**: Branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
-  - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the template repositories or if `<project_name>` directory exists.
+  - **Strict Branching Strategy**: When creating new branches, branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
+  - **Collision Prevention**: Fails with an explicit error if `<project_name>` directory exists, if branch `<project_name>` is already checked out in another worktree, or (when `checkout_existing = false`) if a local branch named `<project_name>` already exists in any of the selected template repositories.
   - **Backing Repository Auto-Discovery (`resolve_main_repo`)**: Resolves the main cached repository from any worktree directory using `git rev-parse --git-common-dir` and `.git` file (`gitdir: <path>`) fallback traversal.
   - **Clean Destruction & Metadata Pruning (`remove_worktree_auto`)**: Validates uncommitted changes (guarded unless forced) with a single deduplicated dirty check per worktree, removes worktrees directly from backing central repositories, and executes `git worktree prune` so stale `.git/worktrees/<name>` metadata entries are eliminated while preserving git branch history.
 - **Agent Execution**: Spawns a single agent CLI instance at the project root (`CWD/<project_name>`), providing access to all worktree subdirectories.
@@ -425,7 +431,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 7. CLI Commands & Lifecycle Operations
 - **Default (No Arguments)**: Launching `botai` without arguments opens the interactive TUI project switcher / dashboard.
-- **`botai create <template> <project> [--agent <agent> / -A <agent>] [--prompt <prompt> / -p <prompt>] [--include <repos>] [--exclude <repos>] [--all] [--attach / -a]`**:
+- **`botai create <template> <project> [--agent <agent> / -A <agent>] [--prompt <prompt> / -p <prompt>] [--include <repos>] [--exclude <repos>] [--all] [--checkout-existing / -e] [--attach / -a]`**:
   - Creates a new multi-repo workspace project under `CWD/<project>` from the specified template.
   - **Arguments & Flags**:
     - `template`: (Positional required String) Name of the project template defined in `config.toml`.
@@ -435,6 +441,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - `--include <repos>`: (Optional String, comma-separated or repeatable) Explicitly select repositories to include in the project, opting into repositories even if declared with `default = false` in the template configuration.
     - `--exclude <repos>`: (Optional String, comma-separated or repeatable) Explicitly deselect repositories to exclude from the project, opting out of repositories even if declared with `default = true` in the template configuration.
     - `--all`: (Optional Flag) Include all repositories configured in the template, overriding any `default = false` settings.
+    - `--checkout-existing` / `-e`: (Optional Flag) Checkout existing local or remote branches matching `<project>` instead of failing with a branch collision error (falling back to creating a new branch from the default branch in repositories where the branch does not yet exist).
     - `--attach` / `-a`: (Flag) Launch interactive TUI multiplexer immediately after project creation.
   - **Repository Selection Precedence & Conflict Validation (`resolve_cli_selected_repos`)**:
     - Evaluated upfront via `resolve_cli_selected_repos(&all_template_repos, include, exclude, all)` before initializing `ProjectBuilder` or launching TUI sessions.
@@ -502,9 +509,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Unified Backend Engine (`ProjectBuilder`)**:
   - Single, centralized project initialization pipeline in `src/project/` used across CLI `botai create` (both non-attached and attached modes), the TUI Dashboard, and In-Session project creation.
   - **Sequential Pipeline Steps**:
-    1. **Pre-Validation**: Multi-tier validation with `validate_fast` (immediate 0ms local validation of project name, template existence, empty selected repos, and CWD directory collision) and `check_branch_collisions` / `validate_detailed` (effective repository resolution and git branch collision verification strictly across effective repositories).
+    1. **Pre-Validation**: Multi-tier validation with `validate_fast` (immediate 0ms local validation of project name, template existence, empty selected repos, and CWD directory collision) and `check_branch_status` / `check_branch_collisions` / `validate_detailed` (effective repository resolution, active worktree collision detection via `find_worktree_for_branch`, and git branch collision or existing-branch informational warning verification strictly across effective repositories).
     2. **Repository Resolution & Cloning**: Resolves effective repositories (`resolve_effective_repos`), clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch only for effective repositories.
-    3. **Worktree Checkout**: Creates a git worktree checked out to branch `<project_name>` at `<project_dir>/<repo_name>` strictly for effective repositories.
+    3. **Worktree Checkout**: Creates a git worktree checked out to branch `<project_name>` at `<project_dir>/<repo_name>` strictly for effective repositories via `create_worktree_with_options`, tracking `created_new_branch: bool` for each created worktree.
     4. **Per-Repository Setup Hooks Execution**: Concurrently executes configured repository `setup` commands in parallel across active effective worktrees (sequential command execution per worktree), capturing logs and proceeding under the Warn and Continue policy upon failures.
     5. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md` documenting only effective repositories in the Repository Layout table.
     6. **Workspace Post-Creation Hooks Execution**: Runs configured template `post_create` commands sequentially at the project root directory.
@@ -512,11 +519,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Modular Execution**:
     - `resolve_cli_selected_repos`: Standalone helper resolving and validating `--include`, `--exclude`, and `--all` CLI flags against template repositories.
     - `ProjectBuilder::with_selected_repos`: Builder method configuring explicit repository selection subsets.
+    - `ProjectBuilder::with_checkout_existing`: Builder method configuring whether existing local/remote branches should be checked out instead of rejected as collisions.
     - `ProjectBuilder::resolve_effective_repos`: Resolves effective repositories based on explicit selection or `default_include` flags, returning `ProjectError::NoRepositoriesSelected` if empty or `ProjectError::RepositoryNotInTemplate` if a selected repository is not declared in the template.
     - `ProjectBuilder::create_workspace`: Executes steps 1-6 without spawning PTY, returning the canonical project path and repository mappings for effective repositories.
     - `ProjectBuilder::build`: Executes steps 1-6 via `create_workspace` and proceeds with step 7 PTY spawning for attached session workflows.
   - **Event & Progress Streaming**: Emits structured `ProjectSetupEvent` (Steps, Logs, Success, Error) consumed by CLI stdout or the TUI setup modal.
-  - **Atomic Rollback**: On any core initialization error (e.g. branch collision, clone failure, worktree creation failure, agent spawn failure), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories and deletes the project directory. (Note: Non-zero exit codes from user setup/post-create hooks log warnings and do not trigger destructive rollback).
+  - **Atomic Rollback**: On any core initialization error (e.g. branch collision, clone failure, worktree creation failure, agent spawn failure), cleanly removes any partially created worktrees using `remove_worktree_auto` in backing central repositories, deletes only branches that were newly created during the failed run (`created_new_branch == true`) while preserving pre-existing local branches (`created_new_branch == false`), and deletes the project directory. (Note: Non-zero exit codes from user setup/post-create hooks log warnings and do not trigger destructive rollback).
 - **Unified Interactive Project Creation Modal (Two-Step Flow)**:
   - Single shared modal component (`ProjectCreationModal`) utilized in both Dashboard and In-Session creation.
   - **Dynamic Configuration & Template Reloading on Modal Activation**:
@@ -537,7 +545,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
       2. **Top Divider (`Constraint::Length(1)`)**: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
       3. **Body Area (`Constraint::Min(4)`)**:
          - *Step 1*: Master-detail horizontal split (left matching templates list, right template details preview).
-         - *Step 2*: Form area rendering Project Name, Agent CLI selector, Repositories checklist, and Initial Prompt box, cleanly ending after the prompt input.
+         - *Step 2*: Form area rendering Project Name, Checkout Existing toggle, Agent CLI selector, Repositories checklist, and Initial Prompt box, cleanly ending after the prompt input.
       4. **Bottom Divider (`Constraint::Length(1)`)**:
          - *Step 1*: Full-width horizontal separator line (`─`) styled in `theme.border_unfocused`.
          - *Step 2*: Horizontal divider embedding the live pre-validation status message (`── ✗ <message> ────`, `── ℹ <message> ────`, or `── ✓ Ready to create project ────`), keeping the form body clean and anchoring validation feedback immediately above the bottom shortcuts row.
@@ -588,13 +596,17 @@ env = { PORT = "8080", NODE_ENV = "development" }
            - **Field Navigation Isolation**: Focus switching is handled exclusively by `Tab` / `Shift+Tab` or `Up` / `Down` arrows.
            - **Paste Handling**: Sanitizes pasted text by stripping newlines and inserting content at the current cursor position.
            - **Accurate Terminal Hardware Cursor**: Positions the terminal cursor at the exact column offset matching the current cursor position.
-           - **Real-Time Pre-Validation Badges**: Dynamically displays `[✓ Ready]`, `[✗ Collision]`, or `[Required]`.
+           - **Real-Time Pre-Validation Badges**: Dynamically displays `[✓ Ready]`, `[✓ Existing]` (when `checkout_existing` is enabled and existing branches will be checked out), `[✗ Collision]`, or `[Required]`.
+         - `Checkout Existing:` Interactive boolean toggle (`[x]` vs `[ ]`, defaulting to `false` / `[ ]`):
+           - Positioned between `Project Name` and `Agent CLI` in the focus cycle (`Project Name` -> `Checkout Existing` -> `Agent CLI` -> `Repositories` -> `Initial Prompt`).
+           - Toggled via `Space`, `Left`, `Right`, `h`, or `l` when focused, immediately triggering background validation (`with_checkout_existing(self.checkout_existing)`).
+           - Displays contextual hint `(existing local/remote branches will be checked out)` when enabled or `(Press Space to checkout existing branches)` when focused and disabled.
          - `Agent CLI:` Interactive tool selector (`claude`, `agy`, `copilot`, `aider`, etc. cycled via `Left`/`Right`).
          - `Repositories:` Interactive repository selection checklist:
            - **Header & Counter**: Displays `Repositories (<selected_count>/<total_count> selected • item <highlighted_idx+1>/<total_count>):` with dynamic scroll indicator badges (`▲` if scrolled down, `▼` if more items exist below).
            - **Item Presentation**: Each repository item displays an active pointer indicator (`▶ ` for the highlighted item, `  ` otherwise), checkbox state (`[x]` for included/selected, `[ ]` for excluded/unselected), repository name (bold when selected, dimmed when unselected), and an ` (optional)` tag for repositories configured with `default = false`.
            - **Initial State**: Automatically pre-populated when selecting or changing templates based on template repository configurations: repositories with `default = true` (or string syntax) are pre-checked `[x]`, and repositories with `default = false` are pre-unchecked `[ ]`.
-           - **Navigation & Boundary Isolation**: Integrated into the Step 2 field focus cycle (`Project Name` -> `Agent CLI` -> `Repositories` -> `Initial Prompt`), navigated using `Tab` / `Shift+Tab`. When `Repositories` is focused:
+           - **Navigation & Boundary Isolation**: Integrated into the Step 2 field focus cycle (`Project Name` -> `Checkout Existing` -> `Agent CLI` -> `Repositories` -> `Initial Prompt`), navigated using `Tab` / `Shift+Tab`. When `Repositories` is focused:
              - `Up` / `Down` arrows or `k` / `j` move the highlighted item up and down through the checklist.
              - **Boundary Focus Isolation**: Pressing `Up` / `k` on the first repository clamps at the top (does not eject focus to `Agent CLI`). Pressing `Down` / `j` on the last repository clamps at the bottom (does not eject focus to `Initial Prompt`). Field transitions are performed cleanly via `Tab` / `Shift+Tab`.
              - **Fast Navigation**: `PageUp` / `PageDown` jump selection by visible page height (`REPOS_VISIBLE_ROWS`); `Home` / `End` jump selection directly to the first / last repository.
@@ -605,7 +617,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
            - **Expanded Scrollable Viewport**: Height of 6 items (`REPOS_VISIBLE_ROWS = 6`). When repository count exceeds 6, the viewport scrolls smoothly to keep the active item visible, accompanied by `▲` / `▼` indicators and position tracking in the header.
            - **Real-Time Pre-Validation**: Continuously validates repository selection:
              - Fast synchronous validation: If zero repositories are selected, immediately marks the modal invalid with `"At least one repository must be selected"` and blocks form submission (`Enter`).
-             - Asynchronous branch collision validation: Asynchronous branch collision checks across template repositories are debounced with a configurable duration (default 50ms, `with_debounce_duration`). Typing bursts batch collision checks without spawning redundant OS threads or git subprocesses, only executing background checks once the user pauses typing or when explicitly flushed (`flush_validation()`). Passes only currently selected repositories (`with_selected_repos(selected_repos)`), ensuring that branch collisions in unselected/deselected repositories do not block project creation.
+             - Asynchronous branch collision validation: Asynchronous branch collision checks across template repositories are debounced with a configurable duration (default 50ms, `with_debounce_duration`). Typing bursts batch collision checks without spawning redundant OS threads or git subprocesses, only executing background checks once the user pauses typing or when explicitly flushed (`flush_validation()`). Passes only currently selected repositories (`with_selected_repos(selected_repos)`) and `with_checkout_existing(checkout_existing)`, ensuring that branch collisions in unselected/deselected repositories do not block project creation and existing branches produce informational warnings when `checkout_existing` is enabled.
           - `Initial Prompt:` Optional task instruction prompt rendered in a dedicated multi-line box (3–4 visible lines) with:
             - **Word Wrapping & Sizing**: Automatic line wrapping according to available modal width, preserving line breaks.
             - **Internal Vertical Scrolling**: Automatic vertical scrolling keeping the active line and cursor in view when text exceeds visible lines.
@@ -616,7 +628,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
             - **Accurate Terminal Cursor**: Positions the hardware terminal cursor at the corresponding wrapped line and column offset.
           - **Embedded Validation Status in Bottom Divider**: Validation feedback is embedded directly into the bottom horizontal divider line (`── ✗ <message> ────`, `── ℹ <message> ────`, or `── ✓ Ready to create project ────`) immediately above the footer hints row. The message is truncated with an ellipsis (`...`) if the available divider width is constrained, keeping the form body uncluttered and cleanly separated from the footer shortcuts.
         - **Back-Navigation**: Pressing `Esc` in Step 2 returns to Step 1 without losing configuration. Pressing `Backspace` inside editable text fields strictly performs character deletion (no-op when empty or at cursor offset 0) and never navigates away from the step.
-        - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, explicit list of selected repositories (`with_selected_repos(selected_repos)`), and optional initial prompt. The selected agent override and repository list are plumbed through `DashboardAction::CreateProject` and `CreationModalAction::Submit` directly into `start_project_creation` and `run_setup_worker` to initialize the project with exactly the chosen repositories.
+        - **Submission**: Pressing `Enter` validates inputs and transitions into the **Asynchronous Live Setup Progress & Log Modal**, spawning a background worker driving `ProjectBuilder` configured with the selected template, project name, agent tool override, explicit list of selected repositories (`with_selected_repos(selected_repos)`), `checkout_existing` flag (`with_checkout_existing(checkout_existing)`), and optional initial prompt. The selected agent override, repository list, and `checkout_existing` option are plumbed through `DashboardAction::CreateProject` and `CreationModalAction::Submit` directly into `start_project_creation_with_options` and `run_setup_worker` to initialize the project with the chosen options.
 
 ---
 
