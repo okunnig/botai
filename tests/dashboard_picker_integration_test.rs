@@ -158,11 +158,16 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
         state.handle_key(key(KeyCode::Char(c)));
     }
 
-    // Switch to agent, repositories, and then prompt input field using Tab
+    // Switch to agent, checkout existing, repositories, and then prompt input field using Tab
     state.handle_key(key(KeyCode::Tab));
     assert_eq!(
         state.creation_modal.as_ref().unwrap().focus,
         CreationFocus::Agent
+    );
+    state.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        state.creation_modal.as_ref().unwrap().focus,
+        CreationFocus::CheckoutExisting
     );
     state.handle_key(key(KeyCode::Tab));
     assert_eq!(
@@ -200,6 +205,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     assert!(modal_rendered.contains("ecommerce"));
     assert!(modal_rendered.contains("Project Name:"));
     assert!(modal_rendered.contains("stripe-subscriptions"));
+    assert!(modal_rendered.contains("Checkout Existing:"));
     assert!(modal_rendered.contains("Repositories"));
     assert!(modal_rendered.contains("checkout"));
     assert!(modal_rendered.contains("cart"));
@@ -216,6 +222,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
             agent_override: Some("claude".to_string()),
             prompt: Some("Build recurring billing engine with webhooks".to_string()),
             selected_repos: vec!["checkout".to_string(), "cart".to_string()],
+            checkout_existing: false,
         }
     );
     assert!(state.creation_modal.is_none());

@@ -16,6 +16,15 @@ pub enum GitError {
     #[error("Branch '{branch}' already exists in repository '{repo}'")]
     BranchAlreadyExists { branch: String, repo: PathBuf },
 
+    #[error(
+        "Branch '{branch}' is already checked out at '{worktree_path}' in repository '{repo}'"
+    )]
+    BranchAlreadyCheckedOut {
+        branch: String,
+        repo: PathBuf,
+        worktree_path: PathBuf,
+    },
+
     #[error("Worktree path already exists at: {0}")]
     WorktreePathExists(PathBuf),
 
@@ -49,6 +58,25 @@ pub trait WorktreeManager {
         worktree_path: &Path,
         branch_name: &str,
     ) -> Result<(), GitError>;
+
+    /// Creates a git worktree at `worktree_path` for `branch_name`.
+    /// When `checkout_existing` is true, checks out an existing local branch (returning `Ok(false)`),
+    /// tracks `origin/<branch_name>` if present (returning `Ok(true)`), or falls back to creating a
+    /// new branch off the default branch (returning `Ok(true)`).
+    fn create_worktree_with_options(
+        &self,
+        repo_path: &Path,
+        worktree_path: &Path,
+        branch_name: &str,
+        checkout_existing: bool,
+    ) -> Result<bool, GitError>;
+
+    /// Returns the worktree path if `branch_name` is currently checked out in `repo_path` or any of its worktrees.
+    fn find_worktree_for_branch(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Result<Option<PathBuf>, GitError>;
 
     /// Safely removes a git worktree at `worktree_path`.
     /// If `force` is false, returns `GitError::WorktreeDirty` if uncommitted changes exist.
@@ -167,12 +195,75 @@ impl GitWorktreeManager {
         Ok(output.status.success())
     }
 
+    /// Returns the worktree path if `branch_name` is currently checked out in `repo_path` or any of its worktrees.
+    pub fn find_worktree_for_branch(
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Result<Option<PathBuf>, GitError> {
+        ensure_git_repo(repo_path)?;
+        if branch_name.trim().is_empty() {
+            return Ok(None);
+        }
+
+        // Best-effort prune of stale worktree metadata first
+        let _ = Command::new("git")
+            .args(["worktree", "prune"])
+            .current_dir(repo_path)
+            .output();
+
+        let output = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(repo_path)
+            .output()?;
+
+        if !output.status.success() {
+            return Err(GitError::CommandFailed {
+                command: "git worktree list --porcelain".to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let target_ref = format!("refs/heads/{branch_name}");
+        let mut current_wt: Option<PathBuf> = None;
+
+        for line in stdout.lines() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() {
+                current_wt = None;
+            } else if let Some(wt_str) = line.strip_prefix("worktree ") {
+                current_wt = Some(PathBuf::from(wt_str.trim()));
+            } else if let Some(branch_ref) = line.strip_prefix("branch ") {
+                if branch_ref.trim() == target_ref {
+                    if let Some(wt) = current_wt {
+                        return Ok(Some(wt));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Creates a worktree at `worktree_path` checked out to `branch_name` branched off default branch (or upstream default branch).
     pub fn create_worktree(
         repo_path: &Path,
         worktree_path: &Path,
         branch_name: &str,
     ) -> Result<(), GitError> {
+        Self::create_worktree_with_options(repo_path, worktree_path, branch_name, false).map(|_| ())
+    }
+
+    /// Creates a worktree at `worktree_path` for `branch_name` with optional existing branch checkout.
+    ///
+    /// Returns `Ok(true)` if a new local branch (`refs/heads/<branch_name>`) was created by this call,
+    /// or `Ok(false)` if a pre-existing local branch was checked out as-is.
+    pub fn create_worktree_with_options(
+        repo_path: &Path,
+        worktree_path: &Path,
+        branch_name: &str,
+        checkout_existing: bool,
+    ) -> Result<bool, GitError> {
         ensure_git_repo(repo_path)?;
 
         // Prune stale worktree metadata in case directories were manually deleted
@@ -185,17 +276,73 @@ impl GitWorktreeManager {
             return Err(GitError::InvalidBranchName(branch_name.to_string()));
         }
 
-        if Self::branch_exists(repo_path, branch_name)? {
+        if worktree_path.exists() {
+            return Err(GitError::WorktreePathExists(worktree_path.to_path_buf()));
+        }
+
+        if let Some(existing_wt) = Self::find_worktree_for_branch(repo_path, branch_name)? {
+            return Err(GitError::BranchAlreadyCheckedOut {
+                branch: branch_name.to_string(),
+                repo: repo_path.to_path_buf(),
+                worktree_path: existing_wt,
+            });
+        }
+
+        if let Some(parent) = worktree_path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
+        if checkout_existing {
+            // Case A: Local branch exists -> checkout existing local branch as-is
+            if Self::branch_exists(repo_path, branch_name)? {
+                let output = Command::new("git")
+                    .args(["worktree", "add"])
+                    .arg(worktree_path)
+                    .arg(branch_name)
+                    .current_dir(repo_path)
+                    .output()?;
+
+                if !output.status.success() {
+                    return Err(GitError::CommandFailed {
+                        command: format!("git worktree add {worktree_path:?} {branch_name}"),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    });
+                }
+
+                return Ok(false);
+            }
+
+            // Case B: Local branch does not exist, but origin/<branch_name> exists -> track remote branch
+            let remote_ref = format!("origin/{branch_name}");
+            if Self::remote_branch_exists(repo_path, &remote_ref).unwrap_or(false) {
+                let output = Command::new("git")
+                    .args(["worktree", "add", "--track", "-b", branch_name])
+                    .arg(worktree_path)
+                    .arg(&remote_ref)
+                    .current_dir(repo_path)
+                    .output()?;
+
+                if !output.status.success() {
+                    return Err(GitError::CommandFailed {
+                        command: format!(
+                            "git worktree add --track -b {branch_name} {worktree_path:?} {remote_ref}"
+                        ),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    });
+                }
+
+                return Ok(true);
+            }
+        } else if Self::branch_exists(repo_path, branch_name)? {
             return Err(GitError::BranchAlreadyExists {
                 branch: branch_name.to_string(),
                 repo: repo_path.to_path_buf(),
             });
         }
 
-        if worktree_path.exists() {
-            return Err(GitError::WorktreePathExists(worktree_path.to_path_buf()));
-        }
-
+        // Case C (or !checkout_existing): Create new branch off default branch (or origin/<default_branch>)
         let default_branch = Self::get_default_branch(repo_path)?;
         let origin_ref = format!("origin/{default_branch}");
         let branch_target = if Self::remote_branch_exists(repo_path, &origin_ref).unwrap_or(false) {
@@ -203,12 +350,6 @@ impl GitWorktreeManager {
         } else {
             default_branch
         };
-
-        if let Some(parent) = worktree_path.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
 
         let output = Command::new("git")
             .args(["worktree", "add", "-b", branch_name])
@@ -226,7 +367,7 @@ impl GitWorktreeManager {
             });
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Safely removes a worktree. Errors if dirty unless `force` is true. Preserves the branch.
@@ -553,6 +694,24 @@ impl WorktreeManager for GitWorktreeManager {
         Self::create_worktree(repo_path, worktree_path, branch_name)
     }
 
+    fn create_worktree_with_options(
+        &self,
+        repo_path: &Path,
+        worktree_path: &Path,
+        branch_name: &str,
+        checkout_existing: bool,
+    ) -> Result<bool, GitError> {
+        Self::create_worktree_with_options(repo_path, worktree_path, branch_name, checkout_existing)
+    }
+
+    fn find_worktree_for_branch(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+    ) -> Result<Option<PathBuf>, GitError> {
+        Self::find_worktree_for_branch(repo_path, branch_name)
+    }
+
     fn remove_worktree(
         &self,
         repo_path: &Path,
@@ -609,6 +768,14 @@ pub fn remote_branch_exists(repo_path: &Path, remote_branch: &str) -> Result<boo
     GitWorktreeManager::remote_branch_exists(repo_path, remote_branch)
 }
 
+/// Module-level convenience function to find the worktree where `branch_name` is currently checked out.
+pub fn find_worktree_for_branch(
+    repo_path: &Path,
+    branch_name: &str,
+) -> Result<Option<PathBuf>, GitError> {
+    GitWorktreeManager::find_worktree_for_branch(repo_path, branch_name)
+}
+
 /// Module-level convenience function to create a worktree.
 pub fn create_worktree(
     repo_path: &Path,
@@ -616,6 +783,21 @@ pub fn create_worktree(
     branch_name: &str,
 ) -> Result<(), GitError> {
     GitWorktreeManager::create_worktree(repo_path, worktree_path, branch_name)
+}
+
+/// Module-level convenience function to create a worktree with options (`checkout_existing`).
+pub fn create_worktree_with_options(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    checkout_existing: bool,
+) -> Result<bool, GitError> {
+    GitWorktreeManager::create_worktree_with_options(
+        repo_path,
+        worktree_path,
+        branch_name,
+        checkout_existing,
+    )
 }
 
 /// Module-level convenience function to remove a worktree.
@@ -1298,5 +1480,181 @@ mod tests {
         // Deleting a branch that is not there is an error, not a silent success - callers on
         // the rollback path swallow it with `let _ =`.
         assert!(delete_branch(&repo_path, "never-existed").is_err());
+    }
+
+    #[test]
+    fn test_find_worktree_for_branch_detects_main_and_linked_worktrees() {
+        let (_temp_dir, repo_path) = init_mock_repo("main");
+
+        // "main" is checked out in the main repository
+        let main_wt = find_worktree_for_branch(&repo_path, "main")
+            .expect("find_worktree_for_branch should succeed")
+            .expect("main should be checked out");
+        assert_eq!(
+            dunce::canonicalize(&main_wt).unwrap(),
+            dunce::canonicalize(&repo_path).unwrap()
+        );
+
+        // Create a local branch that is NOT checked out anywhere
+        let status = Command::new("git")
+            .args(["branch", "unattached-branch"])
+            .current_dir(&repo_path)
+            .status()
+            .expect("git branch");
+        assert!(status.success());
+
+        assert_eq!(
+            find_worktree_for_branch(&repo_path, "unattached-branch").unwrap(),
+            None
+        );
+
+        // Create a linked worktree on "linked-branch"
+        let wt_dir = TempDir::new().unwrap();
+        let wt_path = wt_dir.path().join("linked_wt");
+        create_worktree(&repo_path, &wt_path, "linked-branch").expect("create_worktree");
+
+        let linked_wt = find_worktree_for_branch(&repo_path, "linked-branch")
+            .expect("find_worktree_for_branch")
+            .expect("linked-branch should be checked out");
+        assert_eq!(
+            dunce::canonicalize(&linked_wt).unwrap(),
+            dunce::canonicalize(&wt_path).unwrap()
+        );
+
+        // Empty branch name returns Ok(None)
+        assert_eq!(find_worktree_for_branch(&repo_path, "   ").unwrap(), None);
+    }
+
+    #[test]
+    fn test_create_worktree_with_options_checkout_existing_local_branch_preserves_commits() {
+        let (_temp_dir, repo_path) = init_mock_repo("main");
+
+        // Create a branch with an extra commit, then switch back to main
+        let wt_setup_dir = TempDir::new().unwrap();
+        let wt_setup_path = wt_setup_dir.path().join("setup_wt");
+        create_worktree(&repo_path, &wt_setup_path, "existing-local").expect("create setup wt");
+        fs::write(wt_setup_path.join("feature.txt"), "existing work\n").unwrap();
+        let _ = Command::new("git")
+            .args(["add", "feature.txt"])
+            .current_dir(&wt_setup_path)
+            .status();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "Feature commit"])
+            .current_dir(&wt_setup_path)
+            .status();
+        remove_worktree(&repo_path, &wt_setup_path, false).expect("remove setup wt");
+
+        // Now "existing-local" exists locally with "feature.txt" and is not checked out
+        let wt_dir = TempDir::new().unwrap();
+        let wt_path = wt_dir.path().join("reused_wt");
+
+        let created_new =
+            create_worktree_with_options(&repo_path, &wt_path, "existing-local", true)
+                .expect("checkout_existing should succeed for local branch");
+        assert!(
+            !created_new,
+            "Checking out pre-existing local branch must return created_new_branch = false"
+        );
+        assert!(wt_path.join("feature.txt").exists());
+        assert_eq!(
+            fs::read_to_string(wt_path.join("feature.txt"))
+                .unwrap()
+                .trim(),
+            "existing work"
+        );
+        assert_eq!(get_current_branch(&wt_path).unwrap(), "existing-local");
+    }
+
+    #[test]
+    fn test_create_worktree_with_options_checkout_existing_remote_branch() {
+        let (_origin_dir, origin_repo) = init_mock_repo("main");
+
+        // Create a branch on origin with a commit (via a temporary worktree on origin so main stays checked out)
+        let origin_wt_dir = TempDir::new().unwrap();
+        let origin_wt_path = origin_wt_dir.path().join("origin_feat_wt");
+        create_worktree(&origin_repo, &origin_wt_path, "remote-only-feat")
+            .expect("create origin feature branch");
+        fs::write(origin_wt_path.join("remote.txt"), "from origin\n").unwrap();
+        let _ = Command::new("git")
+            .args(["add", "remote.txt"])
+            .current_dir(&origin_wt_path)
+            .status();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "Remote commit"])
+            .current_dir(&origin_wt_path)
+            .status();
+        remove_worktree(&origin_repo, &origin_wt_path, false).expect("remove origin wt");
+
+        // Clone origin_repo to client_repo
+        let client_temp = TempDir::new().unwrap();
+        let client_repo = client_temp.path().join("client_repo");
+        clone_repo(&origin_repo.to_string_lossy(), &client_repo).expect("clone");
+
+        // Verify "remote-only-feat" does not exist as a local branch in client_repo, but origin/remote-only-feat exists
+        assert!(!branch_exists(&client_repo, "remote-only-feat").unwrap());
+        assert!(remote_branch_exists(&client_repo, "origin/remote-only-feat").unwrap());
+
+        let wt_path = client_temp.path().join("wt_remote_feat");
+        let created_new =
+            create_worktree_with_options(&client_repo, &wt_path, "remote-only-feat", true)
+                .expect("checkout_existing should track remote branch");
+        assert!(
+            created_new,
+            "Creating local tracking branch from remote must return created_new_branch = true"
+        );
+        assert!(wt_path.join("remote.txt").exists());
+        assert_eq!(get_current_branch(&wt_path).unwrap(), "remote-only-feat");
+        assert!(branch_exists(&client_repo, "remote-only-feat").unwrap());
+    }
+
+    #[test]
+    fn test_create_worktree_with_options_checkout_existing_fallback_new_branch() {
+        let (_temp_dir, repo_path) = init_mock_repo("main");
+        let wt_dir = TempDir::new().unwrap();
+        let wt_path = wt_dir.path().join("wt_brand_new");
+
+        let created_new =
+            create_worktree_with_options(&repo_path, &wt_path, "brand-new-branch", true)
+                .expect("checkout_existing should fall back to creating new branch");
+        assert!(
+            created_new,
+            "Fallback new branch creation must return created_new_branch = true"
+        );
+        assert!(wt_path.exists());
+        assert_eq!(get_current_branch(&wt_path).unwrap(), "brand-new-branch");
+    }
+
+    #[test]
+    fn test_create_worktree_with_options_rejects_already_checked_out_branch() {
+        let (_temp_dir, repo_path) = init_mock_repo("main");
+        let wt_dir = TempDir::new().unwrap();
+        let wt1_path = wt_dir.path().join("wt1");
+        let wt2_path = wt_dir.path().join("wt2");
+
+        create_worktree(&repo_path, &wt1_path, "active-branch").expect("create wt1");
+
+        // Even with checkout_existing = true, checking out an already checked-out branch must fail with BranchAlreadyCheckedOut
+        let err = create_worktree_with_options(&repo_path, &wt2_path, "active-branch", true)
+            .expect_err("Should fail when branch is already checked out in wt1");
+        match err {
+            GitError::BranchAlreadyCheckedOut {
+                branch,
+                repo,
+                worktree_path,
+            } => {
+                assert_eq!(branch, "active-branch");
+                assert_eq!(repo, repo_path);
+                assert_eq!(
+                    dunce::canonicalize(&worktree_path).unwrap(),
+                    dunce::canonicalize(&wt1_path).unwrap()
+                );
+            }
+            other => panic!("Expected BranchAlreadyCheckedOut, got: {other:?}"),
+        }
+
+        // Also fails when trying to check out "main" which is checked out in repo_path itself
+        let err_main = create_worktree_with_options(&repo_path, &wt2_path, "main", true)
+            .expect_err("Should fail when branch is checked out in main repo");
+        assert!(matches!(err_main, GitError::BranchAlreadyCheckedOut { .. }));
     }
 }

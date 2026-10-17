@@ -149,11 +149,13 @@ pub fn run_setup_worker(
     viewport_size: (u16, u16),
     tx: Sender<SetupProgressEvent>,
     selected_repos: Vec<String>,
+    checkout_existing: bool,
 ) {
     let (cols, rows) = viewport_size;
     let mut builder = ProjectBuilder::new(config, &template_name, &project_name)
         .with_cwd(cwd)
-        .with_viewport(cols, rows);
+        .with_viewport(cols, rows)
+        .with_checkout_existing(checkout_existing);
 
     if !selected_repos.is_empty() {
         builder = builder.with_selected_repos(selected_repos);

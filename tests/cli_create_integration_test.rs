@@ -266,3 +266,87 @@ fn test_project_builder_create_and_attach_lifecycle() {
     assert!(project_dir.join("AGENTS.md").exists());
     assert!(project_dir.join("backend").exists());
 }
+
+#[test]
+fn test_cli_create_checkout_existing_e2e() {
+    let temp_dir = TempDir::new().expect("create tempdir");
+    let repos_dir = temp_dir.path().join("repos");
+    let backend_dir = repos_dir.join("backend");
+    let frontend_dir = repos_dir.join("frontend");
+
+    create_mock_git_repo(&backend_dir, "backend");
+    create_mock_git_repo(&frontend_dir, "frontend");
+
+    // Pre-create branch "existing-feature" in backend ONLY with an extra file
+    let setup_wt = temp_dir.path().join("setup_wt");
+    botai::git::create_worktree(&backend_dir, &setup_wt, "existing-feature").unwrap();
+    fs::write(setup_wt.join("backend_feature.rs"), "pub fn work() {}\n").unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["add", "backend_feature.rs"])
+        .current_dir(&setup_wt)
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "Add backend_feature.rs"])
+        .current_dir(&setup_wt)
+        .status();
+    botai::git::remove_worktree(&backend_dir, &setup_wt, false).unwrap();
+
+    let workspace_cwd = temp_dir.path().join("workspace");
+    fs::create_dir_all(&workspace_cwd).expect("create workspace cwd");
+
+    let config_path = temp_dir.path().join("config.toml");
+    let config_content = format!(
+        r#"
+        default_agent = "claude"
+        repos_dir = "{}"
+        [templates.fullstack]
+        description = "Fullstack application stack"
+        repos = ["{}", "{}"]
+        "#,
+        repos_dir.to_string_lossy().replace('\\', "/"),
+        backend_dir.to_string_lossy().replace('\\', "/"),
+        frontend_dir.to_string_lossy().replace('\\', "/")
+    );
+    fs::write(&config_path, config_content).expect("write config");
+
+    // 1. Without -e / --checkout-existing, `botai create` must fail on branch collision
+    let mut cmd_fail = Command::cargo_bin("botai").expect("binary exists");
+    cmd_fail
+        .current_dir(&workspace_cwd)
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "create",
+            "fullstack",
+            "existing-feature",
+        ])
+        .assert()
+        .failure();
+    assert!(!workspace_cwd.join("existing-feature").exists());
+
+    // 2. With -e / --checkout-existing, `botai create` succeeds and checks out existing branch in backend
+    // while creating a new branch in frontend!
+    let mut cmd_ok = Command::cargo_bin("botai").expect("binary exists");
+    cmd_ok
+        .current_dir(&workspace_cwd)
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "create",
+            "fullstack",
+            "existing-feature",
+            "-e",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "✓ Project 'existing-feature' created successfully at",
+        ));
+
+    let project_dir = workspace_cwd.join("existing-feature");
+    assert!(project_dir
+        .join("backend")
+        .join("backend_feature.rs")
+        .exists());
+    assert!(project_dir.join("frontend").join("README.md").exists());
+}

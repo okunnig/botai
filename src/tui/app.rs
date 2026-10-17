@@ -862,14 +862,16 @@ impl TuiApp {
                     agent_override,
                     prompt,
                     selected_repos,
+                    checkout_existing,
                 } => {
                     self.creation_modal = None;
-                    self.start_project_creation(
+                    self.start_project_creation_with_options(
                         &template,
                         &project,
                         agent_override.as_deref(),
                         prompt.as_deref(),
                         selected_repos,
+                        checkout_existing,
                     );
                 }
                 CreationModalAction::None => {
@@ -943,13 +945,15 @@ impl TuiApp {
                 agent_override,
                 prompt,
                 selected_repos,
+                checkout_existing,
             } => {
-                self.start_project_creation(
+                self.start_project_creation_with_options(
                     &template,
                     &project,
                     agent_override.as_deref(),
                     prompt.as_deref(),
                     selected_repos,
+                    checkout_existing,
                 );
             }
             DashboardAction::Destroy(project) => {
@@ -1102,6 +1106,26 @@ impl TuiApp {
         prompt: Option<&str>,
         selected_repos: Vec<String>,
     ) {
+        self.start_project_creation_with_options(
+            template_name,
+            project_name,
+            agent_override,
+            prompt,
+            selected_repos,
+            false,
+        );
+    }
+
+    /// Starts asynchronous project creation with explicit options (`checkout_existing`) on a background worker thread.
+    pub fn start_project_creation_with_options(
+        &mut self,
+        template_name: &str,
+        project_name: &str,
+        agent_override: Option<&str>,
+        prompt: Option<&str>,
+        selected_repos: Vec<String>,
+        checkout_existing: bool,
+    ) {
         let _ = self.reload_config();
         let (tx, rx) = std::sync::mpsc::channel();
         let modal = SetupModalState::new(project_name, template_name, prompt.map(String::from), rx);
@@ -1136,6 +1160,7 @@ impl TuiApp {
                 viewport_size,
                 tx,
                 selected_repos,
+                checkout_existing,
             );
         });
     }
@@ -2897,6 +2922,85 @@ repos = ['{}']
         assert_eq!(active.project_name(), "override-proj");
         assert_eq!(active.agent_name(), "mock_override");
         assert_eq!(active.project_session.agent_name, "mock_override");
+    }
+
+    #[test]
+    fn test_tui_app_start_project_creation_with_checkout_existing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let repo_dir = tmp.path().join("repo_existing");
+        create_mock_git_repo(&repo_dir);
+
+        // Pre-create branch "existing-branch" with a marker file
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "-b", "existing-branch"])
+            .current_dir(&repo_dir)
+            .status();
+        std::fs::write(repo_dir.join("marker.txt"), "from existing").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "marker.txt"])
+            .current_dir(&repo_dir)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "add marker"])
+            .current_dir(&repo_dir)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "main"])
+            .current_dir(&repo_dir)
+            .status();
+
+        #[cfg(windows)]
+        let shell_cmd = "cmd.exe";
+        #[cfg(not(windows))]
+        let shell_cmd = "sh";
+
+        let config_toml = format!(
+            r#"
+default_agent = "mock"
+repos_dir = "{}/repos"
+
+[agents.mock]
+command = "{}"
+args = []
+
+[templates.test_ws]
+repos = ['{}']
+"#,
+            toml_path(&cwd),
+            shell_cmd,
+            toml_path(&repo_dir)
+        );
+        let config = Config::load_from_str(&config_toml).unwrap();
+
+        let registry = SessionRegistry::new();
+        let mut app = TuiApp::new(registry)
+            .with_config(config)
+            .with_cwd(cwd.clone());
+
+        app.start_project_creation_with_options(
+            "test_ws",
+            "existing-branch",
+            None,
+            None,
+            vec!["repo_existing".to_string()],
+            true,
+        );
+        assert!(app.setup_modal.is_some());
+
+        let start = std::time::Instant::now();
+        while app.setup_modal.is_some() && start.elapsed() < Duration::from_secs(5) {
+            app.poll_setup_progress();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(app.setup_modal.is_none());
+        assert_eq!(app.registry.len(), 1);
+        assert!(cwd
+            .join("existing-branch")
+            .join("repo_existing")
+            .join("marker.txt")
+            .exists());
     }
 
     #[test]

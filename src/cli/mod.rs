@@ -47,6 +47,10 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
 
+        /// Check out existing branches instead of failing when a branch already exists.
+        #[arg(short = 'e', long = "checkout-existing")]
+        checkout_existing: bool,
+
         /// Launch interactive TUI multiplexer immediately after project creation.
         #[arg(short, long)]
         attach: bool,
@@ -221,6 +225,7 @@ mod tests {
                 include,
                 exclude,
                 all,
+                checkout_existing,
             }) => {
                 assert_eq!(template, "ecommerce");
                 assert_eq!(project, "feature-cart");
@@ -230,7 +235,35 @@ mod tests {
                 assert_eq!(include, None);
                 assert_eq!(exclude, None);
                 assert!(!all);
+                assert!(!checkout_existing);
             }
+            _ => panic!("Expected Create command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_create_subcommand_with_checkout_existing_flags() {
+        let cli_long = Cli::try_parse_from([
+            "botai",
+            "create",
+            "ecommerce",
+            "feature-cart",
+            "--checkout-existing",
+        ])
+        .expect("Failed to parse create with --checkout-existing");
+        match cli_long.command {
+            Some(Commands::Create {
+                checkout_existing, ..
+            }) => assert!(checkout_existing),
+            _ => panic!("Expected Create command"),
+        }
+
+        let cli_short = Cli::try_parse_from(["botai", "create", "ecommerce", "feature-cart", "-e"])
+            .expect("Failed to parse create with -e");
+        match cli_short.command {
+            Some(Commands::Create {
+                checkout_existing, ..
+            }) => assert!(checkout_existing),
             _ => panic!("Expected Create command"),
         }
     }

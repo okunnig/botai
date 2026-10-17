@@ -6,8 +6,8 @@ use thiserror::Error;
 use crate::config::{Config, ConfigError, ResolvedRepo};
 use crate::context::{generate_agents_md, ContextError, ProjectContext, RepoMapping};
 use crate::git::{
-    create_worktree, delete_branch, remove_worktree_auto, GitError, GitWorktreeManager,
-    WorktreeManager,
+    create_worktree_with_options, delete_branch, remote_branch_exists, remove_worktree_auto,
+    GitError, GitWorktreeManager, WorktreeManager,
 };
 use crate::session::{ProjectSession, PtyConfig, PtySession, SessionError, VtScreen};
 
@@ -43,6 +43,15 @@ pub enum ProjectError {
 
     #[error("Branch '{branch}' already exists in repository '{repo}'")]
     BranchExists { repo: PathBuf, branch: String },
+
+    #[error(
+        "Branch '{branch}' is already checked out at '{worktree_path}' in repository '{repo}'"
+    )]
+    BranchCheckedOut {
+        repo: PathBuf,
+        branch: String,
+        worktree_path: PathBuf,
+    },
 
     #[error("Repository '{name}' does not exist locally and has no remote URL configured")]
     MissingRepository { name: String, path: PathBuf },
@@ -138,21 +147,25 @@ pub struct ProjectBuilder {
     pub template_name: String,
     pub project_name: String,
     pub selected_repos: Option<Vec<String>>,
+    pub checkout_existing: bool,
     pub agent_override: Option<String>,
     pub prompt: Option<String>,
     pub cwd: PathBuf,
     pub viewport_size: (u16, u16),
 }
 
-/// Undoes worktrees created for `project_name`, and the branches that came with them.
+/// Undoes worktrees created for `project_name`, and any new branches that were created with them.
 ///
 /// `git worktree remove` keeps the branch, so without this a failed setup leaves one behind
 /// in every repo and the next attempt at the same name fails with `BranchExists`.
+/// Pre-existing local branches (`created_new_branch == false`) are never deleted.
 /// Best effort: this runs on a path that is already failing.
-fn rollback_worktrees(mappings: &[RepoMapping], project_name: &str) {
-    for mapping in mappings {
+fn rollback_worktrees(mappings: &[(RepoMapping, bool)], project_name: &str) {
+    for (mapping, created_new_branch) in mappings {
         let _ = remove_worktree_auto(&mapping.worktree_path, true);
-        let _ = delete_branch(&mapping.original_path, project_name);
+        if *created_new_branch {
+            let _ = delete_branch(&mapping.original_path, project_name);
+        }
     }
 }
 
@@ -169,6 +182,7 @@ impl ProjectBuilder {
             template_name: template_name.into(),
             project_name: project_name.into(),
             selected_repos: None,
+            checkout_existing: false,
             agent_override: None,
             prompt: None,
             cwd,
@@ -183,6 +197,12 @@ impl ProjectBuilder {
         S: Into<String>,
     {
         self.selected_repos = Some(repos.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Sets whether to check out existing local or remote branches instead of failing on branch collision.
+    pub fn with_checkout_existing(mut self, checkout_existing: bool) -> Self {
+        self.checkout_existing = checkout_existing;
         self
     }
 
@@ -287,7 +307,8 @@ impl ProjectBuilder {
     /// - Non-empty project name
     /// - Template existence in configuration
     /// - Project directory does not already exist in CWD
-    /// - Branch `<project_name>` does not collide in any locally existing effective repositories
+    /// - Branch `<project_name>` is not already checked out in any locally existing effective repository
+    /// - When `!checkout_existing`, branch `<project_name>` does not collide in any locally existing effective repository
     pub fn validate(&self) -> Result<(), ProjectError> {
         let trimmed_name = self.project_name.trim();
         if trimmed_name.is_empty() {
@@ -308,12 +329,24 @@ impl ProjectBuilder {
 
         for repo in resolved_repos {
             if repo.exists_locally() {
-                if let Ok(exists) = git.branch_exists(&repo.local_path, trimmed_name) {
-                    if exists {
-                        return Err(ProjectError::BranchExists {
-                            repo: repo.local_path,
-                            branch: trimmed_name.to_string(),
-                        });
+                if let Ok(Some(wt_path)) =
+                    git.find_worktree_for_branch(&repo.local_path, trimmed_name)
+                {
+                    return Err(ProjectError::BranchCheckedOut {
+                        repo: repo.local_path,
+                        branch: trimmed_name.to_string(),
+                        worktree_path: wt_path,
+                    });
+                }
+
+                if !self.checkout_existing {
+                    if let Ok(exists) = git.branch_exists(&repo.local_path, trimmed_name) {
+                        if exists {
+                            return Err(ProjectError::BranchExists {
+                                repo: repo.local_path,
+                                branch: trimmed_name.to_string(),
+                            });
+                        }
                     }
                 }
             }
@@ -364,24 +397,56 @@ impl ProjectBuilder {
         validation
     }
 
-    /// Checks for git branch collisions across template repositories.
-    /// Returns a list of collision error messages.
-    pub fn check_branch_collisions(&self) -> Vec<String> {
+    /// Evaluates git branch status across effective template repositories.
+    /// Returns `(errors, warnings)`:
+    /// - If a branch is currently checked out in a worktree, returns an error regardless of `checkout_existing`.
+    /// - If `!checkout_existing` and the branch exists locally, returns a branch collision error.
+    /// - If `checkout_existing` and the branch exists locally or as `origin/<branch>`, returns an informational warning.
+    pub fn check_branch_status(&self) -> (Vec<String>, Vec<String>) {
         let trimmed_name = self.project_name.trim();
         if trimmed_name.is_empty() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
 
         let mut errors = Vec::new();
+        let mut warnings = Vec::new();
         match self.resolve_effective_repos() {
             Ok(resolved_repos) => {
                 let git = GitWorktreeManager::new();
                 for repo in resolved_repos {
                     if repo.exists_locally() {
-                        if let Ok(exists) = git.branch_exists(&repo.local_path, trimmed_name) {
-                            if exists {
+                        if let Ok(Some(wt_path)) =
+                            git.find_worktree_for_branch(&repo.local_path, trimmed_name)
+                        {
+                            errors.push(format!(
+                                "Branch '{}' is already checked out at '{}' in repository '{}'",
+                                trimmed_name,
+                                wt_path.display(),
+                                repo.name
+                            ));
+                        } else if !self.checkout_existing {
+                            if let Ok(true) = git.branch_exists(&repo.local_path, trimmed_name) {
                                 errors.push(format!(
                                     "Branch '{}' already exists in repository '{}'",
+                                    trimmed_name, repo.name
+                                ));
+                            }
+                        } else {
+                            let local_exists = git
+                                .branch_exists(&repo.local_path, trimmed_name)
+                                .unwrap_or(false);
+                            let remote_exists = if local_exists {
+                                false
+                            } else {
+                                remote_branch_exists(
+                                    &repo.local_path,
+                                    &format!("origin/{trimmed_name}"),
+                                )
+                                .unwrap_or(false)
+                            };
+                            if local_exists || remote_exists {
+                                warnings.push(format!(
+                                    "Checking out existing branch '{}' in repository '{}'",
                                     trimmed_name, repo.name
                                 ));
                             }
@@ -393,7 +458,13 @@ impl ProjectBuilder {
                 errors.push(format!("Repository resolution error: {e}"));
             }
         }
-        errors
+        (errors, warnings)
+    }
+
+    /// Checks for git branch collisions across template repositories.
+    /// Returns a list of collision error messages.
+    pub fn check_branch_collisions(&self) -> Vec<String> {
+        self.check_branch_status().0
     }
 
     /// Executes detailed pre-validation returning structured errors and warnings for TUI display.
@@ -404,27 +475,17 @@ impl ProjectBuilder {
             return validation;
         }
 
-        let resolved_repos = match self.resolve_effective_repos() {
-            Ok(repos) => repos,
-            Err(e) => {
-                validation.add_error(e.to_string());
-                return validation;
-            }
-        };
+        if let Err(e) = self.resolve_effective_repos() {
+            validation.add_error(e.to_string());
+            return validation;
+        }
 
-        let trimmed_name = self.project_name.trim();
-        let git = GitWorktreeManager::new();
-        for repo in resolved_repos {
-            if repo.exists_locally() {
-                if let Ok(exists) = git.branch_exists(&repo.local_path, trimmed_name) {
-                    if exists {
-                        validation.add_error(format!(
-                            "Branch '{}' already exists in repository '{}'",
-                            trimmed_name, repo.name
-                        ));
-                    }
-                }
-            }
+        let (errors, warnings) = self.check_branch_status();
+        for err in errors {
+            validation.add_error(err);
+        }
+        for warn in warnings {
+            validation.add_warning(warn);
         }
 
         validation
@@ -446,7 +507,20 @@ impl ProjectBuilder {
     where
         F: Fn(ProjectSetupEvent),
     {
-        let res = (|| -> anyhow::Result<(PathBuf, Vec<RepoMapping>)> {
+        let (project_dir_canon, mappings_with_flags) =
+            self.create_workspace_with_branch_flags(progress_sink)?;
+        let mappings = mappings_with_flags.into_iter().map(|(m, _)| m).collect();
+        Ok((project_dir_canon, mappings))
+    }
+
+    fn create_workspace_with_branch_flags<F>(
+        &self,
+        progress_sink: F,
+    ) -> anyhow::Result<(PathBuf, Vec<(RepoMapping, bool)>)>
+    where
+        F: Fn(ProjectSetupEvent),
+    {
+        let res = (|| -> anyhow::Result<(PathBuf, Vec<(RepoMapping, bool)>)> {
             // Step 1: Pre-validation & resolving repositories
             progress_sink(ProjectSetupEvent::Step {
                 current: 1,
@@ -555,7 +629,7 @@ impl ProjectBuilder {
 
             enum WorktreeMsg {
                 Log(String),
-                Success(usize, RepoMapping),
+                Success(usize, RepoMapping, bool),
                 Failure {
                     index: usize,
                     name: String,
@@ -565,8 +639,9 @@ impl ProjectBuilder {
             }
 
             let (tx, rx) = std::sync::mpsc::channel();
-            let mut created_mappings_indexed: Vec<(usize, RepoMapping)> = Vec::new();
+            let mut created_mappings_indexed: Vec<(usize, RepoMapping, bool)> = Vec::new();
             let mut failed_creations: Vec<(usize, String, PathBuf, GitError)> = Vec::new();
+            let checkout_existing = self.checkout_existing;
 
             std::thread::scope(|s| {
                 for repos in repo_groups.values() {
@@ -581,18 +656,23 @@ impl ProjectBuilder {
                                 worktree_path.display()
                             )));
 
-                            match create_worktree(
+                            match create_worktree_with_options(
                                 &repo.local_path,
                                 &worktree_path,
                                 trimmed_project_name,
+                                checkout_existing,
                             ) {
-                                Ok(()) => {
+                                Ok(created_new_branch) => {
                                     let mapping = RepoMapping::new(
                                         repo.name.clone(),
                                         repo.local_path.clone(),
                                         worktree_path,
                                     );
-                                    let _ = thread_tx.send(WorktreeMsg::Success(*idx, mapping));
+                                    let _ = thread_tx.send(WorktreeMsg::Success(
+                                        *idx,
+                                        mapping,
+                                        created_new_branch,
+                                    ));
                                 }
                                 Err(err) => {
                                     let _ = thread_tx.send(WorktreeMsg::Failure {
@@ -616,8 +696,8 @@ impl ProjectBuilder {
                         WorktreeMsg::Log(log) => {
                             progress_sink(ProjectSetupEvent::Log(log));
                         }
-                        WorktreeMsg::Success(idx, mapping) => {
-                            created_mappings_indexed.push((idx, mapping));
+                        WorktreeMsg::Success(idx, mapping, created_new_branch) => {
+                            created_mappings_indexed.push((idx, mapping, created_new_branch));
                         }
                         WorktreeMsg::Failure {
                             index,
@@ -632,14 +712,21 @@ impl ProjectBuilder {
             });
 
             if !failed_creations.is_empty() {
-                let created_mappings: Vec<RepoMapping> = created_mappings_indexed
-                    .into_iter()
-                    .map(|(_, m)| m)
-                    .collect();
-                rollback_worktrees(&created_mappings, trimmed_project_name);
+                let created_mappings_with_flags: Vec<(RepoMapping, bool)> =
+                    created_mappings_indexed
+                        .into_iter()
+                        .map(|(_, m, c)| (m, c))
+                        .collect();
+                rollback_worktrees(&created_mappings_with_flags, trimmed_project_name);
 
                 for (_, name, local_path, err) in &failed_creations {
-                    if !matches!(err, GitError::BranchAlreadyExists { .. }) {
+                    if !self.checkout_existing
+                        && !matches!(
+                            err,
+                            GitError::BranchAlreadyExists { .. }
+                                | GitError::BranchAlreadyCheckedOut { .. }
+                        )
+                    {
                         let _ = delete_branch(local_path, trimmed_project_name);
                     }
                     let _ = remove_worktree_auto(&project_dir_canon.join(name), true);
@@ -657,10 +744,14 @@ impl ProjectBuilder {
                 anyhow::bail!("{}", error_msgs.join("; "));
             }
 
-            created_mappings_indexed.sort_by_key(|(idx, _)| *idx);
-            let created_mappings: Vec<RepoMapping> = created_mappings_indexed
+            created_mappings_indexed.sort_by_key(|(idx, _, _)| *idx);
+            let created_mappings_with_flags: Vec<(RepoMapping, bool)> = created_mappings_indexed
                 .into_iter()
-                .map(|(_, m)| m)
+                .map(|(_, m, c)| (m, c))
+                .collect();
+            let created_mappings: Vec<RepoMapping> = created_mappings_with_flags
+                .iter()
+                .map(|(m, _)| m.clone())
                 .collect();
 
             // Step 4: Execute per-repository setup hooks in parallel across worktrees
@@ -715,13 +806,13 @@ impl ProjectBuilder {
                 template_name: self.template_name.clone(),
                 description: tpl.description.clone(),
                 agents_md_append: tpl.agents_md_append.clone(),
-                repos: created_mappings.clone(),
+                repos: created_mappings,
                 env: tpl.env.clone(),
                 initial_prompt: self.prompt.clone(),
             };
 
             if let Err(err) = generate_agents_md(&project_dir_canon, &project_context) {
-                rollback_worktrees(&created_mappings, trimmed_project_name);
+                rollback_worktrees(&created_mappings_with_flags, trimmed_project_name);
                 let _ = fs::remove_dir_all(&project_dir);
                 anyhow::bail!("Failed to generate AGENTS.md: {err}");
             }
@@ -737,7 +828,7 @@ impl ProjectBuilder {
                 });
             }
 
-            Ok((project_dir_canon, created_mappings))
+            Ok((project_dir_canon, created_mappings_with_flags))
         })();
 
         match res {
@@ -767,7 +858,8 @@ impl ProjectBuilder {
     where
         F: Fn(ProjectSetupEvent) + Send + Sync + 'static,
     {
-        let (project_dir_canon, created_mappings) = self.create_workspace(&progress_sink)?;
+        let (project_dir_canon, created_mappings_with_flags) =
+            self.create_workspace_with_branch_flags(&progress_sink)?;
 
         let tpl = self
             .config
@@ -797,7 +889,7 @@ impl ProjectBuilder {
         let pty = match PtySession::spawn(pty_config) {
             Ok(p) => p,
             Err(err) => {
-                rollback_worktrees(&created_mappings, self.project_name.trim());
+                rollback_worktrees(&created_mappings_with_flags, self.project_name.trim());
                 let _ = fs::remove_dir_all(&project_dir_canon);
                 let err_msg = format!("Failed to spawn agent process '{agent_cmd}': {err}");
                 progress_sink(ProjectSetupEvent::Log(format!("✗ Error: {err_msg}")));
@@ -3304,6 +3396,180 @@ mod tests {
         assert!(
             !project_dir.exists(),
             "project directory must be removed after forced destroy"
+        );
+    }
+
+    #[test]
+    fn test_project_builder_checkout_existing_validation_and_warnings() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_a = repos_dir.join("repo_a");
+        let repo_b = repos_dir.join("repo_b");
+        create_mock_git_repo(&repo_a);
+        create_mock_git_repo(&repo_b);
+
+        // Create branch "existing-feat" in repo_a ONLY (not checked out)
+        let _ = std::process::Command::new("git")
+            .args(["branch", "existing-feat"])
+            .current_dir(&repo_a)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.hybrid_tpl]
+            repos = ["repo_a", "repo_b"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+
+        // 1. With checkout_existing = false (default), validation fails with BranchExists
+        let builder_default = ProjectBuilder::new(config.clone(), "hybrid_tpl", "existing-feat")
+            .with_cwd(temp_dir.path());
+        assert!(!builder_default.checkout_existing);
+        assert!(matches!(
+            builder_default.validate(),
+            Err(ProjectError::BranchExists { .. })
+        ));
+        let detailed_default = builder_default.validate_detailed();
+        assert!(!detailed_default.is_valid);
+        assert!(detailed_default.errors[0].contains("already exists in repository 'repo_a'"));
+
+        // 2. With checkout_existing = true, validation succeeds with informational warning
+        let builder_existing = ProjectBuilder::new(config.clone(), "hybrid_tpl", "existing-feat")
+            .with_cwd(temp_dir.path())
+            .with_checkout_existing(true);
+        assert!(builder_existing.checkout_existing);
+        assert!(builder_existing.validate().is_ok());
+
+        let (errors, warnings) = builder_existing.check_branch_status();
+        assert!(errors.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            "Checking out existing branch 'existing-feat' in repository 'repo_a'"
+        );
+
+        let detailed_existing = builder_existing.validate_detailed();
+        assert!(detailed_existing.is_valid);
+        assert!(detailed_existing.errors.is_empty());
+        assert_eq!(detailed_existing.warnings.len(), 1);
+        assert_eq!(
+            detailed_existing.primary_message(),
+            Some("Checking out existing branch 'existing-feat' in repository 'repo_a'")
+        );
+
+        // 3. Even with checkout_existing = true, if the branch is currently checked out in a worktree (e.g. "main"),
+        // validation must fail with BranchCheckedOut!
+        let builder_checked_out = ProjectBuilder::new(config, "hybrid_tpl", "main")
+            .with_cwd(temp_dir.path())
+            .with_checkout_existing(true);
+        assert!(matches!(
+            builder_checked_out.validate(),
+            Err(ProjectError::BranchCheckedOut { .. })
+        ));
+        let detailed_checked_out = builder_checked_out.validate_detailed();
+        assert!(!detailed_checked_out.is_valid);
+        assert!(detailed_checked_out.errors[0].contains("is already checked out at"));
+    }
+
+    #[test]
+    fn test_project_builder_checkout_existing_hybrid_workspace_and_rollback_safety() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_existing = repos_dir.join("repo_existing");
+        let repo_new = repos_dir.join("repo_new");
+        create_mock_git_repo(&repo_existing);
+        create_mock_git_repo(&repo_new);
+
+        // In repo_existing, create branch "feat-34" with a custom file commit
+        let setup_wt = temp_dir.path().join("setup_wt");
+        crate::git::create_worktree(&repo_existing, &setup_wt, "feat-34").unwrap();
+        fs::write(setup_wt.join("preserved.txt"), "important work\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "preserved.txt"])
+            .current_dir(&setup_wt)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "Add preserved work"])
+            .current_dir(&setup_wt)
+            .status();
+        crate::git::remove_worktree(&repo_existing, &setup_wt, false).unwrap();
+
+        // 1. Test rollback safety when a 3rd repo fails:
+        // repo_existing has pre-existing "feat-34", repo_new creates new "feat-34", bad_repo fails.
+        let bad_repo = repos_dir.join("bad_repo");
+        fs::create_dir_all(&bad_repo).unwrap(); // Not a git repo
+
+        let fail_toml = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = '{}'
+            [templates.fail_hybrid]
+            repos = ['{}', '{}', '{}']
+            "#,
+            toml_path(&repos_dir),
+            toml_path(&repo_existing),
+            toml_path(&repo_new),
+            toml_path(&bad_repo)
+        );
+        let fail_config = Config::load_from_str(&fail_toml).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let fail_res = ProjectBuilder::new(fail_config, "fail_hybrid", "feat-34")
+            .with_cwd(&project_cwd)
+            .with_checkout_existing(true)
+            .create_workspace(|_| {});
+        assert!(fail_res.is_err(), "Should fail on bad_repo");
+
+        // Pre-existing branch in repo_existing MUST be preserved!
+        assert!(
+            crate::git::branch_exists(&repo_existing, "feat-34").unwrap(),
+            "Rollback MUST preserve pre-existing branch in repo_existing"
+        );
+        // Newly created branch in repo_new MUST be deleted by rollback!
+        assert!(
+            !crate::git::branch_exists(&repo_new, "feat-34").unwrap(),
+            "Rollback MUST delete newly created branch in repo_new"
+        );
+
+        // 2. Now test successful hybrid workspace creation with repo_existing + repo_new
+        let ok_toml = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = '{}'
+            [templates.ok_hybrid]
+            repos = ['{}', '{}']
+            "#,
+            toml_path(&repos_dir),
+            toml_path(&repo_existing),
+            toml_path(&repo_new)
+        );
+        let ok_config = Config::load_from_str(&ok_toml).unwrap();
+        let (project_dir, mappings) = ProjectBuilder::new(ok_config, "ok_hybrid", "feat-34")
+            .with_cwd(&project_cwd)
+            .with_checkout_existing(true)
+            .create_workspace(|_| {})
+            .expect("Hybrid workspace creation should succeed");
+
+        assert_eq!(mappings.len(), 2);
+        // Verify repo_existing worktree has preserved commit
+        assert!(project_dir
+            .join("repo_existing")
+            .join("preserved.txt")
+            .exists());
+        assert_eq!(
+            crate::git::get_current_branch(&project_dir.join("repo_existing")).unwrap(),
+            "feat-34"
+        );
+        // Verify repo_new worktree was branched off default branch onto feat-34
+        assert!(project_dir.join("repo_new").join("README.md").exists());
+        assert_eq!(
+            crate::git::get_current_branch(&project_dir.join("repo_new")).unwrap(),
+            "feat-34"
         );
     }
 }

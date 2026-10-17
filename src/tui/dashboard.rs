@@ -31,6 +31,7 @@ pub enum DashboardAction {
         agent_override: Option<String>,
         prompt: Option<String>,
         selected_repos: Vec<String>,
+        checkout_existing: bool,
     },
     Destroy(String),
     Quit,
@@ -335,6 +336,7 @@ impl DashboardState {
                 agent_override,
                 prompt,
                 selected_repos,
+                checkout_existing,
             } => {
                 self.creation_modal = None;
                 DashboardAction::CreateProject {
@@ -343,6 +345,7 @@ impl DashboardState {
                     agent_override,
                     prompt,
                     selected_repos,
+                    checkout_existing,
                 }
             }
             CreationModalAction::None => DashboardAction::None,
@@ -737,6 +740,7 @@ mod tests {
                 agent_override: Some("claude".to_string()),
                 prompt: None,
                 selected_repos: vec!["воркспейс-1 🚀-repo".to_string()],
+                checkout_existing: false,
             }
         );
     }
@@ -956,6 +960,7 @@ command = "claude"
             state.handle_key(key(KeyCode::Char(c)));
         }
         state.handle_key(key(KeyCode::Tab)); // switch to Agent
+        state.handle_key(key(KeyCode::Tab)); // switch to CheckoutExisting
         state.handle_key(key(KeyCode::Tab)); // switch to Repositories
         state.handle_key(key(KeyCode::Tab)); // switch to Prompt
         for c in "Deploy helm chart".chars() {
@@ -971,6 +976,7 @@ command = "claude"
                 agent_override: Some("claude".to_string()),
                 prompt: Some("Deploy helm chart".to_string()),
                 selected_repos: vec!["cloud-infra-repo".to_string()],
+                checkout_existing: false,
             }
         );
         assert!(
@@ -998,6 +1004,7 @@ command = "claude"
                 agent_override: Some("claude".to_string()),
                 prompt: None,
                 selected_repos: vec!["ws-repo".to_string()],
+                checkout_existing: false,
             }
         );
     }
@@ -1037,6 +1044,7 @@ command = "claude"
                 agent_override: Some(selected_agent),
                 prompt: None,
                 selected_repos: vec!["ws-repo".to_string()],
+                checkout_existing: false,
             }
         );
     }

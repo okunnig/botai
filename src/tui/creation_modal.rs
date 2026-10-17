@@ -41,6 +41,7 @@ pub enum CreationFocus {
     Template,
     ProjectName,
     Agent,
+    CheckoutExisting,
     Repositories,
     Prompt,
 }
@@ -63,6 +64,7 @@ pub enum CreationModalAction {
         agent_override: Option<String>,
         prompt: Option<String>,
         selected_repos: Vec<String>,
+        checkout_existing: bool,
     },
     Cancel,
 }
@@ -115,7 +117,7 @@ pub fn step2_layout(inner: Rect, has_desc: bool) -> [Rect; 5] {
 }
 
 pub const PROMPT_VISIBLE_LINES: usize = 3;
-pub const REPOS_VISIBLE_ROWS: usize = 6;
+pub const REPOS_VISIBLE_ROWS: usize = 5;
 pub const STEP1_PREVIEW_VISIBLE_LINES: usize = 15;
 
 /// A wrapped line of prompt text with its character offsets.
@@ -126,8 +128,8 @@ pub struct PromptLine {
     pub char_count: usize,
 }
 
-/// Result payload emitted by background branch validation worker: `(generation, branch_errors)`.
-pub type ValidationResult = (u64, Vec<String>);
+/// Result payload emitted by background branch validation worker: `(generation, branch_errors, branch_warnings)`.
+pub type ValidationResult = (u64, Vec<String>, Vec<String>);
 
 /// Shared receiver handle for asynchronous background validation results.
 pub type ValidationReceiver = Arc<Mutex<mpsc::Receiver<ValidationResult>>>;
@@ -147,6 +149,7 @@ pub struct ProjectCreationModal {
     pub project_name_cursor: usize,
     pub agent_list: Vec<String>,
     pub selected_agent_idx: usize,
+    pub checkout_existing: bool,
     pub repo_items: Vec<RepoSelectionItem>,
     pub selected_repo_idx: usize,
     pub repo_scroll_offset: usize,
@@ -180,6 +183,7 @@ impl Clone for ProjectCreationModal {
             project_name_cursor: self.project_name_cursor,
             agent_list: self.agent_list.clone(),
             selected_agent_idx: self.selected_agent_idx,
+            checkout_existing: self.checkout_existing,
             repo_items: self.repo_items.clone(),
             selected_repo_idx: self.selected_repo_idx,
             repo_scroll_offset: self.repo_scroll_offset,
@@ -213,6 +217,7 @@ impl PartialEq for ProjectCreationModal {
             && self.project_name_cursor == other.project_name_cursor
             && self.agent_list == other.agent_list
             && self.selected_agent_idx == other.selected_agent_idx
+            && self.checkout_existing == other.checkout_existing
             && self.repo_items == other.repo_items
             && self.selected_repo_idx == other.selected_repo_idx
             && self.repo_scroll_offset == other.repo_scroll_offset
@@ -284,6 +289,7 @@ impl ProjectCreationModal {
             project_name_cursor: 0,
             agent_list,
             selected_agent_idx,
+            checkout_existing: false,
             repo_items: Vec::new(),
             selected_repo_idx: 0,
             repo_scroll_offset: 0,
@@ -310,6 +316,19 @@ impl ProjectCreationModal {
     pub fn with_debounce_duration(mut self, duration: Duration) -> Self {
         self.validation_debounce_duration = duration;
         self
+    }
+
+    /// Sets the `checkout_existing` flag and triggers revalidation.
+    pub fn with_checkout_existing(mut self, checkout_existing: bool) -> Self {
+        self.checkout_existing = checkout_existing;
+        self.revalidate();
+        self
+    }
+
+    /// Toggles the `checkout_existing` flag and triggers revalidation.
+    pub fn toggle_checkout_existing(&mut self) {
+        self.checkout_existing = !self.checkout_existing;
+        self.revalidate();
     }
 
     /// Sets the active step.
@@ -640,7 +659,8 @@ impl ProjectCreationModal {
     pub fn next_focus(&mut self) {
         self.focus = match self.focus {
             CreationFocus::ProjectName => CreationFocus::Agent,
-            CreationFocus::Agent => CreationFocus::Repositories,
+            CreationFocus::Agent => CreationFocus::CheckoutExisting,
+            CreationFocus::CheckoutExisting => CreationFocus::Repositories,
             CreationFocus::Repositories => CreationFocus::Prompt,
             CreationFocus::Prompt => CreationFocus::ProjectName,
             CreationFocus::Template => CreationFocus::ProjectName,
@@ -652,7 +672,8 @@ impl ProjectCreationModal {
         self.focus = match self.focus {
             CreationFocus::ProjectName => CreationFocus::Prompt,
             CreationFocus::Agent => CreationFocus::ProjectName,
-            CreationFocus::Repositories => CreationFocus::Agent,
+            CreationFocus::CheckoutExisting => CreationFocus::Agent,
+            CreationFocus::Repositories => CreationFocus::CheckoutExisting,
             CreationFocus::Prompt => CreationFocus::Repositories,
             CreationFocus::Template => CreationFocus::Prompt,
         };
@@ -670,7 +691,8 @@ impl ProjectCreationModal {
         )
         .with_cwd(&self.cwd)
         .with_agent(self.selected_agent())
-        .with_selected_repos(selected_repos.clone());
+        .with_selected_repos(selected_repos.clone())
+        .with_checkout_existing(self.checkout_existing);
 
         self.validation = builder.validate_fast();
         if !self.repo_items.is_empty() && selected_repos.is_empty() {
@@ -701,8 +723,8 @@ impl ProjectCreationModal {
         ) {
             let tx = self.validation_tx.clone();
             std::thread::spawn(move || {
-                let collisions = builder.check_branch_collisions();
-                let _ = tx.send((gen, collisions));
+                let (errors, warnings) = builder.check_branch_status();
+                let _ = tx.send((gen, errors, warnings));
             });
         }
     }
@@ -719,10 +741,14 @@ impl ProjectCreationModal {
         }
 
         if let Ok(rx) = self.validation_rx.lock() {
-            while let Ok((gen, branch_errors)) = rx.try_recv() {
+            while let Ok((gen, branch_errors, branch_warnings)) = rx.try_recv() {
                 if gen == self.validation_generation && self.validation.is_valid {
                     for err in branch_errors {
                         self.validation.add_error(err);
+                        changed = true;
+                    }
+                    for warn in branch_warnings {
+                        self.validation.add_warning(warn);
                         changed = true;
                     }
                 }
@@ -1154,7 +1180,7 @@ impl ProjectCreationModal {
                         if visible_line < PROMPT_VISIBLE_LINES {
                             let repos_rows = 1 + self.repos_rendered_rows() as u16;
                             let cursor_x = body_area.x + 18 + col_idx as u16;
-                            let cursor_y = body_area.y + 2 + repos_rows + visible_line as u16;
+                            let cursor_y = body_area.y + 3 + repos_rows + visible_line as u16;
                             Some(clamp_cursor(inner, cursor_x, cursor_y))
                         } else {
                             None
@@ -1420,12 +1446,16 @@ impl ProjectCreationModal {
                         KeyCode::Left => {
                             if self.focus == CreationFocus::Agent {
                                 self.cycle_agent_prev();
+                            } else if self.focus == CreationFocus::CheckoutExisting {
+                                self.toggle_checkout_existing();
                             }
                             CreationModalAction::None
                         }
                         KeyCode::Right => {
                             if self.focus == CreationFocus::Agent {
                                 self.cycle_agent_next();
+                            } else if self.focus == CreationFocus::CheckoutExisting {
+                                self.toggle_checkout_existing();
                             }
                             CreationModalAction::None
                         }
@@ -1436,6 +1466,10 @@ impl ProjectCreationModal {
                                 } else if c == 'l' || c == 'j' {
                                     self.cycle_agent_next();
                                 }
+                            } else if self.focus == CreationFocus::CheckoutExisting
+                                && (c == ' ' || c == 'h' || c == 'l')
+                            {
+                                self.toggle_checkout_existing();
                             }
                             CreationModalAction::None
                         }
@@ -1476,7 +1510,8 @@ impl ProjectCreationModal {
             )
             .with_cwd(&self.cwd)
             .with_agent(self.selected_agent())
-            .with_selected_repos(selected_repos.clone());
+            .with_selected_repos(selected_repos.clone())
+            .with_checkout_existing(self.checkout_existing);
             self.validation = builder.validate_detailed();
             if !self.repo_items.is_empty() && selected_repos.is_empty() {
                 self.validation.is_valid = false;
@@ -1498,6 +1533,7 @@ impl ProjectCreationModal {
                     agent_override: Some(self.selected_agent().to_string()),
                     prompt,
                     selected_repos,
+                    checkout_existing: self.checkout_existing,
                 }
             } else {
                 CreationModalAction::None
@@ -1535,7 +1571,10 @@ impl ProjectCreationModal {
                 CreationFocus::Prompt => {
                     self.insert_str_prompt(text);
                 }
-                CreationFocus::Agent | CreationFocus::Repositories | CreationFocus::Template => {}
+                CreationFocus::Agent
+                | CreationFocus::CheckoutExisting
+                | CreationFocus::Repositories
+                | CreationFocus::Template => {}
             },
         }
     }
@@ -1962,6 +2001,7 @@ impl ProjectCreationModal {
 
         let proj_focused = self.focus == CreationFocus::ProjectName;
         let agent_focused = self.focus == CreationFocus::Agent;
+        let checkout_focused = self.focus == CreationFocus::CheckoutExisting;
         let repos_focused = self.focus == CreationFocus::Repositories;
         let prompt_focused = self.focus == CreationFocus::Prompt;
 
@@ -1974,6 +2014,14 @@ impl ProjectCreationModal {
         };
 
         let agent_label_style = if agent_focused {
+            Style::default()
+                .fg(theme.modal_label)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.status_bar_fg)
+        };
+
+        let checkout_label_style = if checkout_focused {
             Style::default()
                 .fg(theme.modal_label)
                 .add_modifier(Modifier::BOLD)
@@ -1999,6 +2047,7 @@ impl ProjectCreationModal {
 
         let proj_prefix = if proj_focused { "▶ " } else { "  " };
         let agent_prefix = if agent_focused { "▶ " } else { "  " };
+        let checkout_prefix = if checkout_focused { "▶ " } else { "  " };
         let repos_prefix = if repos_focused { "▶ " } else { "  " };
         let prompt_prefix = if prompt_focused { "▶ " } else { "  " };
 
@@ -2049,18 +2098,25 @@ impl ProjectCreationModal {
 
         let badge_span = if self.project_name_input.trim().is_empty() {
             Span::styled(" [Required] ", Style::default().fg(theme.input_placeholder))
-        } else if self.validation.is_valid {
+        } else if !self.validation.is_valid {
             Span::styled(
-                " [✓ Ready] ",
+                " [✗ Collision] ",
+                Style::default()
+                    .fg(theme.status_error)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if !self.validation.warnings.is_empty() {
+            Span::styled(
+                " [✓ Existing] ",
                 Style::default()
                     .fg(theme.status_done)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
             Span::styled(
-                " [✗ Collision] ",
+                " [✓ Ready] ",
                 Style::default()
-                    .fg(theme.status_error)
+                    .fg(theme.status_done)
                     .add_modifier(Modifier::BOLD),
             )
         };
@@ -2082,6 +2138,23 @@ impl ProjectCreationModal {
                     theme.input_text
                 })
                 .add_modifier(Modifier::BOLD),
+        );
+
+        // 3b. Checkout Existing Toggle
+        let checkout_box = if self.checkout_existing { "[x]" } else { "[ ]" };
+        let checkout_display = Span::styled(
+            checkout_box,
+            if checkout_focused {
+                Style::default()
+                    .fg(theme.selection_indicator)
+                    .add_modifier(Modifier::BOLD)
+            } else if self.checkout_existing {
+                Style::default()
+                    .fg(theme.status_done)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.input_placeholder)
+            },
         );
 
         // 4. Repositories Selection Checklist
@@ -2233,6 +2306,8 @@ impl ProjectCreationModal {
         // 6. Footer Hints
         let footer_text = if repos_focused {
             " [Tab] Next | [PgUp/PgDn] Page | [Space] Toggle | [A] All | [Enter] Create Project | [Esc] Back "
+        } else if checkout_focused {
+            " [Tab] Next | [Space] Toggle | [Enter] Create Project | [Esc] Back "
         } else if self.templates.len() > 1 {
             " [Tab] Next | [←/→] Agent | [Enter] Create Project | [Esc/Bksp] Back "
         } else {
@@ -2295,11 +2370,19 @@ impl ProjectCreationModal {
                 Span::styled(format!("{agent_prefix}Agent CLI: "), agent_label_style),
                 agent_display,
             ]),
-            // Line 2: Repositories header
+            // Line 2: Checkout Existing
+            Line::from(vec![
+                Span::styled(
+                    format!("{checkout_prefix}Checkout Existing: "),
+                    checkout_label_style,
+                ),
+                checkout_display,
+            ]),
+            // Line 3: Repositories header
             Line::from(repos_header_spans),
         ];
 
-        // Lines 3..: repo_row_lines (checklist items)
+        // Lines 4..: repo_row_lines (checklist items)
         body_lines.extend(repo_row_lines);
 
         // Lines prompt: prompt_row_spans
@@ -2327,7 +2410,7 @@ impl ProjectCreationModal {
                     )
                 } else {
                     (
-                        " ✓ ",
+                        " ℹ ",
                         Style::default()
                             .fg(theme.status_done)
                             .add_modifier(Modifier::BOLD),
@@ -2520,6 +2603,10 @@ mod tests {
         modal.handle_key(key(KeyCode::Right));
         assert_ne!(modal.selected_agent(), &initial_agent);
 
+        // Tab to CheckoutExisting
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::CheckoutExisting);
+
         // Tab to Repositories
         modal.handle_key(key(KeyCode::Tab));
         assert_eq!(modal.focus, CreationFocus::Repositories);
@@ -2543,12 +2630,14 @@ mod tests {
                 agent_override,
                 prompt,
                 selected_repos,
+                checkout_existing,
             } => {
                 assert_eq!(template, "ecommerce");
                 assert_eq!(project, "feat-pay");
                 assert!(agent_override.is_some());
                 assert_eq!(prompt.as_deref(), Some("Do task"));
                 assert!(!selected_repos.is_empty());
+                assert!(!checkout_existing);
             }
             other => panic!("Expected Submit action, got: {other:?}"),
         }
@@ -3359,16 +3448,19 @@ mod tests {
         modal.prompt_input = "fix bug".to_string();
         modal.prompt_cursor = 7;
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(38, 10)));
+        assert_eq!(pos, Some(Position::new(38, 11)));
 
         modal.prompt_cursor = 0;
         let pos = modal.cursor_position(area);
-        assert_eq!(pos, Some(Position::new(31, 10)));
+        assert_eq!(pos, Some(Position::new(31, 11)));
 
         modal.focus = CreationFocus::Template;
         assert_eq!(modal.cursor_position(area), None);
 
         modal.focus = CreationFocus::Agent;
+        assert_eq!(modal.cursor_position(area), None);
+
+        modal.focus = CreationFocus::CheckoutExisting;
         assert_eq!(modal.cursor_position(area), None);
     }
 
@@ -4143,9 +4235,12 @@ mod tests {
         modal.step = CreationStep::ConfigureDetails;
         assert_eq!(modal.focus, CreationFocus::ProjectName);
 
-        // Forward tab cycle: ProjectName -> Agent -> Repositories -> Prompt -> ProjectName
+        // Forward tab cycle: ProjectName -> Agent -> CheckoutExisting -> Repositories -> Prompt -> ProjectName
         modal.handle_key(key(KeyCode::Tab));
         assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::Tab));
+        assert_eq!(modal.focus, CreationFocus::CheckoutExisting);
 
         modal.handle_key(key(KeyCode::Tab));
         assert_eq!(modal.focus, CreationFocus::Repositories);
@@ -4156,7 +4251,7 @@ mod tests {
         modal.handle_key(key(KeyCode::Tab));
         assert_eq!(modal.focus, CreationFocus::ProjectName);
 
-        // Backward backtab cycle: ProjectName -> Prompt -> Repositories -> Agent -> ProjectName
+        // Backward backtab cycle: ProjectName -> Prompt -> Repositories -> CheckoutExisting -> Agent -> ProjectName
         modal.handle_key(key(KeyCode::BackTab));
         assert_eq!(modal.focus, CreationFocus::Prompt);
 
@@ -4164,14 +4259,20 @@ mod tests {
         assert_eq!(modal.focus, CreationFocus::Repositories);
 
         modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::CheckoutExisting);
+
+        modal.handle_key(key(KeyCode::BackTab));
         assert_eq!(modal.focus, CreationFocus::Agent);
 
         modal.handle_key(key(KeyCode::BackTab));
         assert_eq!(modal.focus, CreationFocus::ProjectName);
 
-        // Arrow navigation: Down from ProjectName -> Agent -> Repositories -> Prompt
+        // Arrow navigation: Down from ProjectName -> Agent -> CheckoutExisting -> Repositories -> Prompt
         modal.handle_key(key(KeyCode::Down));
         assert_eq!(modal.focus, CreationFocus::Agent);
+
+        modal.handle_key(key(KeyCode::Down));
+        assert_eq!(modal.focus, CreationFocus::CheckoutExisting);
 
         modal.handle_key(key(KeyCode::Down));
         assert_eq!(modal.focus, CreationFocus::Repositories);
@@ -4206,8 +4307,12 @@ mod tests {
         assert_eq!(modal.selected_repo_idx, 0);
         assert_eq!(modal.focus, CreationFocus::Repositories);
 
-        // BackTab moves to Agent
+        // BackTab moves to CheckoutExisting
         modal.handle_key(key(KeyCode::BackTab));
+        assert_eq!(modal.focus, CreationFocus::CheckoutExisting);
+
+        // From CheckoutExisting, Up moves to Agent
+        modal.handle_key(key(KeyCode::Up));
         assert_eq!(modal.focus, CreationFocus::Agent);
 
         // From Agent, Up moves to ProjectName
@@ -4428,28 +4533,32 @@ mod tests {
         assert_eq!(modal.selected_repo_idx, 0);
         assert_eq!(modal.repo_scroll_offset, 0);
 
-        // Move down past REPOS_VISIBLE_ROWS (6)
-        for i in 1..=5 {
+        // Move down within REPOS_VISIBLE_ROWS (5): idx 0..=4 keep scroll_offset = 0
+        for i in 1..=4 {
             modal.handle_key(key(KeyCode::Down));
             assert_eq!(modal.selected_repo_idx, i);
             assert_eq!(modal.repo_scroll_offset, 0);
         }
 
-        modal.handle_key(key(KeyCode::Down)); // idx 6, scroll 1 (visible: idx 1..=6)
-        assert_eq!(modal.selected_repo_idx, 6);
+        modal.handle_key(key(KeyCode::Down)); // idx 5, scroll 1 (visible: idx 1..=5)
+        assert_eq!(modal.selected_repo_idx, 5);
         assert_eq!(modal.repo_scroll_offset, 1);
 
-        modal.handle_key(key(KeyCode::Down)); // idx 7, scroll 2 (visible: idx 2..=7)
-        assert_eq!(modal.selected_repo_idx, 7);
+        modal.handle_key(key(KeyCode::Down)); // idx 6, scroll 2 (visible: idx 2..=6)
+        assert_eq!(modal.selected_repo_idx, 6);
         assert_eq!(modal.repo_scroll_offset, 2);
 
-        modal.handle_key(key(KeyCode::Down)); // idx 8, scroll 3 (visible: idx 3..=8)
-        assert_eq!(modal.selected_repo_idx, 8);
+        modal.handle_key(key(KeyCode::Down)); // idx 7, scroll 3 (visible: idx 3..=7)
+        assert_eq!(modal.selected_repo_idx, 7);
         assert_eq!(modal.repo_scroll_offset, 3);
 
-        modal.handle_key(key(KeyCode::Down)); // idx 9, scroll 4 (visible: idx 4..=9)
-        assert_eq!(modal.selected_repo_idx, 9);
+        modal.handle_key(key(KeyCode::Down)); // idx 8, scroll 4 (visible: idx 4..=8)
+        assert_eq!(modal.selected_repo_idx, 8);
         assert_eq!(modal.repo_scroll_offset, 4);
+
+        modal.handle_key(key(KeyCode::Down)); // idx 9, scroll 5 (visible: idx 5..=9)
+        assert_eq!(modal.selected_repo_idx, 9);
+        assert_eq!(modal.repo_scroll_offset, 5);
 
         // Render in buffer and verify content and scroll indicator
         let area = Rect::new(0, 0, 80, 24);
@@ -4469,12 +4578,16 @@ mod tests {
         assert!(rendered.contains("repo10"));
         assert!(rendered.contains("▲")); // Indicates items above can be scrolled to
 
-        // Move back up
-        for i in (4..=8).rev() {
+        // Move back up within visible window (idx 8..=5 keep scroll_offset = 5)
+        for i in (5..=8).rev() {
             modal.handle_key(key(KeyCode::Up));
             assert_eq!(modal.selected_repo_idx, i);
-            assert_eq!(modal.repo_scroll_offset, 4);
+            assert_eq!(modal.repo_scroll_offset, 5);
         }
+
+        modal.handle_key(key(KeyCode::Up)); // idx 4, scroll 4
+        assert_eq!(modal.selected_repo_idx, 4);
+        assert_eq!(modal.repo_scroll_offset, 4);
 
         modal.handle_key(key(KeyCode::Up)); // idx 3, scroll 3
         assert_eq!(modal.selected_repo_idx, 3);
@@ -4714,20 +4827,20 @@ mod tests {
         assert_eq!(modal.selected_repo_idx, 0);
         assert_eq!(modal.repo_scroll_offset, 0);
 
-        // PageDown jumps by REPOS_VISIBLE_ROWS (6)
+        // PageDown jumps by REPOS_VISIBLE_ROWS (5)
         modal.handle_key(key(KeyCode::PageDown));
-        assert_eq!(modal.selected_repo_idx, 6);
+        assert_eq!(modal.selected_repo_idx, 5);
         assert_eq!(modal.repo_scroll_offset, 1);
 
         // End jumps to last item (9)
         modal.handle_key(key(KeyCode::End));
         assert_eq!(modal.selected_repo_idx, 9);
-        assert_eq!(modal.repo_scroll_offset, 4);
+        assert_eq!(modal.repo_scroll_offset, 5);
 
-        // PageUp jumps up by 6 (to 3)
+        // PageUp jumps up by 5 (to 4)
         modal.handle_key(key(KeyCode::PageUp));
-        assert_eq!(modal.selected_repo_idx, 3);
-        assert_eq!(modal.repo_scroll_offset, 3);
+        assert_eq!(modal.selected_repo_idx, 4);
+        assert_eq!(modal.repo_scroll_offset, 4);
 
         // Home jumps to first item (0)
         modal.handle_key(key(KeyCode::Home));
@@ -4939,5 +5052,100 @@ mod tests {
             .clone()
             .with_debounce_duration(Duration::from_millis(456));
         assert_ne!(modal, different_duration);
+
+        let different_checkout = modal.clone().with_checkout_existing(true);
+        assert_ne!(modal, different_checkout);
+    }
+
+    #[test]
+    fn test_checkout_existing_toggle_keys_and_live_validation() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo_dir = temp_dir.path().join("service_checkout");
+        init_mock_repo(&repo_dir);
+
+        // Create pre-existing local branch "existing-feat"
+        let _ = std::process::Command::new("git")
+            .args(["branch", "existing-feat"])
+            .current_dir(&repo_dir)
+            .status();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+            [templates.checkout_tpl]
+            repos = ["{}"]
+            "#,
+            toml_path(temp_dir.path()),
+            toml_path(&repo_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let mut modal = ProjectCreationModal::new(&config, temp_dir.path(), Some("checkout_tpl"));
+        modal.step = CreationStep::ConfigureDetails;
+        modal.set_project_name("existing-feat");
+
+        // 1. With checkout_existing = false (default), validation fails with branch collision
+        modal.flush_validation();
+        let start = Instant::now();
+        while modal.validation.is_valid && start.elapsed() < Duration::from_secs(3) {
+            modal.poll_validation();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!modal.validation.is_valid);
+
+        // 2. Focus CheckoutExisting and toggle via Space -> becomes true, validation passes with warning
+        modal.focus = CreationFocus::CheckoutExisting;
+        modal.handle_key(key(KeyCode::Char(' ')));
+        assert!(modal.checkout_existing);
+
+        modal.flush_validation();
+        let start = Instant::now();
+        while modal.validation.warnings.is_empty() && start.elapsed() < Duration::from_secs(3) {
+            modal.poll_validation();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(modal.validation.is_valid);
+        assert!(modal.validation.errors.is_empty());
+        assert_eq!(modal.validation.warnings.len(), 1);
+        assert!(modal.validation.warnings[0].contains("Checking out existing branch"));
+
+        // 3. Render Step 2 and verify [✓ Existing] badge, Checkout Existing: [x], and ℹ warning divider
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+        modal.render_modal(area, &mut buf, &theme);
+        let text = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(text.contains("Checkout Existing: [x]"));
+        assert!(text.contains("[✓ Existing]"));
+        assert!(text.contains("Checking out existing branch 'existing-feat'"));
+
+        // 4. Test Left, Right, 'h', 'l' keys toggle checkout_existing
+        modal.handle_key(key(KeyCode::Left));
+        assert!(!modal.checkout_existing);
+        modal.handle_key(key(KeyCode::Right));
+        assert!(modal.checkout_existing);
+        modal.handle_key(key(KeyCode::Char('h')));
+        assert!(!modal.checkout_existing);
+        modal.handle_key(key(KeyCode::Char('l')));
+        assert!(modal.checkout_existing);
+
+        // 5. Submit with checkout_existing = true
+        let act = modal.handle_key(key(KeyCode::Enter));
+        match act {
+            CreationModalAction::Submit {
+                project,
+                checkout_existing,
+                ..
+            } => {
+                assert_eq!(project, "existing-feat");
+                assert!(checkout_existing);
+            }
+            other => panic!("Expected Submit with checkout_existing=true, got: {other:?}"),
+        }
     }
 }
