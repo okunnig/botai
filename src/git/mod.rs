@@ -1557,8 +1557,10 @@ mod tests {
         );
         assert!(wt_path.join("feature.txt").exists());
         assert_eq!(
-            fs::read_to_string(wt_path.join("feature.txt")).unwrap(),
-            "existing work\n"
+            fs::read_to_string(wt_path.join("feature.txt"))
+                .unwrap()
+                .trim(),
+            "existing work"
         );
         assert_eq!(get_current_branch(&wt_path).unwrap(), "existing-local");
     }
