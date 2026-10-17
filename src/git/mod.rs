@@ -1560,10 +1560,7 @@ mod tests {
             fs::read_to_string(wt_path.join("feature.txt")).unwrap(),
             "existing work\n"
         );
-        assert_eq!(
-            get_current_branch(&wt_path).unwrap(),
-            "existing-local"
-        );
+        assert_eq!(get_current_branch(&wt_path).unwrap(), "existing-local");
     }
 
     #[test]
@@ -1604,10 +1601,7 @@ mod tests {
             "Creating local tracking branch from remote must return created_new_branch = true"
         );
         assert!(wt_path.join("remote.txt").exists());
-        assert_eq!(
-            get_current_branch(&wt_path).unwrap(),
-            "remote-only-feat"
-        );
+        assert_eq!(get_current_branch(&wt_path).unwrap(), "remote-only-feat");
         assert!(branch_exists(&client_repo, "remote-only-feat").unwrap());
     }
 
@@ -1625,10 +1619,7 @@ mod tests {
             "Fallback new branch creation must return created_new_branch = true"
         );
         assert!(wt_path.exists());
-        assert_eq!(
-            get_current_branch(&wt_path).unwrap(),
-            "brand-new-branch"
-        );
+        assert_eq!(get_current_branch(&wt_path).unwrap(), "brand-new-branch");
     }
 
     #[test]

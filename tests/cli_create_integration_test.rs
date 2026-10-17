@@ -350,4 +350,3 @@ fn test_cli_create_checkout_existing_e2e() {
         .exists());
     assert!(project_dir.join("frontend").join("README.md").exists());
 }
-

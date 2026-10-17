@@ -266,6 +266,7 @@ repos = ["cloud_service"]
         agent_override: Some("mock_agent".to_string()),
         prompt: Some("Initialize API endpoints".to_string()),
         selected_repos: vec!["cloud_service".to_string()],
+        checkout_existing: false,
     });
 
     assert!(app.setup_modal.is_some());
@@ -349,6 +350,7 @@ repos = ["cloud_service"]
         agent_override: Some("mock_custom".to_string()),
         prompt: None,
         selected_repos: vec!["cloud_service".to_string()],
+        checkout_existing: false,
     });
 
     let start = std::time::Instant::now();

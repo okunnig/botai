@@ -44,7 +44,9 @@ pub enum ProjectError {
     #[error("Branch '{branch}' already exists in repository '{repo}'")]
     BranchExists { repo: PathBuf, branch: String },
 
-    #[error("Branch '{branch}' is already checked out at '{worktree_path}' in repository '{repo}'")]
+    #[error(
+        "Branch '{branch}' is already checked out at '{worktree_path}' in repository '{repo}'"
+    )]
     BranchCheckedOut {
         repo: PathBuf,
         branch: String,
@@ -327,7 +329,9 @@ impl ProjectBuilder {
 
         for repo in resolved_repos {
             if repo.exists_locally() {
-                if let Ok(Some(wt_path)) = git.find_worktree_for_branch(&repo.local_path, trimmed_name) {
+                if let Ok(Some(wt_path)) =
+                    git.find_worktree_for_branch(&repo.local_path, trimmed_name)
+                {
                     return Err(ProjectError::BranchCheckedOut {
                         repo: repo.local_path,
                         branch: trimmed_name.to_string(),

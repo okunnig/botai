@@ -258,9 +258,8 @@ mod tests {
             _ => panic!("Expected Create command"),
         }
 
-        let cli_short =
-            Cli::try_parse_from(["botai", "create", "ecommerce", "feature-cart", "-e"])
-                .expect("Failed to parse create with -e");
+        let cli_short = Cli::try_parse_from(["botai", "create", "ecommerce", "feature-cart", "-e"])
+            .expect("Failed to parse create with -e");
         match cli_short.command {
             Some(Commands::Create {
                 checkout_existing, ..
