@@ -52,6 +52,7 @@ fn main() -> Result<()> {
             include,
             exclude,
             all,
+            checkout_existing,
         }) => {
             let all_repos = config.resolve_template_repos(&template)?;
             let selected_repos = resolve_cli_selected_repos(
@@ -68,6 +69,7 @@ fn main() -> Result<()> {
                 prompt.as_deref(),
                 attach,
                 selected_repos,
+                checkout_existing,
             )
         }
         Some(Commands::Sync { template }) => cmd_sync(&config, template.as_deref()),
@@ -197,7 +199,8 @@ fn run_default_dashboard(config: &Config, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `botai create <template> <project> [--agent <agent>] [--prompt <prompt>] [--include <repos>] [--exclude <repos>] [--all] [--attach]`
+/// `botai create <template> <project> [--agent <agent>] [--prompt <prompt>] [--include <repos>] [--exclude <repos>] [--all] [--checkout-existing] [--attach]`
+#[allow(clippy::too_many_arguments)]
 fn cmd_create(
     config: &Config,
     template_name: &str,
@@ -206,6 +209,7 @@ fn cmd_create(
     prompt: Option<&str>,
     attach: bool,
     selected_repos: Vec<String>,
+    checkout_existing: bool,
 ) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current working directory")?;
     let (term_cols, term_rows) = terminal_viewport();
@@ -213,7 +217,8 @@ fn cmd_create(
     let mut builder = ProjectBuilder::new(config.clone(), template_name, project_name)
         .with_cwd(cwd.clone())
         .with_viewport(term_cols, term_rows)
-        .with_selected_repos(selected_repos);
+        .with_selected_repos(selected_repos)
+        .with_checkout_existing(checkout_existing);
 
     if let Some(agent) = agent_override {
         builder = builder.with_agent(agent);
