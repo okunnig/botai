@@ -4,12 +4,14 @@ use anyhow::{bail, Context, Result};
 use std::env;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use botai::cli::{resolve_cli_selected_repos, Cli, Commands};
 use botai::config::Config;
 use botai::project::{ProjectBuilder, ProjectSetupEvent};
-use botai::session::{ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen};
+use botai::session::{
+    ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen, DEFAULT_VIEWPORT,
+};
 use botai::tui::{DashboardState, TuiApp};
 
 fn main() -> Result<()> {
@@ -35,8 +37,7 @@ fn main() -> Result<()> {
         Config::load_from_file(&config_path)
             .with_context(|| format!("Failed to load configuration from {config_path:?}"))?
     } else {
-        Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-            .context("Failed to load fallback configuration")?
+        Config::default()
     };
 
     match cli.command {
@@ -207,9 +208,7 @@ fn cmd_create(
     selected_repos: Vec<String>,
 ) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current working directory")?;
-    let (term_cols, term_rows) = crossterm::terminal::size()
-        .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
-        .unwrap_or((100, 30));
+    let (term_cols, term_rows) = terminal_viewport();
 
     let mut builder = ProjectBuilder::new(config.clone(), template_name, project_name)
         .with_cwd(cwd.clone())
@@ -272,16 +271,7 @@ fn cmd_create(
         .build(progress_sink)
         .with_context(|| format!("Failed to create project '{project_name}'"))?;
 
-    let mut registry = SessionRegistry::new();
-    registry.add(ps, pty, vt)?;
-
-    let mut app = TuiApp::new(registry)
-        .with_config(config.clone())
-        .with_cwd(cwd);
-    let mut stdout = io::stdout();
-    app.run(&mut stdout)?;
-
-    Ok(())
+    run_tui(config, cwd, ps, pty, vt)
 }
 
 /// `botai attach <project>`
@@ -306,9 +296,7 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
         .get_agent(agent_name)
         .with_context(|| format!("Agent '{agent_name}' not found"))?;
 
-    let (term_cols, term_rows) = crossterm::terminal::size()
-        .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
-        .unwrap_or((100, 30));
+    let (term_cols, term_rows) = terminal_viewport();
 
     let mut pty_config = PtyConfig::new(&agent.command, &project_dir)
         .with_args(agent.args.clone())
@@ -334,6 +322,24 @@ fn cmd_attach(config: &Config, project_name: &str) -> Result<()> {
         agent_name,
     );
 
+    run_tui(config, cwd, ps, pty, vt)
+}
+
+/// Returns the terminal size available to a PTY session, reserving one row for the status bar.
+fn terminal_viewport() -> (u16, u16) {
+    crossterm::terminal::size()
+        .map(|(c, r)| (c, r.saturating_sub(1).max(1)))
+        .unwrap_or(DEFAULT_VIEWPORT)
+}
+
+/// Registers a single session and runs the TUI multiplexer until exit.
+fn run_tui(
+    config: &Config,
+    cwd: PathBuf,
+    ps: ProjectSession,
+    pty: PtySession,
+    vt: VtScreen,
+) -> Result<()> {
     let mut registry = SessionRegistry::new();
     registry.add(ps, pty, vt)?;
 

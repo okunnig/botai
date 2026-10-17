@@ -116,7 +116,7 @@ fn test_integration_destroy_confirmation_modal_lifecycle() {
     while start.elapsed() < Duration::from_secs(5) {
         app.poll_destroy_progress();
         if let Some(modal) = &app.destroy_progress_modal {
-            if modal.is_finished {
+            if modal.progress.is_finished {
                 break;
             }
         }
@@ -405,7 +405,7 @@ repos = ["nonexistent-repo-that-does-not-exist"]
     while start.elapsed() < Duration::from_secs(5) {
         app.poll_setup_progress();
         if let Some(modal) = &app.setup_modal {
-            if modal.is_finished {
+            if modal.progress.is_finished {
                 break;
             }
         }
@@ -414,8 +414,8 @@ repos = ["nonexistent-repo-that-does-not-exist"]
 
     assert!(app.setup_modal.is_some(), "Modal must remain open on error");
     let modal = app.setup_modal.as_ref().unwrap();
-    assert!(modal.is_finished);
-    assert!(modal.error.is_some());
+    assert!(modal.progress.is_finished);
+    assert!(modal.progress.error.is_some());
 
     // Render the error modal
     let area = Rect::new(0, 0, 100, 30);
@@ -541,7 +541,7 @@ pre_destroy = [
     while start.elapsed() < Duration::from_secs(5) {
         app.poll_destroy_progress();
         if let Some(modal) = &app.destroy_progress_modal {
-            if modal.is_finished {
+            if modal.progress.is_finished {
                 break;
             }
         }
@@ -553,10 +553,10 @@ pre_destroy = [
         "Modal remains open upon completion"
     );
     let modal = app.destroy_progress_modal.as_ref().unwrap();
-    assert!(modal.is_finished);
+    assert!(modal.progress.is_finished);
     assert!(modal.is_success);
-    assert!(modal.error.is_none());
-    assert_eq!(modal.current_step, 4);
+    assert!(modal.progress.error.is_none());
+    assert_eq!(modal.progress.current_step, 4);
 
     // Render the finished modal
     let area = Rect::new(0, 0, 100, 30);
@@ -582,19 +582,31 @@ pre_destroy = [
     };
     app.handle_destroy_progress_modal_mouse(scroll_up);
     assert_eq!(
-        app.destroy_progress_modal.as_ref().unwrap().scroll_offset,
+        app.destroy_progress_modal
+            .as_ref()
+            .unwrap()
+            .progress
+            .scroll_offset,
         3
     );
 
     // Test key scrolling
     app.handle_destroy_progress_modal_key(key(KeyCode::Up));
     assert_eq!(
-        app.destroy_progress_modal.as_ref().unwrap().scroll_offset,
+        app.destroy_progress_modal
+            .as_ref()
+            .unwrap()
+            .progress
+            .scroll_offset,
         4
     );
     app.handle_destroy_progress_modal_key(key(KeyCode::Down));
     assert_eq!(
-        app.destroy_progress_modal.as_ref().unwrap().scroll_offset,
+        app.destroy_progress_modal
+            .as_ref()
+            .unwrap()
+            .progress
+            .scroll_offset,
         3
     );
 
@@ -640,7 +652,7 @@ fn test_integration_async_project_destroy_error_retention_and_dismissal() {
     while start.elapsed() < Duration::from_secs(5) {
         app.poll_destroy_progress();
         if let Some(modal) = &app.destroy_progress_modal {
-            if modal.is_finished {
+            if modal.progress.is_finished {
                 break;
             }
         }
@@ -648,9 +660,9 @@ fn test_integration_async_project_destroy_error_retention_and_dismissal() {
     }
 
     let modal = app.destroy_progress_modal.as_ref().unwrap();
-    assert!(modal.is_finished);
+    assert!(modal.progress.is_finished);
     assert!(!modal.is_success);
-    assert!(modal.error.is_some());
+    assert!(modal.progress.error.is_some());
 
     // Render error modal
     let area = Rect::new(0, 0, 100, 30);
