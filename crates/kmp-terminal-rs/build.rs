@@ -17,6 +17,14 @@ fn has_any_lib(dir: &Path) -> bool {
     has_static_lib(dir) || has_shared_lib(dir)
 }
 
+fn gradle_target_name(target_dir_name: &str) -> String {
+    let mut chars = target_dir_name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(kmp_terminal_linked)");
     println!("cargo:rerun-if-env-changed=KMP_TERMINAL_LIB_DIR");
@@ -62,11 +70,19 @@ fn main() {
                 target_dir_name
             )),
             manifest_dir.join(format!(
+                "../../../kmp-terminal-emulator/terminal-core/build/bin/{}/releaseStatic",
+                target_dir_name
+            )),
+            manifest_dir.join(format!(
                 "../terminal-core/build/bin/{}/debugStatic",
                 target_dir_name
             )),
             manifest_dir.join(format!(
                 "../../../kmp-terminal/terminal-core/build/bin/{}/debugStatic",
+                target_dir_name
+            )),
+            manifest_dir.join(format!(
+                "../../../kmp-terminal-emulator/terminal-core/build/bin/{}/debugStatic",
                 target_dir_name
             )),
             manifest_dir.join(format!(
@@ -78,11 +94,19 @@ fn main() {
                 target_dir_name
             )),
             manifest_dir.join(format!(
+                "../../../kmp-terminal-emulator/terminal-core/build/bin/{}/releaseShared",
+                target_dir_name
+            )),
+            manifest_dir.join(format!(
                 "../terminal-core/build/bin/{}/debugShared",
                 target_dir_name
             )),
             manifest_dir.join(format!(
                 "../../../kmp-terminal/terminal-core/build/bin/{}/debugShared",
+                target_dir_name
+            )),
+            manifest_dir.join(format!(
+                "../../../kmp-terminal-emulator/terminal-core/build/bin/{}/debugShared",
                 target_dir_name
             )),
         ];
@@ -103,12 +127,6 @@ fn main() {
     if resolved_lib_dir.is_none() || !has_any_lib(resolved_lib_dir.as_ref().unwrap()) {
         if let Ok(out_dir_str) = env::var("OUT_DIR") {
             let out_dir = PathBuf::from(out_dir_str);
-            let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".to_string());
-            let default_url = format!(
-                "https://github.com/JohNan/kmp-terminal-emulator/releases/download/v{}/libterminal_core-{}.a",
-                pkg_version, target_dir_name
-            );
-            let release_url = env::var("KMP_TERMINAL_RELEASE_URL").unwrap_or(default_url);
             let download_dest = out_dir.join("libterminal_core.a");
 
             if download_dest.exists()
@@ -119,38 +137,51 @@ fn main() {
             {
                 resolved_lib_dir = Some(out_dir);
             } else {
-                eprintln!(
-                    "Attempting to download libterminal_core from {} to {}",
-                    release_url,
-                    download_dest.display()
-                );
-                let status = Command::new("curl")
-                    .args([
-                        "-fsSL",
-                        "--connect-timeout",
-                        "10",
-                        "--max-time",
-                        "60",
-                        &release_url,
-                        "-o",
-                    ])
-                    .arg(download_dest.as_os_str())
-                    .status();
-                if status.map(|s| s.success()).unwrap_or(false)
-                    && download_dest.exists()
-                    && download_dest
-                        .metadata()
-                        .map(|m| m.len() > 0)
-                        .unwrap_or(false)
-                {
-                    resolved_lib_dir = Some(out_dir);
-                } else if download_dest.exists()
-                    && download_dest
-                        .metadata()
-                        .map(|m| m.len() == 0)
-                        .unwrap_or(false)
-                {
-                    let _ = std::fs::remove_file(&download_dest);
+                let candidate_urls = if let Ok(custom_url) = env::var("KMP_TERMINAL_RELEASE_URL") {
+                    vec![custom_url]
+                } else {
+                    vec![
+                        format!(
+                            "https://github.com/JohNan/kmp-terminal-emulator/releases/latest/download/libterminal_core-{}.a",
+                            target_dir_name
+                        ),
+                        format!(
+                            "https://github.com/JohNan/kmp-terminal-emulator/releases/download/v1.0.1/libterminal_core-{}.a",
+                            target_dir_name
+                        ),
+                    ]
+                };
+
+                for release_url in candidate_urls {
+                    eprintln!(
+                        "Attempting to download libterminal_core from {} to {}",
+                        release_url,
+                        download_dest.display()
+                    );
+                    let status = Command::new("curl")
+                        .args([
+                            "-fsSL",
+                            "--connect-timeout",
+                            "10",
+                            "--max-time",
+                            "60",
+                            &release_url,
+                            "-o",
+                        ])
+                        .arg(download_dest.as_os_str())
+                        .status();
+                    if status.map(|s| s.success()).unwrap_or(false)
+                        && download_dest.exists()
+                        && download_dest
+                            .metadata()
+                            .map(|m| m.len() > 0)
+                            .unwrap_or(false)
+                    {
+                        resolved_lib_dir = Some(out_dir);
+                        break;
+                    } else if download_dest.exists() {
+                        let _ = std::fs::remove_file(&download_dest);
+                    }
                 }
             }
         }
@@ -196,6 +227,13 @@ fn main() {
             println!("cargo:rerun-if-changed={}", shared_archive.display());
         }
     } else {
-        println!("cargo:warning=libterminal_core not found; building kmp-terminal-rs with stub fallback (kmp_terminal_linked not set)");
+        let gradle_task = format!(
+            ":terminal-core:linkReleaseStatic{}",
+            gradle_target_name(target_dir_name)
+        );
+        println!(
+            "cargo:warning=libterminal_core not found; building kmp-terminal-rs with stub fallback (kmp_terminal_linked not set). Build it with './gradlew {}' in kmp-terminal or set KMP_TERMINAL_LIB_DIR",
+            gradle_task
+        );
     }
 }
