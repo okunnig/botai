@@ -138,7 +138,7 @@ fn main() {
                 resolved_lib_dir = Some(out_dir);
             } else {
                 let pkg_version =
-                    env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "1.0.1".to_string());
+                    env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "1.0.3".to_string());
                 let candidate_urls = if let Ok(custom_url) = env::var("KMP_TERMINAL_RELEASE_URL") {
                     vec![custom_url]
                 } else {

@@ -1,6 +1,6 @@
 [package]
 name = "kmp-terminal-rs"
-version = "1.0.1"
+version = "1.0.3"
 edition = "2021"
 build = "build.rs"
 
