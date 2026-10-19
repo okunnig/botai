@@ -76,6 +76,77 @@ impl<'a> TerminalView<'a> {
             return;
         }
 
+        #[cfg(feature = "kmp-terminal")]
+        if let Some((vt_cols, vt_rows, cells)) = self.vt.read_kmp_viewport() {
+            for row in 0..area.height {
+                for col in 0..area.width {
+                    let target_x = area.x + col;
+                    let target_y = area.y + row;
+
+                    if row < vt_rows && col < vt_cols {
+                        let idx = (row as usize) * (vt_cols as usize) + (col as usize);
+                        if let Some(cell) = cells.get(idx) {
+                            let mut style = Style::default();
+
+                            match cell.fg_raw() {
+                                kmp_terminal_rs::RawColor::Default => {}
+                                kmp_terminal_rs::RawColor::Indexed(idx) => {
+                                    style = style.fg(vt_color_to_ratatui(vt100::Color::Idx(idx)));
+                                }
+                                kmp_terminal_rs::RawColor::Rgb(r, g, b) => {
+                                    style = style.fg(RatatuiColor::Rgb(r, g, b));
+                                }
+                            }
+
+                            match cell.bg_raw() {
+                                kmp_terminal_rs::RawColor::Default => {}
+                                kmp_terminal_rs::RawColor::Indexed(idx) => {
+                                    style = style.bg(vt_color_to_ratatui(vt100::Color::Idx(idx)));
+                                }
+                                kmp_terminal_rs::RawColor::Rgb(r, g, b) => {
+                                    style = style.bg(RatatuiColor::Rgb(r, g, b));
+                                }
+                            }
+
+                            let attrs = cell.attrs();
+                            if attrs.bold() {
+                                style = style.add_modifier(Modifier::BOLD);
+                            }
+                            if attrs.dim() {
+                                style = style.add_modifier(Modifier::DIM);
+                            }
+                            if attrs.italic() {
+                                style = style.add_modifier(Modifier::ITALIC);
+                            }
+                            if attrs.underline() {
+                                style = style.add_modifier(Modifier::UNDERLINED);
+                            }
+                            if attrs.reverse() {
+                                style = style.add_modifier(Modifier::REVERSED);
+                            }
+
+                            if let Some(rat_cell) = buf.cell_mut((target_x, target_y)) {
+                                if attrs.wide_spacer() {
+                                    rat_cell.set_symbol("");
+                                    rat_cell.set_style(style);
+                                } else {
+                                    rat_cell.set_char(cell.ch());
+                                    rat_cell.set_style(style);
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    if let Some(rat_cell) = buf.cell_mut((target_x, target_y)) {
+                        rat_cell.set_char(' ');
+                        rat_cell.set_style(Style::default());
+                    }
+                }
+            }
+            return;
+        }
+
         let screen = self.vt.screen();
 
         for row in 0..area.height {
@@ -258,5 +329,33 @@ mod tests {
         let cell_b = buffer.cell((12, 0)).expect("cell 12,0");
         assert_eq!(cell_b.symbol(), "B");
         assert!(!cell_b.modifier.contains(Modifier::DIM));
+    }
+
+    #[cfg(feature = "kmp-terminal")]
+    #[test]
+    fn test_terminal_view_renders_kmp_cells_styles_and_wide_chars() {
+        if !kmp_terminal_rs::is_native_linked() {
+            return;
+        }
+        let mut vt = VtScreen::new_kmp(40, 10);
+        vt.process("\x1b[1;3;4;7;31;44m日A\x1b[0m".as_bytes());
+
+        let view = TerminalView::new(&vt);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 10));
+        view.render_to_buffer(Rect::new(0, 0, 40, 10), &mut buffer);
+
+        let cell_0 = buffer.cell((0, 0)).expect("cell 0,0");
+        assert_eq!(cell_0.symbol(), "日");
+        assert_eq!(cell_0.fg, RatatuiColor::Red);
+        assert_eq!(cell_0.bg, RatatuiColor::Blue);
+        assert!(cell_0.modifier.contains(
+            Modifier::BOLD | Modifier::ITALIC | Modifier::UNDERLINED | Modifier::REVERSED
+        ));
+
+        let cell_1 = buffer.cell((1, 0)).expect("cell 1,0 wide spacer");
+        assert_eq!(cell_1.symbol(), "");
+
+        let cell_2 = buffer.cell((2, 0)).expect("cell 2,0");
+        assert_eq!(cell_2.symbol(), "A");
     }
 }

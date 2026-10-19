@@ -6,7 +6,10 @@ pub mod vt;
 pub use pty::{ExitStatus, PtyConfig, PtySession, PtySize, PtyWaker};
 pub use registry::{SessionEntry, SessionRegistry};
 pub use state::{ProjectSession, SessionState, SessionStatus};
-pub use vt::{DsrResponder, VtCell, VtScreen};
+pub use vt::{
+    clear_kmp_terminal_override, is_kmp_terminal_enabled, set_kmp_terminal_enabled, DsrResponder,
+    VtCell, VtScreen,
+};
 
 use std::path::PathBuf;
 use thiserror::Error;
