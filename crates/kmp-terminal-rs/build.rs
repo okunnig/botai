@@ -137,6 +137,8 @@ fn main() {
             {
                 resolved_lib_dir = Some(out_dir);
             } else {
+                let pkg_version =
+                    env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "1.0.1".to_string());
                 let candidate_urls = if let Ok(custom_url) = env::var("KMP_TERMINAL_RELEASE_URL") {
                     vec![custom_url]
                 } else {
@@ -146,8 +148,8 @@ fn main() {
                             target_dir_name
                         ),
                         format!(
-                            "https://github.com/JohNan/kmp-terminal-emulator/releases/download/v1.0.1/libterminal_core-{}.a",
-                            target_dir_name
+                            "https://github.com/JohNan/kmp-terminal-emulator/releases/download/v{}/libterminal_core-{}.a",
+                            pkg_version, target_dir_name
                         ),
                     ]
                 };
