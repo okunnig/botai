@@ -790,6 +790,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **License Uniformity**:
   - `LICENSE` file contains the canonical MIT License text.
   - `README.md` hero badges and documentation sections reference MIT licensing uniformly.
+- **Documentation & User Onboarding**:
+  - `README.md` includes CI status badge, verified platform support anchors, and installation options (Cargo git install, pre-built GitHub release binaries, and source build).
 - **Git & Build Reproducibility**:
   - Binary applications commit `Cargo.lock` to guarantee deterministic builds across environments.
   - `.gitignore` permits `Cargo.lock` tracking and omits `Cargo.lock` from ignore patterns.

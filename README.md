@@ -7,6 +7,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/okunnig/botai/actions/workflows/ci.yml"><img src="https://github.com/okunnig/botai/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2021_Edition-orange.svg?logo=rust&style=flat-square" alt="Rust 2021" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License" /></a>
   <a href="#platform-support"><img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg?style=flat-square" alt="Platform Support" /></a>
@@ -56,9 +57,33 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
 
 ## Quick Start
 
+<a id="platform-support"></a>
+### Platform Support
+
+`botai` is engineered for seamless cross-platform performance with zero external multiplexer dependencies (no `tmux` or `zellij` required):
+- **Linux**: Full PTY terminal multiplexing via POSIX `forkpty` and `termios`.
+- **macOS**: Native support across Apple Silicon (`aarch64`) and Intel (`x86_64`).
+- **Windows**: Native Windows Console Pseudo-console (ConPTY) support on Windows 10/11.
+
+---
+
 ### Installation
 
-Ensure [Rust 1.74+](https://www.rust-lang.org/tools/install) is installed, then clone and install the binary:
+#### Option 1: Direct Install via Cargo (Recommended)
+
+Install directly from Git into `~/.cargo/bin`:
+
+```bash
+cargo install --git https://github.com/okunnig/botai.git
+```
+
+#### Option 2: Pre-compiled Release Binaries
+
+Download pre-compiled release binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/okunnig/botai/releases). Extract the binary and place it in your `$PATH`.
+
+#### Option 3: Build from Source
+
+Ensure [Rust 1.74+](https://www.rust-lang.org/tools/install) is installed:
 
 ```bash
 # Clone the repository
