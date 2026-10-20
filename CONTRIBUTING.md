@@ -4,12 +4,6 @@ Thank you for your interest in contributing to `botai`! We welcome contributions
 
 ---
 
-## Code of Conduct
-
-All contributors and participants are expected to adhere to our [Code of Conduct](CODE_OF_CONDUCT.md). Please read it before participating.
-
----
-
 ## Development Prerequisites
 
 - **Rust**: Version 1.74 or later (stable channel). You can install or update Rust using [rustup](https://rustup.rs/):
