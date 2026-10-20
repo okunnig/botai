@@ -775,7 +775,32 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Pre-release status: Evaluated from hybrid detection (checkbox or tag hyphen).
     - Attached assets: Linux `.tar.gz`, macOS `.tar.gz`, Windows `.zip`, and combined `SHA256SUMS`.
 
+---
 
-
-
+## 15. Open Source Community Standards, Packaging & CI Integrity
+- **Cargo Manifest Metadata (`Cargo.toml`)**:
+  - Full package metadata configured for repository distribution:
+    - `publish`: Set to `false` (`publish = false`) to explicitly prevent accidental publication to crates.io.
+    - `license`: Explicitly specifies `MIT`.
+    - `repository`: Points to GitHub source repository (`https://github.com/okunnig/botai`).
+    - `homepage`: Points to repository homepage (`https://github.com/okunnig/botai`).
+    - `readme`: Specifies `README.md`.
+    - `keywords`: Tagged with relevant keywords (`tui`, `multiplexer`, `git-worktree`, `developer-tools`, `ai-agents`).
+    - `categories`: Categorized under `["command-line-utilities", "development-tools"]`.
+- **License Uniformity**:
+  - `LICENSE` file contains the canonical MIT License text.
+  - `README.md` hero badges and documentation sections reference MIT licensing uniformly.
+- **Git & Build Reproducibility**:
+  - Binary applications commit `Cargo.lock` to guarantee deterministic builds across environments.
+  - `.gitignore` permits `Cargo.lock` tracking and omits `Cargo.lock` from ignore patterns.
+- **Continuous Integration (`.github/workflows/ci.yml`)**:
+  - Executes comprehensive test suites, clippy, formatting, and unsafe code audit on both pull requests targeting `main` and direct pushes to `main`.
+- **Community Health & Security Standards**:
+  - `CONTRIBUTING.md`: Development environment setup, formatting, clippy lint checks, unsafe code prohibition guidelines, and PR workflow.
+  - `SECURITY.md`: Security vulnerability reporting instructions and policy.
+  - `CODE_OF_CONDUCT.md`: Contributor Covenant code of conduct.
+  - Issue & Pull Request Templates:
+    - `.github/ISSUE_TEMPLATE/bug_report.yml`
+    - `.github/ISSUE_TEMPLATE/feature_request.yml`
+    - `.github/pull_request_template.md`
 

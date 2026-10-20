@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2021_Edition-orange.svg?logo=rust&style=flat-square" alt="Rust 2021" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg?style=flat-square" alt="License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License" /></a>
   <a href="#platform-support"><img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg?style=flat-square" alt="Platform Support" /></a>
 </p>
 
@@ -265,3 +265,9 @@ repos = [
 | **`gruvbox`** | Warm retro earthy palette with rust orange active tabs and forest green badges. |
 | **`monochrome`** | Clean, minimalist zinc/slate dark tones with crisp white borders. |
 | **`ansi`** | Universal 16-color ANSI terminal fallback without 24-bit TrueColor requirements. |
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

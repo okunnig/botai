@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 authors = ["botai team"]
 description = "A cross-platform multi-repo workspace orchestrator and session multiplexer for AI agent workflows"
+publish = false
+license = "MIT"
+repository = "https://github.com/okunnig/botai"
+homepage = "https://github.com/okunnig/botai"
+readme = "README.md"
+keywords = ["tui", "multiplexer", "git-worktree", "developer-tools", "ai-agents"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
