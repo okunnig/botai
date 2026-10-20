@@ -795,9 +795,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `.gitignore` permits `Cargo.lock` tracking and omits `Cargo.lock` from ignore patterns.
 - **Continuous Integration (`.github/workflows/ci.yml`)**:
   - Executes comprehensive test suites, clippy, formatting, and unsafe code audit on both pull requests targeting `main` and direct pushes to `main`.
-- **Community Health Standards**:
+- **Community Health & Vulnerability Reporting**:
   - `CONTRIBUTING.md`: Development environment setup, formatting, clippy lint checks, unsafe code prohibition guidelines, and PR workflow.
-  - `SECURITY.md`: Security vulnerability reporting instructions and policy.
+  - Security disclosures are handled via GitHub native Private Vulnerability Reporting.
   - Issue & Pull Request Templates:
     - `.github/ISSUE_TEMPLATE/bug_report.yml`
     - `.github/ISSUE_TEMPLATE/feature_request.yml`
