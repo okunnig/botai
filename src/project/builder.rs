@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::config::{Config, ConfigError, ResolvedRepo};
@@ -172,7 +172,7 @@ impl ProjectBuilder {
             agent_override: None,
             prompt: None,
             cwd,
-            viewport_size: (100, 30),
+            viewport_size: crate::session::DEFAULT_VIEWPORT,
         }
     }
 
@@ -242,15 +242,7 @@ impl ProjectBuilder {
     /// for known agents (`agy`, `aider`, `claude`, `copilot`).
     pub fn resolve_agent_command(&self) -> (String, Vec<String>, HashMap<String, String>) {
         let agent_name = self.resolved_agent_name();
-        let (cmd, base_args, env) = if let Some(agent) = self.config.get_agent(&agent_name) {
-            (agent.command.clone(), agent.args.clone(), agent.env.clone())
-        } else {
-            #[cfg(windows)]
-            let default_shell = "cmd.exe".to_string();
-            #[cfg(not(windows))]
-            let default_shell = "sh".to_string();
-            (default_shell, Vec::new(), HashMap::new())
-        };
+        let (cmd, base_args, env) = self.config.agent_launch(&agent_name);
 
         let adapted_args = adapt_agent_args(&agent_name, &base_args, self.prompt.as_deref());
         (cmd, adapted_args, env)
@@ -690,57 +682,14 @@ impl ProjectBuilder {
                         let wt_path = worktree_path.clone();
 
                         s.spawn(move || {
+                            let labels = HookLabels {
+                                running: &format!("setup hook for '{repo_name}'"),
+                                result: &format!("Setup hook for '{repo_name}'"),
+                            };
                             for cmd in setup_hooks {
-                                if cmd.is_empty() {
-                                    continue;
-                                }
-                                let prog = &cmd[0];
-                                let args = &cmd[1..];
-                                let cmd_display = cmd.join(" ");
-                                let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                    "Running setup hook for '{repo_name}': {cmd_display}"
-                                )));
-
-                                let mut command = prepare_hook_command(prog, args);
-                                command.current_dir(&wt_path);
-                                for (k, v) in tpl_env {
-                                    command.env(k, v);
-                                }
-                                for (k, v) in repo_env {
-                                    command.env(k, v);
-                                }
-
-                                match command.output() {
-                                    Ok(output) => {
-                                        if !output.status.success() {
-                                            let exit_code = output
-                                                .status
-                                                .code()
-                                                .map(|c| c.to_string())
-                                                .unwrap_or_else(|| "signal".to_string());
-                                            let stderr_snippet =
-                                                String::from_utf8_lossy(&output.stderr);
-                                            let trimmed_err = stderr_snippet.trim();
-                                            let msg = if trimmed_err.is_empty() {
-                                                format!("exit code {exit_code}")
-                                            } else {
-                                                format!("exit code {exit_code}: {trimmed_err}")
-                                            };
-                                            let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                                "⚠ Warning: Setup hook for '{repo_name}' failed: {msg}"
-                                            )));
-                                        } else {
-                                            let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                                "✓ Setup hook for '{repo_name}' completed: {cmd_display}"
-                                            )));
-                                        }
-                                    }
-                                    Err(err) => {
-                                        let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                            "⚠ Warning: Setup hook for '{repo_name}' failed: {err}"
-                                        )));
-                                    }
-                                }
+                                run_hook(cmd, &wt_path, &[tpl_env, repo_env], &labels, |msg| {
+                                    let _ = thread_tx.send(ProjectSetupEvent::Log(msg));
+                                });
                             }
                         });
                     }
@@ -778,53 +727,14 @@ impl ProjectBuilder {
             }
 
             // Step 6: Execute template post_create hooks sequentially at project root
+            let labels = HookLabels {
+                running: "post_create hook",
+                result: "Post-create hook",
+            };
             for cmd in &tpl.post_create {
-                if cmd.is_empty() {
-                    continue;
-                }
-                let prog = &cmd[0];
-                let args = &cmd[1..];
-                let cmd_display = cmd.join(" ");
-                progress_sink(ProjectSetupEvent::Log(format!(
-                    "Running post_create hook: {cmd_display}"
-                )));
-
-                let mut command = prepare_hook_command(prog, args);
-                command.current_dir(&project_dir_canon);
-                for (k, v) in &tpl.env {
-                    command.env(k, v);
-                }
-
-                match command.output() {
-                    Ok(output) => {
-                        if !output.status.success() {
-                            let exit_code = output
-                                .status
-                                .code()
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| "signal".to_string());
-                            let stderr_snippet = String::from_utf8_lossy(&output.stderr);
-                            let trimmed_err = stderr_snippet.trim();
-                            let msg = if trimmed_err.is_empty() {
-                                format!("exit code {exit_code}")
-                            } else {
-                                format!("exit code {exit_code}: {trimmed_err}")
-                            };
-                            progress_sink(ProjectSetupEvent::Log(format!(
-                                "⚠ Warning: Post-create hook failed: {msg}"
-                            )));
-                        } else {
-                            progress_sink(ProjectSetupEvent::Log(format!(
-                                "✓ Post-create hook completed: {cmd_display}"
-                            )));
-                        }
-                    }
-                    Err(err) => {
-                        progress_sink(ProjectSetupEvent::Log(format!(
-                            "⚠ Warning: Post-create hook failed: {err}"
-                        )));
-                    }
-                }
+                run_hook(cmd, &project_dir_canon, &[&tpl.env], &labels, |msg| {
+                    progress_sink(ProjectSetupEvent::Log(msg))
+                });
             }
 
             Ok((project_dir_canon, created_mappings))
@@ -1011,54 +921,14 @@ where
         if let Some(cfg) = config {
             if let Some(tpl_name) = extract_template_name_from_agents_md(&project_dir) {
                 if let Some(tpl) = cfg.get_template(&tpl_name) {
+                    let labels = HookLabels {
+                        running: "pre_destroy hook",
+                        result: "Pre-destroy hook",
+                    };
                     for cmd in &tpl.pre_destroy {
-                        if cmd.is_empty() {
-                            continue;
-                        }
-                        ran_hooks = true;
-                        let prog = &cmd[0];
-                        let args = &cmd[1..];
-                        let cmd_display = cmd.join(" ");
-                        progress_sink(ProjectDestroyEvent::Log(format!(
-                            "Running pre_destroy hook: {cmd_display}"
-                        )));
-
-                        let mut command = prepare_hook_command(prog, args);
-                        command.current_dir(&project_dir);
-                        for (k, v) in &tpl.env {
-                            command.env(k, v);
-                        }
-
-                        match command.output() {
-                            Ok(output) => {
-                                if !output.status.success() {
-                                    let exit_code = output
-                                        .status
-                                        .code()
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "signal".to_string());
-                                    let stderr_snippet = String::from_utf8_lossy(&output.stderr);
-                                    let trimmed_err = stderr_snippet.trim();
-                                    let msg = if trimmed_err.is_empty() {
-                                        format!("exit code {exit_code}")
-                                    } else {
-                                        format!("exit code {exit_code}: {trimmed_err}")
-                                    };
-                                    progress_sink(ProjectDestroyEvent::Log(format!(
-                                        "⚠ Warning: Pre-destroy hook failed: {msg}"
-                                    )));
-                                } else {
-                                    progress_sink(ProjectDestroyEvent::Log(format!(
-                                        "✓ Pre-destroy hook completed: {cmd_display}"
-                                    )));
-                                }
-                            }
-                            Err(err) => {
-                                progress_sink(ProjectDestroyEvent::Log(format!(
-                                    "⚠ Warning: Pre-destroy hook failed: {err}"
-                                )));
-                            }
-                        }
+                        ran_hooks |= run_hook(cmd, &project_dir, &[&tpl.env], &labels, |msg| {
+                            progress_sink(ProjectDestroyEvent::Log(msg))
+                        });
                     }
                 }
             }
@@ -1326,6 +1196,70 @@ pub(crate) fn resolve_executable_in_paths(
     prog_path.to_path_buf()
 }
 
+/// Log wording for a lifecycle hook: `Running {running}: ...`, `✓ {result} completed: ...`
+/// and `⚠ Warning: {result} failed: ...`.
+struct HookLabels<'a> {
+    running: &'a str,
+    result: &'a str,
+}
+
+/// Runs a lifecycle hook command in `cwd`, logging its start and outcome through `log`.
+///
+/// Empty commands are skipped. Returns whether the hook was run.
+fn run_hook(
+    cmd: &[String],
+    cwd: &Path,
+    envs: &[&HashMap<String, String>],
+    labels: &HookLabels,
+    mut log: impl FnMut(String),
+) -> bool {
+    if cmd.is_empty() {
+        return false;
+    }
+    let cmd_display = cmd.join(" ");
+    log(format!("Running {}: {cmd_display}", labels.running));
+    log(match execute_hook(cmd, cwd, envs) {
+        Ok(()) => format!("✓ {} completed: {cmd_display}", labels.result),
+        Err(msg) => format!("⚠ Warning: {} failed: {msg}", labels.result),
+    });
+    true
+}
+
+/// Runs a non-empty hook command in `cwd` with the given environment maps applied in order.
+///
+/// Returns `Err` with a log-ready failure description: `exit code <N|signal>[: <stderr>]`,
+/// or the spawn error message.
+fn execute_hook(
+    cmd: &[String],
+    cwd: &Path,
+    envs: &[&HashMap<String, String>],
+) -> Result<(), String> {
+    let mut command = prepare_hook_command(&cmd[0], &cmd[1..]);
+    command.current_dir(cwd);
+    for env in envs {
+        for (k, v) in *env {
+            command.env(k, v);
+        }
+    }
+
+    let output = command.output().map_err(|err| err.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let exit_code = output
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    let stderr_snippet = String::from_utf8_lossy(&output.stderr);
+    let trimmed_err = stderr_snippet.trim();
+    if trimmed_err.is_empty() {
+        Err(format!("exit code {exit_code}"))
+    } else {
+        Err(format!("exit code {exit_code}: {trimmed_err}"))
+    }
+}
+
 /// Prepares a `std::process::Command` for a lifecycle hook.
 ///
 /// On Windows, probes `%PATH%` and `%PATHEXT%` (`.COM`, `.EXE`, `.BAT`, `.CMD`)
@@ -1397,8 +1331,7 @@ mod tests {
 
     #[test]
     fn test_project_builder_validation_empty_name() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let builder = ProjectBuilder::new(config, "ecommerce", "   ");
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
@@ -1407,8 +1340,7 @@ mod tests {
 
     #[test]
     fn test_project_builder_validation_template_not_found() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let builder = ProjectBuilder::new(config, "nonexistent", "my-project");
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
@@ -3059,6 +2991,41 @@ mod tests {
         assert!(
             error_events.iter().any(|e| e.contains("missing_beta")),
             "Expected missing_beta error event"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_hook_log_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let labels = HookLabels {
+            running: "pre_destroy hook",
+            result: "Pre-destroy hook",
+        };
+        let cmd = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let mut logs = Vec::new();
+
+        assert!(!run_hook(&[], dir.path(), &[], &labels, |m| logs.push(m)));
+        assert!(logs.is_empty());
+
+        assert!(run_hook(&cmd(&["true"]), dir.path(), &[], &labels, |m| {
+            logs.push(m)
+        }));
+        assert!(run_hook(
+            &cmd(&["sh", "-c", "echo boom >&2; exit 3"]),
+            dir.path(),
+            &[],
+            &labels,
+            |m| logs.push(m)
+        ));
+        assert_eq!(
+            logs,
+            vec![
+                "Running pre_destroy hook: true",
+                "✓ Pre-destroy hook completed: true",
+                "Running pre_destroy hook: sh -c echo boom >&2; exit 3",
+                "⚠ Warning: Pre-destroy hook failed: exit code 3: boom",
+            ]
         );
     }
 

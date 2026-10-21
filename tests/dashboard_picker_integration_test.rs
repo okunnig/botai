@@ -334,7 +334,7 @@ repos = []
     while start.elapsed() < std::time::Duration::from_secs(5) {
         app.poll_destroy_progress();
         if let Some(modal) = &app.destroy_progress_modal {
-            if modal.is_finished {
+            if modal.progress.is_finished {
                 break;
             }
         }

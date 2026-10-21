@@ -4,15 +4,16 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Position, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect, Size},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
 };
 
 use crate::config::{Config, ConfigError};
 use crate::session::SessionStatus;
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
+use crate::tui::modal_frame::{centered_modal, render_modal_frame};
 use crate::tui::status_bar::TopBar;
 use crate::tui::theme::Theme;
 
@@ -80,16 +81,7 @@ pub struct DashboardState {
 impl DashboardState {
     /// Creates a new `DashboardState` with given templates and local projects.
     pub fn new(templates: Vec<String>, local_projects: Vec<String>) -> Self {
-        let mut config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    repos: HashMap::new(),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                });
+        let mut config = Config::default();
 
         for tpl in &templates {
             config
@@ -280,33 +272,9 @@ impl DashboardState {
             }
         }
 
-        if let Some(mut modal) = self.creation_modal.take() {
-            match modal.handle_key(key) {
-                CreationModalAction::Cancel => {
-                    self.creation_modal = None;
-                    return DashboardAction::None;
-                }
-                CreationModalAction::Submit {
-                    template,
-                    project,
-                    agent_override,
-                    prompt,
-                    selected_repos,
-                } => {
-                    self.creation_modal = None;
-                    return DashboardAction::CreateProject {
-                        template,
-                        project,
-                        agent_override,
-                        prompt,
-                        selected_repos,
-                    };
-                }
-                CreationModalAction::None => {
-                    self.creation_modal = Some(modal);
-                    return DashboardAction::None;
-                }
-            }
+        if let Some(modal) = &mut self.creation_modal {
+            let action = modal.handle_key(key);
+            return self.resolve_creation_modal_action(action);
         }
 
         match key.code {
@@ -354,6 +322,33 @@ impl DashboardState {
         }
     }
 
+    /// Maps a creation modal result to a `DashboardAction`, closing the modal unless it stays open.
+    fn resolve_creation_modal_action(&mut self, action: CreationModalAction) -> DashboardAction {
+        match action {
+            CreationModalAction::Cancel => {
+                self.creation_modal = None;
+                DashboardAction::None
+            }
+            CreationModalAction::Submit {
+                template,
+                project,
+                agent_override,
+                prompt,
+                selected_repos,
+            } => {
+                self.creation_modal = None;
+                DashboardAction::CreateProject {
+                    template,
+                    project,
+                    agent_override,
+                    prompt,
+                    selected_repos,
+                }
+            }
+            CreationModalAction::None => DashboardAction::None,
+        }
+    }
+
     /// Handles pasted text into the dashboard or any active creation modal.
     pub fn handle_paste(&mut self, text: &str) {
         if let Some(modal) = &mut self.creation_modal {
@@ -367,30 +362,9 @@ impl DashboardState {
             return DashboardAction::None;
         }
 
-        if let Some(ref mut modal) = self.creation_modal {
-            match modal.handle_mouse(mouse) {
-                CreationModalAction::Cancel => {
-                    self.creation_modal = None;
-                    return DashboardAction::None;
-                }
-                CreationModalAction::Submit {
-                    template,
-                    project,
-                    agent_override,
-                    prompt,
-                    selected_repos,
-                } => {
-                    self.creation_modal = None;
-                    return DashboardAction::CreateProject {
-                        template,
-                        project,
-                        agent_override,
-                        prompt,
-                        selected_repos,
-                    };
-                }
-                CreationModalAction::None => return DashboardAction::None,
-            }
+        if let Some(modal) = &mut self.creation_modal {
+            let action = modal.handle_mouse(mouse);
+            return self.resolve_creation_modal_action(action);
         }
 
         match mouse.kind {
@@ -537,31 +511,15 @@ pub fn render_destroy_modal(
     buf: &mut Buffer,
     theme: &Theme,
 ) {
-    let width = 76.min(area.width.saturating_sub(4));
-    let height = 8.min(area.height.saturating_sub(2));
-
-    if width < 20 || height < 5 {
+    let Some(modal_area) = centered_modal(area, Size::new(76, 8), Size::new(20, 5)) else {
         return;
-    }
-
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    // Clear background of modal area
-    Clear.render(modal_area, buf);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Confirm Destroy Project ")
-        .border_style(
-            Style::default()
-                .fg(theme.status_error)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
+    };
+    let inner = render_modal_frame(
+        modal_area,
+        buf,
+        " Confirm Destroy Project ",
+        theme.status_error,
+    );
 
     let lines = vec![
         Line::from(vec![

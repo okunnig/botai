@@ -31,6 +31,7 @@ use crate::notify::NotificationService;
 use crate::project::ProjectBuilder;
 use crate::session::{
     ProjectSession, PtyConfig, PtySession, PtyWaker, SessionRegistry, SessionStatus, VtScreen,
+    DEFAULT_VIEWPORT,
 };
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
 use crate::tui::dashboard::{
@@ -59,8 +60,8 @@ pub struct TuiApp {
     pub setup_modal: Option<SetupModalState>,
     pub destroy_modal: Option<DestroyModalState>,
     pub destroy_progress_modal: Option<DestroyProgressModalState>,
-    pub config: Option<Config>,
-    pub cwd: Option<PathBuf>,
+    pub config: Config,
+    pub cwd: PathBuf,
     pub viewport_size: Option<(u16, u16)>,
     pub leader_active: bool,
     pub showing_dashboard: bool,
@@ -276,8 +277,8 @@ impl TuiApp {
             setup_modal: None,
             destroy_modal: None,
             destroy_progress_modal: None,
-            config: None,
-            cwd: None,
+            config: Config::default(),
+            cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             viewport_size: None,
             leader_active: false,
             showing_dashboard: false,
@@ -346,7 +347,7 @@ impl TuiApp {
 
     /// Sets the configuration on `TuiApp`.
     pub fn with_config(mut self, config: Config) -> Self {
-        self.config = Some(config);
+        self.config = config;
         self
     }
 
@@ -403,7 +404,7 @@ impl TuiApp {
                     dashboard.config_last_modified = curr_mtime;
                     dashboard.config_file_len = Some(curr_len);
                 }
-                self.config = Some(new_config);
+                self.config = new_config;
                 if self.config_path.is_none() {
                     self.config_path = Some(path);
                 }
@@ -415,8 +416,13 @@ impl TuiApp {
 
     /// Sets the working directory on `TuiApp`.
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
-        self.cwd = Some(cwd);
+        self.cwd = cwd;
         self
+    }
+
+    /// Returns the last known viewport size, or `DEFAULT_VIEWPORT` before the first draw.
+    fn viewport(&self) -> (u16, u16) {
+        self.viewport_size.unwrap_or(DEFAULT_VIEWPORT)
     }
 
     /// Resizes all registered sessions to the specified viewport column and row dimensions.
@@ -596,7 +602,7 @@ impl TuiApp {
 
             // 3. Draw active frame conditionally
             if dirty {
-                let theme = self.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                let theme = self.config.theme();
                 terminal
                     .draw(|f| {
                         let (status_area, term_area) = compute_layout(f.area());
@@ -840,28 +846,7 @@ impl TuiApp {
     pub fn open_creation_modal(&mut self) {
         let _ = self.reload_config();
 
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let modal = if let Some(cfg) = &self.config {
-            ProjectCreationModal::new(cfg, &cwd, None)
-        } else {
-            let fallback_cfg =
-                Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                    .unwrap_or_else(|_| Config {
-                        default_agent: "claude".to_string(),
-                        theme: "tokyo-night".to_string(),
-                        repos_dir: PathBuf::from(".botai_repos"),
-                        repos: HashMap::new(),
-                        agents: HashMap::new(),
-                        templates: HashMap::new(),
-                    });
-            ProjectCreationModal::new(&fallback_cfg, &cwd, None)
-        };
-        self.creation_modal = Some(modal);
+        self.creation_modal = Some(ProjectCreationModal::new(&self.config, &self.cwd, None));
     }
 
     /// Dispatches a key event to the creation modal and handles any triggered action.
@@ -903,27 +888,24 @@ impl TuiApp {
 
     /// Dispatches a key event to the dashboard and processes the resulting `DashboardAction`.
     pub fn handle_dashboard_key(&mut self, key: crossterm::event::KeyEvent) {
-        if let Some(mut dashboard) = self.dashboard.take() {
-            let action = dashboard.handle_key(key);
-            if self.config.as_ref() != Some(&dashboard.config) {
-                self.config = Some(dashboard.config.clone());
-                if self.config_path.is_none() && dashboard.config_path.is_some() {
-                    self.config_path = dashboard.config_path.clone();
-                }
-                self.config_last_modified = dashboard.config_last_modified;
-                self.config_file_len = dashboard.config_file_len;
-            }
-            self.dashboard = Some(dashboard);
-            self.handle_dashboard_action(action);
-        }
+        self.dispatch_to_dashboard(|dashboard| dashboard.handle_key(key));
     }
 
     /// Dispatches a mouse event to the dashboard and processes the resulting `DashboardAction`.
     pub fn handle_dashboard_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        self.dispatch_to_dashboard(|dashboard| dashboard.handle_mouse(mouse));
+    }
+
+    /// Runs `handler` on the dashboard, adopts any configuration it reloaded, then processes
+    /// the resulting `DashboardAction`.
+    fn dispatch_to_dashboard(
+        &mut self,
+        handler: impl FnOnce(&mut DashboardState) -> DashboardAction,
+    ) {
         if let Some(mut dashboard) = self.dashboard.take() {
-            let action = dashboard.handle_mouse(mouse);
-            if self.config.as_ref() != Some(&dashboard.config) {
-                self.config = Some(dashboard.config.clone());
+            let action = handler(&mut dashboard);
+            if self.config != dashboard.config {
+                self.config = dashboard.config.clone();
                 if self.config_path.is_none() && dashboard.config_path.is_some() {
                     self.config_path = dashboard.config_path.clone();
                 }
@@ -982,10 +964,10 @@ impl TuiApp {
     pub fn poll_setup_progress(&mut self) -> bool {
         let mut changed = false;
         if let Some(modal) = &mut self.setup_modal {
-            let was_finished = modal.is_finished;
-            let old_logs = modal.logs.len();
-            let old_step = modal.current_step;
-            modal.tick();
+            let was_finished = modal.progress.is_finished;
+            let old_logs = modal.progress.logs.len();
+            let old_step = modal.progress.current_step;
+            modal.progress.tick();
             if !was_finished {
                 changed = true;
             }
@@ -996,9 +978,9 @@ impl TuiApp {
                 self.setup_modal = None;
                 self.showing_dashboard = false;
                 changed = true;
-            } else if modal.logs.len() != old_logs
-                || modal.current_step != old_step
-                || modal.is_finished != was_finished
+            } else if modal.progress.logs.len() != old_logs
+                || modal.progress.current_step != old_step
+                || modal.progress.is_finished != was_finished
             {
                 changed = true;
             }
@@ -1021,7 +1003,7 @@ impl TuiApp {
     /// Handles mouse events when the setup modal is active.
     pub fn handle_setup_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         if let Some(modal) = &mut self.setup_modal {
-            let _ = modal.handle_mouse(mouse);
+            let _ = modal.progress.handle_mouse(mouse);
         }
     }
 
@@ -1030,17 +1012,17 @@ impl TuiApp {
     pub fn poll_destroy_progress(&mut self) -> bool {
         let mut changed = false;
         if let Some(modal) = &mut self.destroy_progress_modal {
-            let was_finished = modal.is_finished;
-            let old_logs = modal.logs.len();
-            let old_step = modal.current_step;
-            modal.tick();
+            let was_finished = modal.progress.is_finished;
+            let old_logs = modal.progress.logs.len();
+            let old_step = modal.progress.current_step;
+            modal.progress.tick();
             if !was_finished {
                 changed = true;
             }
             modal.poll_events();
-            if modal.logs.len() != old_logs
-                || modal.current_step != old_step
-                || modal.is_finished != was_finished
+            if modal.progress.logs.len() != old_logs
+                || modal.progress.current_step != old_step
+                || modal.progress.is_finished != was_finished
             {
                 changed = true;
             }
@@ -1083,7 +1065,7 @@ impl TuiApp {
     /// Handles mouse events (such as scroll wheel) when the destruction progress modal is active.
     pub fn handle_destroy_progress_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         if let Some(modal) = &mut self.destroy_progress_modal {
-            let _ = modal.handle_mouse(mouse);
+            let _ = modal.progress.handle_mouse(mouse);
         }
     }
 
@@ -1100,11 +1082,7 @@ impl TuiApp {
         let modal = DestroyProgressModalState::new(project_name, rx);
         self.destroy_progress_modal = Some(modal);
 
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
+        let cwd = self.cwd.clone();
         let config = self.config.clone();
         let proj_name = project_name.to_string();
 
@@ -1139,13 +1117,9 @@ impl TuiApp {
             return;
         }
 
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
+        let cwd = self.cwd.clone();
         let config = self.config.clone();
-        let viewport_size = self.viewport_size.unwrap_or((100, 30));
+        let viewport_size = self.viewport();
         let tpl_name = template_name.to_string();
         let proj_name = project_name.to_string();
         let agent_owned = agent_override.map(String::from);
@@ -1177,44 +1151,17 @@ impl TuiApp {
             return Ok(());
         }
 
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let project_dir = cwd.join(project_name);
+        let project_dir = self.cwd.join(project_name);
 
         if !project_dir.exists() {
             anyhow::bail!("Project directory '{project_name}' does not exist in CWD");
         }
         let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
 
-        let default_config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .ok();
-        let config = self.config.as_ref().or(default_config.as_ref());
+        let agent_name = self.config.default_agent.as_str();
+        let (cmd, args, env_map) = self.config.agent_launch(agent_name);
 
-        let agent_name = config.map(|c| c.default_agent.as_str()).unwrap_or("claude");
-
-        let (cmd, args, env_map) = if let Some(cfg) = config {
-            if let Some(agent) = cfg.get_agent(agent_name) {
-                (agent.command.clone(), agent.args.clone(), agent.env.clone())
-            } else {
-                #[cfg(windows)]
-                let default_shell = "cmd.exe".to_string();
-                #[cfg(not(windows))]
-                let default_shell = "sh".to_string();
-                (default_shell, Vec::new(), HashMap::new())
-            }
-        } else {
-            #[cfg(windows)]
-            let default_shell = "cmd.exe".to_string();
-            #[cfg(not(windows))]
-            let default_shell = "sh".to_string();
-            (default_shell, Vec::new(), HashMap::new())
-        };
-
-        let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
+        let (cols, rows) = self.viewport();
 
         let mut pty_config = PtyConfig::new(&cmd, &project_dir)
             .with_args(args)
@@ -1240,23 +1187,9 @@ impl TuiApp {
         prompt: Option<&str>,
     ) -> anyhow::Result<()> {
         let _ = self.reload_config();
-        let config = self.config.clone().unwrap_or_else(|| {
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    repos: HashMap::new(),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                })
-        });
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
+        let config = self.config.clone();
+        let cwd = self.cwd.clone();
+        let (cols, rows) = self.viewport();
 
         let mut builder = ProjectBuilder::new(config, template_name, project_name)
             .with_cwd(cwd)
@@ -1271,13 +1204,12 @@ impl TuiApp {
 
     /// Destroys a project directory and its worktrees, then refreshes the dashboard.
     pub fn destroy_project(&mut self, project_name: &str) -> anyhow::Result<()> {
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        crate::project::destroy_project_workspace(self.config.as_ref(), &cwd, project_name, true)?;
+        crate::project::destroy_project_workspace(
+            Some(&self.config),
+            &self.cwd,
+            project_name,
+            true,
+        )?;
 
         self.refresh_dashboard();
         Ok(())
@@ -1286,27 +1218,9 @@ impl TuiApp {
     /// Refreshes the local projects and templates list within the dashboard.
     pub fn refresh_dashboard(&mut self) {
         let _ = self.reload_config();
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
         let running = self.running_sessions_map();
-        let mut new_dashboard = if let Some(cfg) = &self.config {
-            DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
-        } else {
-            let default_cfg =
-                Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                    .unwrap_or_else(|_| Config {
-                        default_agent: "claude".to_string(),
-                        theme: "tokyo-night".to_string(),
-                        repos_dir: PathBuf::from(".botai_repos"),
-                        repos: HashMap::new(),
-                        agents: HashMap::new(),
-                        templates: HashMap::new(),
-                    });
-            DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
-        };
+        let mut new_dashboard =
+            DashboardState::from_env(&self.config, &self.cwd).with_running_sessions(running);
         if let Some(ref path) = self.config_path {
             new_dashboard = new_dashboard.with_config_path(path.clone());
         }
@@ -1858,7 +1772,7 @@ repos = []
         terminal
             .draw(|f| {
                 if let Some(modal) = &app.creation_modal {
-                    let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                    let theme = app.config.theme();
                     modal.render_modal(f.area(), f.buffer_mut(), &theme);
                     if let Some(pos) = modal.cursor_position(f.area()) {
                         f.set_cursor_position(pos);
@@ -1882,7 +1796,7 @@ repos = []
         terminal
             .draw(|f| {
                 if let Some(modal) = &app.creation_modal {
-                    let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                    let theme = app.config.theme();
                     modal.render_modal(f.area(), f.buffer_mut(), &theme);
                     if let Some(pos) = modal.cursor_position(f.area()) {
                         f.set_cursor_position(pos);
@@ -2490,7 +2404,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2648,7 +2562,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2723,7 +2637,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2788,7 +2702,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2842,7 +2756,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -3008,8 +2922,8 @@ repos = ['{}']
         app.start_project_creation("ws", "active-proj", None, None, vec![]);
         assert!(app.setup_modal.is_some());
         let modal = app.setup_modal.as_ref().unwrap();
-        assert!(modal.error.is_some());
-        assert!(modal.is_finished);
+        assert!(modal.progress.error.is_some());
+        assert!(modal.progress.is_finished);
 
         // Key press other than Esc/Enter should keep modal open
         let dummy_key = crossterm::event::KeyEvent::new(
@@ -3311,7 +3225,7 @@ repos = ['{}']
         let (_tx, rx) = std::sync::mpsc::channel();
         let mut modal = SetupModalState::new("proj-modal", "tpl", None, rx);
         for i in 1..=10 {
-            modal.logs.push(format!("log {i}"));
+            modal.progress.logs.push(format!("log {i}"));
         }
         app.setup_modal = Some(modal);
 
@@ -3322,7 +3236,7 @@ repos = ['{}']
             modifiers: KeyModifiers::empty(),
         };
         app.handle_setup_modal_mouse(scroll_up);
-        assert_eq!(app.setup_modal.as_ref().unwrap().scroll_offset, 3);
+        assert_eq!(app.setup_modal.as_ref().unwrap().progress.scroll_offset, 3);
     }
 
     #[test]
@@ -4068,7 +3982,7 @@ repos = []
             dashboard.templates,
             vec!["added_template".to_string(), "initial_template".to_string()]
         );
-        let app_cfg = app.config.as_ref().expect("app config must exist");
+        let app_cfg = &app.config;
         assert!(app_cfg.templates.contains_key("added_template"));
         assert!(app_cfg.templates.contains_key("initial_template"));
     }
