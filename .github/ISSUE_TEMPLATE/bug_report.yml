@@ -1,0 +1,83 @@
+name: Bug Report
+description: Report an issue or unexpected behavior in botai
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please check existing issues to verify that the bug hasn't already been reported.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem Description
+      description: A clear and concise description of the bug.
+      placeholder: Describe what happened...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Detailed steps to reproduce the issue.
+      placeholder: |
+        1. Run `botai create my-project --template backend`
+        2. In TUI, press `Ctrl+Space` then `1`
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: A clear description of what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal Output / Error Logs
+      description: Please paste any relevant terminal output, stack traces, or logs.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: botai Version
+      description: Output of `botai --version` or git commit SHA.
+      placeholder: "botai 0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: Which operating system are you running?
+      options:
+        - Linux (Ubuntu, Debian, Fedora, Arch, etc.)
+        - macOS (Apple Silicon / Intel)
+        - Windows 10 / 11
+        - Other (specify in additional context)
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Terminal emulator used (e.g. Alacritty, Kitty, WezTerm, Windows Terminal), shell (bash, zsh, fish, pwsh), agent CLI (agy, claude, aider), or configuration settings.
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Pre-submission Checklist
+      options:
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true
+        - label: I am running the latest version of botai or latest commit on `main`.
+          required: false
