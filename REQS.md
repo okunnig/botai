@@ -809,6 +809,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `.gitignore` permits `Cargo.lock` tracking and omits `Cargo.lock` from ignore patterns.
 - **Continuous Integration (`.github/workflows/ci.yml`)**:
   - Executes comprehensive test suites, clippy, formatting, and unsafe code audit on both pull requests targeting `main` and direct pushes to `main`.
+  - **Immutable Action Pinning**: Workflows pin all GitHub Action dependencies to full 40-character commit SHAs with human-readable version comments (e.g. `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`), ensuring supply chain security and reproducible builds while supported by automated Dependabot updates.
 - **Community Health & Vulnerability Reporting**:
   - `CONTRIBUTING.md`: Development environment setup, formatting, clippy lint checks, unsafe code prohibition guidelines, and PR workflow.
   - Security disclosures are handled via GitHub native Private Vulnerability Reporting.
