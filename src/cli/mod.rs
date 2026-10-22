@@ -5,7 +5,7 @@ use crate::config::ResolvedRepo;
 
 /// botai - Multi-repo workspace orchestrator and session multiplexer for AI agent workflows.
 #[derive(Parser, Debug, Clone, PartialEq, Eq)]
-#[command(name = "botai", author, version, about, long_about = None)]
+#[command(name = "botai", author, version = env!("BOTAI_VERSION"), about, long_about = None)]
 pub struct Cli {
     /// Custom configuration file path.
     #[arg(short, long, global = true, value_name = "FILE")]
@@ -793,5 +793,27 @@ mod tests {
             err_no_defaults.to_string(),
             "Cannot create project: at least one repository must be selected."
         );
+    }
+
+    #[test]
+    fn test_cli_version_flag() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        assert_eq!(cmd.get_version(), Some(env!("BOTAI_VERSION")));
+
+        let parse_err = Cli::try_parse_from(["botai", "--version"]).unwrap_err();
+        assert_eq!(parse_err.kind(), clap::error::ErrorKind::DisplayVersion);
+        let output = parse_err.to_string();
+        assert!(output.starts_with("botai "));
+        assert!(output.contains(env!("BOTAI_VERSION")));
+
+        let parse_err_short = Cli::try_parse_from(["botai", "-V"]).unwrap_err();
+        assert_eq!(
+            parse_err_short.kind(),
+            clap::error::ErrorKind::DisplayVersion
+        );
+        let output_short = parse_err_short.to_string();
+        assert!(output_short.starts_with("botai "));
+        assert!(output_short.contains(env!("BOTAI_VERSION")));
     }
 }

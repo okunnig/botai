@@ -425,6 +425,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 7. CLI Commands & Lifecycle Operations
 - **Default (No Arguments)**: Launching `botai` without arguments opens the interactive TUI project switcher / dashboard.
+- **Version Flag (`botai --version` / `botai -V`)**:
+  - Git tag is the **single source of truth** for runtime version reporting.
+  - Dynamically injected at compile time via a standalone build script (`build.rs`) using `git describe --tags --always --dirty`.
+  - Preserves the `v` tag prefix according to Git release tag conventions (e.g. `botai v0.1.0` on tagged release commits, `botai v0.1.0-4-ga490519` when commits exist ahead of the tag, and `botai v0.1.0-4-ga490519-dirty` when uncommitted working tree changes exist).
+  - In repositories without release tags, safely falls back to `botai <commit_sha>` (or `botai v0.0.0-<commit_sha>`); outside of git environments, falls back to `botai v0.0.0`.
+  - Fully decoupled from [Cargo.toml](Cargo.toml) manifest versioning.
 - **`botai create <template> <project> [--agent <agent> / -A <agent>] [--prompt <prompt> / -p <prompt>] [--include <repos>] [--exclude <repos>] [--all] [--attach / -a]`**:
   - Creates a new multi-repo workspace project under `CWD/<project>` from the specified template.
   - **Arguments & Flags**:
@@ -781,12 +787,18 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Cargo Manifest Metadata (`Cargo.toml`)**:
   - Full package metadata configured for repository distribution:
     - `publish`: Set to `false` (`publish = false`) to explicitly prevent accidental publication to crates.io.
+    - `version`: Configured with the sentinel placeholder `"0.0.0"` accompanied by explicit documentation indicating that Git tags are the single source of truth and versioning is dynamically injected at compile time.
     - `license`: Explicitly specifies `MIT`.
     - `repository`: Points to GitHub source repository (`https://github.com/okunnig/botai`).
     - `homepage`: Points to repository homepage (`https://github.com/okunnig/botai`).
     - `readme`: Specifies `README.md`.
     - `keywords`: Tagged with relevant keywords (`tui`, `multiplexer`, `git-worktree`, `developer-tools`, `ai-agents`).
     - `categories`: Categorized under `["command-line-utilities", "development-tools"]`.
+- **Git Tag Single Source of Truth & Dynamic Versioning (`build.rs`)**:
+  - Employs zero-unsafe `build.rs` executing `git describe --tags --always --dirty` at compile time and passing the resulting version string via `cargo:rustc-env=BOTAI_VERSION=<version>`.
+  - Injects `env!("BOTAI_VERSION")` directly into clap's CLI definition (`Cli` struct in `src/cli/mod.rs`), preserving the `v` prefix (`vX.Y.Z`).
+  - **Worktree-Aware Cache Invalidation**: Resolves git directory paths whether running in a standard repository or a git worktree (`.git` file pointing to `gitdir: ...`). Emits `cargo:rerun-if-changed` directives for `HEAD`, branch refs, and `packed-refs` in both local and common git directories to guarantee automatic rebuilds when commits or tags change.
+  - **CI & Release Checkout Depth**: CI (`ci.yml`) and Release (`release.yml`) workflows configure `fetch-depth: 0` on checkout steps to ensure full git history and release tags are available for compile-time version resolution.
 - **License Uniformity**:
   - `LICENSE` file contains the canonical MIT License text.
   - `README.md` hero badges and documentation sections reference MIT licensing uniformly.

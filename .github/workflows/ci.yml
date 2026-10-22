@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install stable toolchain with rustfmt
         uses: dtolnay/rust-toolchain@stable
@@ -39,6 +41,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install stable toolchain with clippy
         uses: dtolnay/rust-toolchain@stable
@@ -61,6 +65,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -80,6 +86,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable

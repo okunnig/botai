@@ -1,6 +1,7 @@
 [package]
 name = "botai"
-version = "0.1.0"
+# Git tags are the single source of truth for versioning; dynamically injected at compile time via build.rs.
+version = "0.0.0"
 edition = "2021"
 authors = ["botai team"]
 description = "A cross-platform multi-repo workspace orchestrator and session multiplexer for AI agent workflows"
