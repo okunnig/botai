@@ -1293,17 +1293,32 @@ fn test_integration_run_loop_with_receiver_conditional_redraw_and_wakeup_pulses(
     // Send a standalone empty wake-up pulse directly into stdin channel
     stdin_tx.send(Vec::new()).unwrap();
 
+    #[cfg(windows)]
+    let input_bytes = b"pty_pulse_output\r\n".to_vec();
+    #[cfg(not(windows))]
+    let input_bytes = b"pty_pulse_output\n".to_vec();
+
+    let wake_count_for_thread = Arc::clone(&wake_count);
+
     // Spawn thread to send input bytes to active session, triggering PTY output, then quit
     let tx_clone = stdin_tx.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        let _ = tx_clone.send(b"pty_pulse_output\n".to_vec());
         std::thread::sleep(Duration::from_millis(100));
+        let _ = tx_clone.send(input_bytes);
+        for _ in 0..60 {
+            if wake_count_for_thread.load(Ordering::SeqCst) > 0 {
+                std::thread::sleep(Duration::from_millis(150));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let _ = tx_clone.send(vec![0x00, b'q']);
     });
 
     app.run_loop_with_receiver(&mut terminal, &stdin_rx)
         .unwrap();
+
+    app.process_pty_streams();
 
     assert!(app.should_quit);
     // Verify waker was called on PTY output
