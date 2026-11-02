@@ -189,12 +189,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Executes `git worktree prune` prior to creating new worktrees to automatically clear stale worktree metadata from manually deleted directories.
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
   - Checks out a new branch named `<project_name>`.
-  - **Concurrent Worktree Checkout**: Worktrees across distinct backing repositories are checked out concurrently in parallel using scoped threads (`std::thread::scope`). Worktrees sharing the same backing repository are serialized per repository path to prevent Git index lock contention.
+  - **Concurrent Worktree Checkout**: Worktrees across distinct backing repositories are checked out concurrently in parallel using a bounded scoped-thread worker pool (`std::thread::scope`, at most 8 concurrent operations). Worktrees sharing the same backing repository are serialized per repository path to prevent Git index lock contention.
   - **Thread-Safe Event Streaming & Atomic Rollback**: Progress logs and errors stream over an `mpsc::channel` to the setup sink. If any worker thread fails, all spawned threads are joined to completion before executing atomic rollback across all successfully created worktrees and newly created branches.
 - **Lifecycle Command Hooks Execution Model**:
   - **Per-Repository Setup Hooks (`setup`)**:
     - Runs in the checked-out worktree directory (`CWD/<project_name>/<repo_name>`) immediately after worktree creation.
-    - Repositories execute their setup command pipelines concurrently in parallel; commands within a single repository run sequentially in order.
+    - Repositories execute their setup command pipelines concurrently in parallel (at most 8 repositories at a time); commands within a single repository run sequentially in order.
     - Direct execution without shell wrappers (arguments preserved safely).
     - **Warn and Continue Policy**: Non-zero exit codes or execution failures are logged with warning events but do NOT trigger destructive rollback of the workspace, ensuring developers and AI agents can inspect and fix setup issues.
   - **Workspace Post-Creation Hooks (`post_create`)**:
@@ -207,7 +207,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - On Windows, hook execution probes `%PATH%` and `%PATHEXT%` (`.COM`, `.EXE`, `.BAT`, `.CMD`) to automatically resolve scripts like `npm`, `yarn`, and `pnpm`.
     - Automatically resolves bare commands and path-prefixed scripts into their `.cmd` or `.bat` executables so Rust's `std::process::Command` invokes them with Windows `cmd.exe /c` batch wrapping without requiring explicit file extensions or shell wrappers.
   - **Parallel Remote Repository Cloning & Upstream Fetching**:
-    - During project workspace creation, missing remote repository cloning and upstream fetches execute concurrently in parallel across repositories using scoped threads (`std::thread::scope`).
+    - During project workspace creation, missing remote repository cloning and upstream fetches execute concurrently in parallel across repositories using a bounded scoped-thread worker pool (`std::thread::scope`), capped at 8 concurrent git operations so large templates stay within the process file descriptor limit (macOS default soft limit 256) and avoid SSH throttling.
     - Progress logs and error notifications are streamed back asynchronously to the setup progress sink, significantly reducing workspace initialization latency for multi-repo project templates.
   - **Strict Branching Strategy**: Branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
   - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the template repositories or if `<project_name>` directory exists.
@@ -511,7 +511,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     1. **Pre-Validation**: Multi-tier validation with `validate_fast` (immediate 0ms local validation of project name, template existence, empty selected repos, and CWD directory collision) and `check_branch_collisions` / `validate_detailed` (effective repository resolution and git branch collision verification strictly across effective repositories).
     2. **Repository Resolution & Cloning**: Resolves effective repositories (`resolve_effective_repos`), clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch only for effective repositories.
     3. **Worktree Checkout**: Creates a git worktree checked out to branch `<project_name>` at `<project_dir>/<repo_name>` strictly for effective repositories.
-    4. **Per-Repository Setup Hooks Execution**: Concurrently executes configured repository `setup` commands in parallel across active effective worktrees (sequential command execution per worktree), capturing logs and proceeding under the Warn and Continue policy upon failures.
+    4. **Per-Repository Setup Hooks Execution**: Concurrently executes configured repository `setup` commands in parallel across active effective worktrees (at most 8 concurrently; sequential command execution per worktree), capturing logs and proceeding under the Warn and Continue policy upon failures.
     5. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md` documenting only effective repositories in the Repository Layout table.
     6. **Workspace Post-Creation Hooks Execution**: Runs configured template `post_create` commands sequentially at the project root directory.
     7. **PTY Process Spawning**: Spawns the agent CLI process inside a master/slave pseudo-terminal attached to a virtual terminal screen buffer.
@@ -650,8 +650,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Structured Progress Events**: Emits sequential `ProjectDestroyEvent` events (`Step`, `Log`, `Success`, `Error`) over an `mpsc::channel` to drive the modal UI.
   - **Destruction Lifecycle Steps**:
     1. `Step [1/4]`: Executing template `pre_destroy` lifecycle hooks (streaming hook command output).
-    2. `Step [2/4]`: Validating worktrees and checking uncommitted changes across all child worktrees concurrently using scoped threads (`std::thread::scope`). If any worktrees have uncommitted changes and `force` is false, aborts before any deletion and aggregates all dirty repository paths into a single descriptive error.
-    3. `Step [3/4]`: Concurrently removing git worktrees and pruning metadata across backing central repositories via `remove_worktree_auto` in parallel across distinct repositories.
+    2. `Step [2/4]`: Validating worktrees and checking uncommitted changes across all child worktrees concurrently using a bounded scoped-thread worker pool (`std::thread::scope`, at most 8 concurrent checks). If any worktrees have uncommitted changes and `force` is false, aborts before any deletion and aggregates all dirty repository paths into a single descriptive error.
+    3. `Step [3/4]`: Concurrently removing git worktrees and pruning metadata across backing central repositories via `remove_worktree_auto` in parallel across distinct repositories (at most 8 concurrently; worktrees sharing a backing repository are removed sequentially).
     4. `Step [4/4]`: Recursively deleting the project workspace directory.
   - **Rich Modal Presentation**:
     - Centered floating dialog styled with active theme colors.
