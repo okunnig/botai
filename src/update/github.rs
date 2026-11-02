@@ -10,7 +10,9 @@ use super::{version, UpdateError};
 const REPO: &str = "okunnig/botai";
 /// Public GitHub API endpoint.
 const DEFAULT_API_BASE: &str = "https://api.github.com";
-/// Hidden override of the API base URL, used by tests.
+/// Hidden override of the API base URL for tests. Debug builds only, so a release binary
+/// cannot be pointed at another download source.
+#[cfg(debug_assertions)]
 const BASE_URL_ENV: &str = "BOTAI_UPDATE_BASE_URL";
 
 /// Upper bound on a downloaded asset; release archives are a few MB.
@@ -68,12 +70,16 @@ fn normalize_tag(tag: &str) -> String {
     }
 }
 
-/// API base URL, honouring `BOTAI_UPDATE_BASE_URL`.
+/// API base URL, honouring `BOTAI_UPDATE_BASE_URL` in debug builds.
 fn api_base_from_env() -> String {
-    std::env::var(BASE_URL_ENV)
+    #[cfg(debug_assertions)]
+    if let Some(base) = std::env::var(BASE_URL_ENV)
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_API_BASE.to_string())
+    {
+        return base;
+    }
+    DEFAULT_API_BASE.to_string()
 }
 
 /// HTTP client for release lookups and asset downloads.
@@ -100,7 +106,7 @@ impl Client {
         }
     }
 
-    /// Creates a client from the environment: `BOTAI_UPDATE_BASE_URL` and `GITHUB_TOKEN`.
+    /// Creates a client from the environment: `GITHUB_TOKEN`, plus `BOTAI_UPDATE_BASE_URL` in debug builds.
     pub fn from_env(timeout: Duration) -> Self {
         let token = std::env::var("GITHUB_TOKEN")
             .ok()

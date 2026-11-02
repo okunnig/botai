@@ -863,7 +863,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - `GET https://api.github.com/repos/okunnig/botai/releases/latest`, `/releases/tags/<tag>`, or `/releases?per_page=30` for `--pre` (drafts skipped).
   - Headers: `User-Agent: botai/<version>`, `Accept: application/vnd.github+json`, and `Authorization: Bearer $GITHUB_TOKEN` when set (the anonymous limit is 60 requests/hour; the 24h cache keeps checks well under it). 403/429 produce an error suggesting `GITHUB_TOKEN`. The token is sent to the API only, not to asset downloads.
   - Proxies are honoured via `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`.
-  - Hidden `BOTAI_UPDATE_BASE_URL` overrides the API base URL (tests point it at a local fixture server). Asset URLs come from each asset's `browser_download_url`.
+  - Hidden `BOTAI_UPDATE_BASE_URL` overrides the API base URL in debug builds only (tests point it at a local fixture server); release builds always use `https://api.github.com`. Asset URLs come from each asset's `browser_download_url`.
 - **Cache**: `update-check.toml` in the platform cache directory (`<cache dir>/botai/`, e.g. `~/Library/Caches/botai/`, `~/.cache/botai/`, `%LOCALAPPDATA%\botai\`) with `last_checked` (unix seconds) and `latest_tag`. Written via temp file and rename because two botai instances may write at once. A missing or corrupt cache counts as stale. On a failed network check the previous cache entry is still used for the notice.
 - **Install Procedure & Checksum Policy**:
   - Download the platform archive and `SHA256SUMS`; the archive's line in `SHA256SUMS` must exist and match, otherwise the install fails without touching the binary.
