@@ -94,6 +94,21 @@ cd botai
 cargo install --path .
 ```
 
+#### Updating
+
+Release binaries update themselves:
+
+```bash
+botai update --check            # show current and latest version
+botai update                    # install the latest release
+botai update --version v0.1.0   # install a specific release (downgrades allowed)
+botai update --pre              # include prereleases
+```
+
+When the TUI starts, `botai` checks GitHub Releases at most once a day and shows `update vX.Y.Z available: botai update` in the top bar. Disable this with `[update] check_on_startup = false` in `config.toml` or `BOTAI_NO_UPDATE_CHECK=1`. Prebuilt updates cover Linux x86_64, macOS Apple Silicon and Windows x86_64.
+
+Builds installed with `cargo install --git` report a `v0.0.0-dev-<sha>` version, because cargo's git checkout has no tags. They get no update notice; update them by re-running `cargo install --git https://github.com/okunnig/botai.git --force`. Running `botai update` on them works but replaces the cargo-installed binary with the release binary.
+
 ---
 
 ### Initial Configuration
@@ -159,6 +174,9 @@ botai destroy feat-checkout
 
 # Force removal of a project even if uncommitted changes exist
 botai destroy feat-checkout --force
+
+# Update botai to the latest release (or just check with --check)
+botai update
 ```
 
 ---
@@ -225,6 +243,10 @@ theme = "tokyo-night"
 
 # Central directory where remote Git repositories are cloned and cached (required)
 repos_dir = "~/.local/share/botai/repos"
+
+# Startup update check (at most once per 24h, TUI only)
+[update]
+check_on_startup = true
 
 # ------------------------------------------------------------------------------
 # Agent Definitions
