@@ -81,6 +81,16 @@ theme = "tokyo-night"
 repos_dir = "~/.local/share/botai/repos"
 
 # ------------------------------------------------------------------------------
+# Self Update
+# ------------------------------------------------------------------------------
+# When the TUI starts, botai checks GitHub Releases for a newer version at most
+# once every 24 hours and shows a notice. Run `botai update` to install it.
+# The check is also skipped when BOTAI_NO_UPDATE_CHECK=1 or CI is set.
+
+[update]
+check_on_startup = true
+
+# ------------------------------------------------------------------------------
 # Agent Definitions
 # ------------------------------------------------------------------------------
 # Configure the AI agent CLI commands, CLI arguments, and environment variables.
@@ -561,6 +571,32 @@ pub struct Config {
     /// Defined project templates.
     #[serde(default, alias = "workspaces")]
     pub templates: HashMap<String, TemplateConfig>,
+    /// Self update settings (`[update]`).
+    #[serde(default)]
+    pub update: UpdateConfig,
+}
+
+/// `[update]` section controlling the startup update check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Check GitHub Releases for a newer version when the TUI starts (at most once per 24h).
+    pub check_on_startup: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check_on_startup: true,
+        }
+    }
+}
+
+/// The directory containing `path`; `.` for a bare file name.
+pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 fn default_shell() -> String {
@@ -587,6 +623,7 @@ impl Default for Config {
             repos: HashMap::new(),
             agents: HashMap::new(),
             templates: HashMap::new(),
+            update: UpdateConfig::default(),
         }
     }
 }
@@ -617,12 +654,7 @@ impl Config {
             return Err(ConfigError::AlreadyExists(path.to_path_buf()));
         }
 
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-
+        std::fs::create_dir_all(parent_or_cwd(path))?;
         std::fs::write(path, Self::default_template())?;
         Ok(path.to_path_buf())
     }
@@ -644,6 +676,13 @@ impl Config {
     /// - Windows: `%APPDATA%\botai\config.toml`
     pub fn default_path() -> Option<PathBuf> {
         directories::BaseDirs::new().map(|dirs| dirs.config_dir().join("botai").join("config.toml"))
+    }
+
+    /// The `--config` override, else [`Config::default_path`].
+    pub fn resolve_path(config_override: Option<&Path>) -> Option<PathBuf> {
+        config_override
+            .map(Path::to_path_buf)
+            .or_else(Self::default_path)
     }
 
     /// Resolves the effective central repository directory, respecting:
@@ -1580,6 +1619,10 @@ env = { GREETING = "こんにちは" }
             "Template must define aider agent"
         );
         assert!(
+            template.contains("[update]\ncheck_on_startup = true"),
+            "Template must document the update section"
+        );
+        assert!(
             template.contains("[templates.ecommerce]"),
             "Template must define sample template"
         );
@@ -1592,6 +1635,7 @@ env = { GREETING = "こんにちは" }
             .expect("Default template must parse cleanly into Config struct");
 
         assert_eq!(parsed.default_agent, "claude");
+        assert!(parsed.update.check_on_startup);
         assert_eq!(parsed.theme, "tokyo-night");
         assert_eq!(parsed.theme(), Theme::tokyo_night());
         assert_eq!(
@@ -2308,5 +2352,26 @@ repos = [
         assert!(!entry3.is_default_included());
         assert_eq!(format!("{entry3}"), "opt-in");
         assert_eq!(entry3, "opt-in");
+    }
+
+    #[test]
+    fn test_update_section_defaults_to_enabled() {
+        let cfg = test_config();
+        assert!(cfg.update.check_on_startup);
+        assert!(Config::default().update.check_on_startup);
+
+        let cfg =
+            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n[update]\n")
+                .unwrap();
+        assert!(cfg.update.check_on_startup);
+    }
+
+    #[test]
+    fn test_update_section_can_disable_startup_check() {
+        let cfg = Config::load_from_str(
+            "default_agent = \"claude\"\nrepos_dir = \".repos\"\n[update]\ncheck_on_startup = false\n",
+        )
+        .unwrap();
+        assert!(!cfg.update.check_on_startup);
     }
 }

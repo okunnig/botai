@@ -50,6 +50,8 @@
     - `post_create`: (Optional) List of commands executed at the project root after worktrees and setup hooks finish.
     - `pre_destroy`: (Optional) List of commands executed at the project root before destroying worktrees.
 - **Agent Definitions**: Configurable agent launch commands, arguments, and environment variables.
+- **Self Update Settings (`[update]`)**:
+  - `check_on_startup`: (Optional Boolean, default `true`) Enables the background update check on TUI launch and the cached update notice after CLI commands. See section 16.
 - **Dynamic Configuration & Template Reloading**:
   - `Config` is designed as a pure, lightweight data structure containing parsed configuration without filesystem path tracking or self-reloading responsibilities.
   - Runtime application state containers (`TuiApp` and `DashboardState`) track the configuration file path (`config_path`), last known filesystem modification time (`config_last_modified` / `mtime`), and file size (`config_file_len` / `len`).
@@ -80,6 +82,16 @@ theme = "tokyo-night"
 # Central directory where remote repositories are cloned and cached (required).
 # Can also be overridden at runtime by setting the BOTAI_REPOS_DIR environment variable.
 repos_dir = "~/.local/share/botai/repos"
+
+# ------------------------------------------------------------------------------
+# Self Update
+# ------------------------------------------------------------------------------
+# When the TUI starts, botai checks GitHub Releases for a newer version at most
+# once every 24 hours and shows a notice. Run `botai update` to install it.
+# The check is also skipped when BOTAI_NO_UPDATE_CHECK=1 or CI is set.
+
+[update]
+check_on_startup = true
 
 # ------------------------------------------------------------------------------
 # Agent Definitions
@@ -492,6 +504,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Execution & Lifecycle**:
     - Spawns the editor process with inherited standard I/O (stdin, stdout, stderr) and waits synchronously for the process to exit.
     - Exits `botai` with the editor process's exit status code (silent pass-through without blocking on syntax validation).
+- **`botai update [--check] [--version <TAG>] [--pre]`**:
+  - Replaces the running `botai` executable with a GitHub release binary. Full behaviour in section 16.
+  - Handled before configuration loading, so a broken `config.toml` cannot block an update.
+  - `--check`: Prints the current and latest version and exits `0` whether or not an update exists (non-zero is reserved for errors). Conflicts with `--version`.
+  - `--version <TAG>`: Installs a specific release tag (`v0.2.0` or `0.2.0`); downgrades are allowed.
+  - `--pre`: Includes prereleases when resolving the latest release.
+  - Prints `Updated botai vOLD -> vNEW` or `botai vX is already up to date.`
 - **`botai destroy <project-name> [--force]`**:
   - Validates all child worktrees for uncommitted changes upfront and refuses deletion unless `--force` is specified.
   - Executes configured template `pre_destroy` lifecycle hooks sequentially at the project root directory before unlinking worktrees, capturing command output and logging warnings on failures.
@@ -741,7 +760,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **4. Unsafe Code Audit Gate (`unsafe-audit`)**:
     - Runs on `ubuntu-latest`.
     - **Strict `#![forbid(unsafe_code)]` Enforcement**: Verifies that crate root headers (`src/lib.rs` and `src/main.rs`) explicitly mandate `#![forbid(unsafe_code)]`.
-    - **Zero Unsafe Usage Policy**: Scans all source files under `src/` to guarantee zero `unsafe` keyword blocks or invocations exist in the production codebase.
+    - **Zero Unsafe Usage Policy**: Scans all source files under `src/` for `unsafe` used as code (`unsafe {`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`, `#[unsafe(...)]`), so the word in comments or identifiers does not trip the gate.
     - **Compilation Verification**: Confirms clean `cargo check --all-targets --all-features` pass under the strict forbid lint constraint.
 
 ---
@@ -818,3 +837,49 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - `.github/ISSUE_TEMPLATE/feature_request.yml`
     - `.github/pull_request_template.md`
 
+---
+
+## 16. Self Update
+- **Behaviour**:
+
+  | Trigger | Action |
+  |---|---|
+  | TUI launch (dashboard, `attach`, `create --attach`) | If the cached check is older than 24h, a background thread queries GitHub (5s timeout) and rewrites the cache. Never blocks or fails the launch. A fresh cache answers without network. |
+  | TUI | When a newer release is known, the dashboard top bar and the in-session status bar show `update vX.Y.Z available: botai update` (theme `status_waiting` colour). The notice is dropped before the key hints shrink when the bar is narrow. |
+  | Other CLI subcommands | No network. After a successful command, one stderr line is printed if the cache records a newer release. Suppressed when stderr is not a TTY, and for `update` and `init --stdout`. |
+  | `botai update` | Resolves the release, downloads the platform archive and `SHA256SUMS`, verifies, extracts, replaces the running executable, prints `vOLD -> vNEW` or "already up to date". |
+  | `botai update --check` | Prints current and latest version; exit `0` either way. |
+  | `botai update --version vX.Y.Z` | Installs that tag, downgrade allowed. Skipped only when the tag equals the running version exactly. After the optional `v` prefix is added, the tag must be non-empty, use only `[A-Za-z0-9._+-]` and contain no `..` (`.` alone is rejected too); otherwise it fails with "Invalid release tag" before any request. |
+  | `botai update --pre` | Resolves the highest non-draft release from the `/releases` list, prereleases included (`/releases/latest` excludes them). |
+
+- **Startup Check Opt-Outs**: The startup check and the CLI notice are skipped when any of these hold:
+  - `[update] check_on_startup = false`.
+  - `BOTAI_NO_UPDATE_CHECK` is set to a truthy value.
+  - `CI` is set to a truthy value.
+  - Both variables use one rule: unset, empty, `0`, `false`, `no` and `off` (case-insensitive, surrounding whitespace ignored) are false; any other value is true.
+  - The build is not a release build: `-dirty` suffix, `-N-g<sha>` suffix, exactly `v0.0.0`, or `v0.0.0-dev-*`. Semver prerelease tags such as `v0.2.0-rc.1` count as release builds.
+- **Version Comparison**: `-dirty` and `-N-g<sha>` are stripped before semver parsing, so `v0.0.1-4-gabc` compares equal to `v0.0.1` (not as a prerelease of it) and a release is offered only when strictly newer.
+- **Source Builds**: `botai update` works on non-release builds. Once a release to install has been resolved, and before the binary is replaced, it warns that it replaces a source build with the prebuilt release binary. No warning when it is already up to date.
+- **GitHub API**:
+  - `GET https://api.github.com/repos/okunnig/botai/releases/latest`, `/releases/tags/<tag>`, or `/releases?per_page=30` for `--pre` (drafts skipped).
+  - Headers: `User-Agent: botai/<version>`, `Accept: application/vnd.github+json`, and `Authorization: Bearer $GITHUB_TOKEN` when set (the anonymous limit is 60 requests/hour; the 24h cache keeps checks well under it). 429, and 403 with `x-ratelimit-remaining: 0` or a `retry-after` header (secondary rate limit), produce a rate limit error suggesting `GITHUB_TOKEN`. Any other non-2xx, non-404 status (including other 403s) produces `HTTP <status>`, followed by GitHub's JSON `message` when present. The token is sent to the API only, not to asset downloads.
+  - Proxies are honoured via `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`.
+  - Hidden `BOTAI_UPDATE_BASE_URL` overrides the API base URL in debug builds only (tests point it at a local fixture server); release builds always use `https://api.github.com`. Asset URLs come from each asset's `browser_download_url`.
+- **Cache**: `update-check.toml` in the platform cache directory (`<cache dir>/botai/`, e.g. `~/Library/Caches/botai/`, `~/.cache/botai/`, `%LOCALAPPDATA%\botai\`) with `last_checked` (unix seconds of the last attempt) and `latest_tag` (omitted until a check succeeds). Written via temp file and rename because two botai instances may write at once. A missing or corrupt cache counts as stale. A failed startup check (network error, HTTP error, rate limit) still rewrites `last_checked`, so failures also wait 24h before the next attempt; the previously known `latest_tag` is kept and still used for the notice.
+- **Install Procedure & Checksum Policy**:
+  - Download the platform archive and `SHA256SUMS`; the archive's line in `SHA256SUMS` must exist and match, otherwise the install fails without touching the binary.
+  - Extract only the `botai` / `botai.exe` entry at the archive root (a leading `./` is accepted). Entries with `..` components or absolute paths fail the install.
+  - Stage the new binary in a temp directory next to the current executable (same filesystem), `chmod 0o755` on unix, then swap it in with `self_replace`, which renames rather than overwrites: Windows locks a running exe, and macOS kills a signed binary overwritten in place. The staging directory is removed on success and on failure.
+  - Permission errors suggest re-running with `sudo` or reinstalling to a user-writable directory.
+- **Supported Platforms & Asset-Name Contract**: `botai update` maps the build target to the assets published by `release.yml`:
+
+  | Target | Asset |
+  |---|---|
+  | Linux x86_64 | `botai-<tag>-linux-x86_64.tar.gz` |
+  | macOS aarch64 | `botai-<tag>-macos-aarch64.tar.gz` |
+  | Windows x86_64 | `botai-<tag>-windows-x86_64.zip` |
+
+  Every release must also attach `SHA256SUMS`. Renaming or removing these assets breaks `botai update` for existing installs. Other targets (macOS x86_64, Linux aarch64, Windows aarch64) get an error pointing to `cargo install --git`.
+- **Known Limits**:
+  - `SHA256SUMS` comes from the same release as the archive, so it detects corrupt downloads, not a compromised release. Follow-up options: signed checksums (minisign) or GitHub artifact attestations in `release.yml`; the API's per-asset `digest` field could serve as an additional cross-check.
+  - `cargo install --git` builds carry no tag information: cargo's git checkout (`~/.cargo/git/checkouts/...`) contains no tags, even with `--tag` or `net.git-fetch-with-cli`, so `git describe` yields a bare SHA and `build.rs` reports `v0.0.0-dev-<sha>`. Such installs get no startup notice. `botai update` on them warns, then replaces `~/.cargo/bin/botai`, leaving cargo's install metadata (`~/.cargo/.crates.toml`) stale; a later `cargo install --git ... --force` restores a source build.

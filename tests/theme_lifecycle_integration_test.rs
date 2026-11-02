@@ -70,7 +70,7 @@ repos = ["/tmp/repos/shop"]
     );
     let area = Rect::new(0, 0, 80, 20);
     let mut buf = Buffer::empty(area);
-    render_dashboard(&dashboard_state, area, &mut buf, &theme);
+    render_dashboard(&dashboard_state, area, &mut buf, &theme, None);
 
     // Verify top header status bar background matches cyberpunk status_bar_bg
     let header_cell = buf.cell((0, 0)).unwrap();
