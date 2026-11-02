@@ -5,6 +5,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use botai::cli::{resolve_cli_selected_repos, Cli, Commands};
 use botai::config::Config;
@@ -26,6 +27,16 @@ fn main() -> Result<()> {
         return cmd_edit(cli.config.as_deref(), editor.as_deref());
     }
 
+    // Before config load so a broken config cannot block an update.
+    if let Some(Commands::Update {
+        check,
+        version,
+        pre,
+    }) = cli.command
+    {
+        return cmd_update(check, version, pre);
+    }
+
     let config_path = match cli.config {
         Some(path) => path,
         None => Config::default_path().context(
@@ -42,7 +53,9 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => run_default_dashboard(&config, &config_path),
-        Some(Commands::Init { .. }) | Some(Commands::Edit { .. }) => unreachable!(),
+        Some(Commands::Init { .. })
+        | Some(Commands::Edit { .. })
+        | Some(Commands::Update { .. }) => unreachable!(),
         Some(Commands::Create {
             template,
             project,
@@ -122,6 +135,48 @@ fn cmd_edit(config_override: Option<&Path>, editor_override: Option<&str>) -> Re
         std::process::exit(exit_code);
     }
 
+    Ok(())
+}
+
+/// `botai update [--check] [--version <TAG>] [--pre]`
+fn cmd_update(check: bool, tag: Option<String>, pre: bool) -> Result<()> {
+    use botai::update::{self, version, Client, InstallOutcome, ReleaseQuery};
+
+    let current = version::current();
+    let client = Client::from_env(Duration::from_secs(120));
+    let query = match (tag, pre) {
+        (Some(tag), _) => ReleaseQuery::Tag(tag),
+        (None, true) => ReleaseQuery::LatestIncludingPrerelease,
+        (None, false) => ReleaseQuery::Latest,
+    };
+
+    if check {
+        let status = update::check_latest(&client, &query, current)?;
+        println!("Current version: {current}");
+        println!("Latest version:  {}", status.latest);
+        if status.update_available() {
+            println!("Update available. Run `botai update` to install it.");
+        } else {
+            println!("botai is up to date.");
+        }
+        return Ok(());
+    }
+
+    if !version::is_release_build(current) {
+        eprintln!(
+            "warning: botai {current} is a source build; `botai update` replaces it with the prebuilt release binary."
+        );
+    }
+
+    let target = update::install::current_exe()?;
+    match update::install(&client, &query, current, &target)? {
+        InstallOutcome::AlreadyUpToDate { version } => {
+            println!("botai {version} is already up to date.");
+        }
+        InstallOutcome::Installed { from, to } => {
+            println!("Updated botai {from} -> {to}");
+        }
+    }
     Ok(())
 }
 

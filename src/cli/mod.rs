@@ -94,6 +94,21 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+
+    /// Update botai to the latest GitHub release.
+    Update {
+        /// Only print the current and latest version; do not install.
+        #[arg(long)]
+        check: bool,
+
+        /// Install a specific release tag (e.g. v0.2.0); downgrades are allowed.
+        #[arg(long, value_name = "TAG", conflicts_with = "check")]
+        version: Option<String>,
+
+        /// Include prereleases when looking for the latest release.
+        #[arg(long)]
+        pre: bool,
+    },
 }
 
 impl Cli {
@@ -815,5 +830,53 @@ mod tests {
         let output_short = parse_err_short.to_string();
         assert!(output_short.starts_with("botai "));
         assert!(output_short.contains(env!("BOTAI_VERSION")));
+    }
+
+    #[test]
+    fn test_cli_update_subcommand_defaults() {
+        let cli = Cli::try_parse_from(["botai", "update"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Commands::Update {
+                check: false,
+                version: None,
+                pre: false
+            })
+        );
+    }
+
+    #[test]
+    fn test_cli_update_subcommand_flags() {
+        let cli = Cli::try_parse_from(["botai", "update", "--check", "--pre"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Commands::Update {
+                check: true,
+                version: None,
+                pre: true
+            })
+        );
+
+        let cli = Cli::try_parse_from(["botai", "update", "--version", "v0.2.0"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Commands::Update {
+                check: false,
+                version: Some("v0.2.0".into()),
+                pre: false
+            })
+        );
+    }
+
+    #[test]
+    fn test_cli_update_check_conflicts_with_version() {
+        let err =
+            Cli::try_parse_from(["botai", "update", "--check", "--version", "v0.2.0"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_cli_update_version_requires_tag() {
+        assert!(Cli::try_parse_from(["botai", "update", "--version"]).is_err());
     }
 }
