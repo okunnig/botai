@@ -3,12 +3,12 @@
 use anyhow::{bail, Context, Result};
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use botai::cli::{resolve_cli_selected_repos, Cli, Commands};
-use botai::config::Config;
+use botai::config::{Config, UpdateConfig};
 use botai::project::{ProjectBuilder, ProjectSetupEvent};
 use botai::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen, DEFAULT_VIEWPORT,
@@ -20,11 +20,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse_args();
 
     if let Some(Commands::Init { force, stdout }) = cli.command {
-        return cmd_init(cli.config.as_deref(), force, stdout);
+        cmd_init(cli.config.as_deref(), force, stdout)?;
+        if !stdout {
+            print_cached_update_notice(&best_effort_update_config(cli.config.as_deref()));
+        }
+        return Ok(());
     }
 
     if let Some(Commands::Edit { editor }) = cli.command {
-        return cmd_edit(cli.config.as_deref(), editor.as_deref());
+        cmd_edit(cli.config.as_deref(), editor.as_deref())?;
+        print_cached_update_notice(&best_effort_update_config(cli.config.as_deref()));
+        return Ok(());
     }
 
     // Before config load so a broken config cannot block an update.
@@ -51,7 +57,12 @@ fn main() -> Result<()> {
         Config::default()
     };
 
-    match cli.command {
+    let opens_tui = matches!(
+        cli.command,
+        None | Some(Commands::Attach { .. }) | Some(Commands::Create { attach: true, .. })
+    );
+
+    let result = match cli.command {
         None => run_default_dashboard(&config, &config_path),
         Some(Commands::Init { .. })
         | Some(Commands::Edit { .. })
@@ -87,6 +98,50 @@ fn main() -> Result<()> {
         Some(Commands::Attach { project }) => cmd_attach(&config, &project),
         Some(Commands::List) => cmd_list(&config),
         Some(Commands::Destroy { project, force }) => cmd_destroy(Some(&config), &project, force),
+    };
+
+    if result.is_ok() && !opens_tui {
+        print_cached_update_notice(&config.update);
+    }
+    result
+}
+
+/// Prints one stderr line when the cached startup check knows of a newer release.
+///
+/// Never touches the network: a background check would be killed when a short command exits.
+fn print_cached_update_notice(update_config: &UpdateConfig) {
+    use botai::update::{self, cache, version};
+
+    if !io::stderr().is_terminal() {
+        return;
+    }
+    let current = version::current();
+    if !update::startup_check_enabled(current, update_config, |k| env::var(k).ok()) {
+        return;
+    }
+    let Some(path) = cache::default_path() else {
+        return;
+    };
+    if let Some(status) = update::cached_update(current, cache::read(&path).as_ref()) {
+        eprintln!("{}", update::cli_notice_text(&status));
+    }
+}
+
+/// The `[update]` settings for commands that run before (or without) a valid config.
+fn best_effort_update_config(config_override: Option<&Path>) -> UpdateConfig {
+    config_override
+        .map(Path::to_path_buf)
+        .or_else(Config::default_path)
+        .and_then(|path| Config::load_from_file(path).ok())
+        .map(|config| config.update)
+        .unwrap_or_default()
+}
+
+/// Starts the background update check for TUI launches and wires it into the app.
+fn with_startup_update_check(app: TuiApp, config: &Config) -> TuiApp {
+    match botai::update::spawn_startup_check(&config.update) {
+        Some(rx) => app.with_update_check(rx),
+        None => app,
     }
 }
 
@@ -242,11 +297,12 @@ fn run_default_dashboard(config: &Config, config_path: &Path) -> Result<()> {
     let cwd = env::current_dir().context("Failed to get current working directory")?;
     let dashboard = DashboardState::from_env(config, &cwd).with_config_path(config_path);
     let registry = SessionRegistry::new();
-    let mut app = TuiApp::new(registry)
+    let app = TuiApp::new(registry)
         .with_dashboard(dashboard)
         .with_config(config.clone())
         .with_config_path(config_path)
         .with_cwd(cwd);
+    let mut app = with_startup_update_check(app, config);
     let mut stdout = io::stdout();
     app.run(&mut stdout)?;
     Ok(())
@@ -398,9 +454,10 @@ fn run_tui(
     let mut registry = SessionRegistry::new();
     registry.add(ps, pty, vt)?;
 
-    let mut app = TuiApp::new(registry)
+    let app = TuiApp::new(registry)
         .with_config(config.clone())
         .with_cwd(cwd);
+    let mut app = with_startup_update_check(app, config);
     let mut stdout = io::stdout();
     app.run(&mut stdout)?;
 

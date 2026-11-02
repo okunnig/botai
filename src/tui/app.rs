@@ -48,6 +48,7 @@ use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgress
 use crate::tui::status_bar::StatusBar;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{compute_layout, TerminalView, STATUS_BAR_HEIGHT};
+use crate::update::{self, UpdateStatus};
 
 /// Main application runner managing the TUI loop, PTY streaming, activity tracking, and rendering.
 pub struct TuiApp {
@@ -70,6 +71,8 @@ pub struct TuiApp {
     pub config_path: Option<PathBuf>,
     pub config_last_modified: Option<std::time::SystemTime>,
     pub config_file_len: Option<u64>,
+    pub update_rx: Option<std::sync::mpsc::Receiver<UpdateStatus>>,
+    pub update_notice: Option<String>,
 }
 
 /// Whether botai pushed kitty keyboard flags, so exactly one matching pop is emitted.
@@ -287,6 +290,36 @@ impl TuiApp {
             config_path: None,
             config_last_modified: None,
             config_file_len: None,
+            update_rx: None,
+            update_notice: None,
+        }
+    }
+
+    /// Attaches the receiver of a background update check started by `update::spawn_startup_check`.
+    pub fn with_update_check(mut self, rx: std::sync::mpsc::Receiver<UpdateStatus>) -> Self {
+        self.update_rx = Some(rx);
+        self
+    }
+
+    /// Picks up the startup update check result; returns true when the notice changed.
+    pub fn poll_update_check(&mut self) -> bool {
+        let Some(rx) = &self.update_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(status) => {
+                self.update_rx = None;
+                if status.update_available() {
+                    self.update_notice = Some(update::notice_text(&status.latest));
+                    return true;
+                }
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.update_rx = None;
+                false
+            }
         }
     }
 
@@ -576,6 +609,9 @@ impl TuiApp {
             if self.poll_destroy_progress() {
                 dirty = true;
             }
+            if self.poll_update_check() {
+                dirty = true;
+            }
             if let Some(dashboard) = &mut self.dashboard {
                 if dashboard.poll_validation() {
                     dirty = true;
@@ -603,6 +639,9 @@ impl TuiApp {
             // 3. Draw active frame conditionally
             if dirty {
                 let theme = self.config.theme();
+                if let Some(dashboard) = &mut self.dashboard {
+                    dashboard.update_notice.clone_from(&self.update_notice);
+                }
                 terminal
                     .draw(|f| {
                         let (status_area, term_area) = compute_layout(f.area());
@@ -618,6 +657,7 @@ impl TuiApp {
                             f.render_widget(
                                 StatusBar::new(&self.registry)
                                     .with_leader(self.leader_active)
+                                    .with_update_notice(self.update_notice.as_deref())
                                     .with_theme(&theme),
                                 status_area,
                             );
@@ -4183,5 +4223,47 @@ repos = []
             app.registry.active_session().unwrap().status(),
             SessionStatus::Busy
         );
+    }
+
+    #[test]
+    fn test_poll_update_check_sets_notice_once() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(rx);
+
+        assert!(!app.poll_update_check());
+        assert!(app.update_rx.is_some());
+
+        tx.send(UpdateStatus {
+            current: "v0.1.0".into(),
+            latest: "v0.2.0".into(),
+        })
+        .unwrap();
+        assert!(app.poll_update_check());
+        assert_eq!(
+            app.update_notice.as_deref(),
+            Some("update v0.2.0 available: botai update")
+        );
+        assert!(app.update_rx.is_none());
+        assert!(!app.poll_update_check());
+    }
+
+    #[test]
+    fn test_poll_update_check_ignores_up_to_date_and_disconnect() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(rx);
+        tx.send(UpdateStatus {
+            current: "v0.2.0".into(),
+            latest: "v0.2.0".into(),
+        })
+        .unwrap();
+        assert!(!app.poll_update_check());
+        assert!(app.update_notice.is_none());
+
+        let (tx, rx) = std::sync::mpsc::channel::<UpdateStatus>();
+        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(rx);
+        drop(tx);
+        assert!(!app.poll_update_check());
+        assert!(app.update_rx.is_none());
+        assert!(app.update_notice.is_none());
     }
 }

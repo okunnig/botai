@@ -242,6 +242,7 @@ pub fn compute_visible_tab_range(
 pub struct StatusBar<'a> {
     registry: &'a SessionRegistry,
     leader_active: bool,
+    update_notice: Option<&'a str>,
     theme: Option<&'a Theme>,
 }
 
@@ -251,8 +252,15 @@ impl<'a> StatusBar<'a> {
         Self {
             registry,
             leader_active: false,
+            update_notice: None,
             theme: None,
         }
+    }
+
+    /// Configures the update notice shown before the hint when there is room.
+    pub fn with_update_notice(mut self, notice: Option<&'a str>) -> Self {
+        self.update_notice = notice;
+        self
     }
 
     /// Configures whether leader mode is actively displayed on the status bar.
@@ -431,6 +439,18 @@ impl<'a> StatusBar<'a> {
         area: Rect,
         buf: &mut Buffer,
     ) {
+        Self::render_with_notice(registry, leader_active, None, theme, area, buf);
+    }
+
+    /// Renders the status bar, showing `update_notice` beside the hint when it fits.
+    pub fn render_with_notice(
+        registry: &SessionRegistry,
+        leader_active: bool,
+        update_notice: Option<&str>,
+        theme: &Theme,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -499,9 +519,29 @@ impl<'a> StatusBar<'a> {
 
             let full_tabs_line = Self::build_tabs_line(sessions, active_idx, area.width, theme);
             let full_tabs_width = full_tabs_line.width() as u16;
+            let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
 
-            if area.width > full_tabs_width + needed_hint_width {
-                let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
+            let notice_line = update_notice.map(|notice| {
+                let notice_style = Style::default()
+                    .fg(theme.status_waiting)
+                    .bg(theme.status_bar_bg)
+                    .add_modifier(Modifier::BOLD);
+                Line::from(vec![
+                    Span::styled(notice, notice_style),
+                    Span::styled(" | ", hint_style),
+                    Span::styled(hint, hint_style),
+                ])
+            });
+
+            if let Some(line) =
+                notice_line.filter(|line| area.width > full_tabs_width + line.width() as u16 + 1)
+            {
+                let len = line.width() as u16;
+                TopBar::new(full_tabs_line)
+                    .with_theme(theme)
+                    .with_right_and_padding(line, len, true)
+                    .render_to_buffer(area, buf);
+            } else if area.width > full_tabs_width + needed_hint_width {
                 let hint_line = Line::from(Span::styled(hint, hint_style));
                 let top_bar = TopBar::new(full_tabs_line)
                     .with_theme(theme)
@@ -519,7 +559,14 @@ impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        Self::render_to_buffer_with_theme(self.registry, self.leader_active, theme, area, buf);
+        Self::render_with_notice(
+            self.registry,
+            self.leader_active,
+            self.update_notice,
+            theme,
+            area,
+            buf,
+        );
     }
 }
 
@@ -527,7 +574,14 @@ impl<'a> Widget for &StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        StatusBar::render_to_buffer_with_theme(self.registry, self.leader_active, theme, area, buf);
+        StatusBar::render_with_notice(
+            self.registry,
+            self.leader_active,
+            self.update_notice,
+            theme,
+            area,
+            buf,
+        );
     }
 }
 
@@ -1264,5 +1318,37 @@ mod tests {
         assert!(no_tpl_tab.chars().count() <= MAX_TAB_WIDTH);
         assert!(!no_tpl_tab.contains('[') && !no_tpl_tab.contains(']'));
         assert!(no_tpl_tab.contains('…'));
+    }
+
+    #[test]
+    fn test_status_bar_update_notice_shown_when_it_fits() {
+        let mut registry = SessionRegistry::new();
+        let (ps, pty, vt) =
+            create_test_session_with_status("proj", "tpl", "claude", SessionStatus::Busy);
+        registry.add(ps, pty, vt).unwrap();
+        let theme = Theme::tokyo_night();
+        let notice = "update v9.0.0 available: botai update";
+
+        let render = |width: u16| {
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            StatusBar::new(&registry)
+                .with_update_notice(Some(notice))
+                .with_theme(&theme)
+                .render(area, &mut buffer);
+            buffer
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        };
+
+        let wide = render(120);
+        assert!(wide.contains(notice), "{wide}");
+        assert!(wide.contains("Ctrl+Space: Actions"), "{wide}");
+
+        let narrow = render(50);
+        assert!(!narrow.contains("update v9.0.0"), "{narrow}");
+        assert!(narrow.contains("Ctrl+Space: Actions"), "{narrow}");
     }
 }

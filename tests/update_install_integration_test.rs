@@ -241,3 +241,108 @@ fn install_rejects_archive_without_binary() {
     release.archive = Some(support::platform_archive(&[("README.md", b"readme")]));
     assert_install_fails(release, |e| matches!(e, UpdateError::BinaryNotInArchive(_)));
 }
+
+mod startup_check {
+    use super::*;
+    use botai::update::cache::{self, CacheEntry, CHECK_INTERVAL};
+    use botai::update::spawn_check_with;
+
+    const NOW: u64 = 1_000_000;
+
+    fn recv(rx: std::sync::mpsc::Receiver<update::UpdateStatus>) -> Option<update::UpdateStatus> {
+        rx.recv_timeout(Duration::from_secs(10)).ok()
+    }
+
+    #[test]
+    fn stale_cache_queries_github_and_rewrites_cache() {
+        let server = serve(FixtureRelease::new("v0.3.0", b"x"), vec![]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-check.toml");
+        cache::write(
+            &path,
+            &CacheEntry {
+                last_checked: NOW - CHECK_INTERVAL.as_secs(),
+                latest_tag: "v0.1.0".into(),
+            },
+        )
+        .unwrap();
+
+        let status = recv(spawn_check_with(
+            "v0.2.0".into(),
+            path.clone(),
+            client(&server),
+            NOW,
+        ));
+
+        assert_eq!(status.unwrap().latest, "v0.3.0");
+        assert_eq!(
+            cache::read(&path),
+            Some(CacheEntry {
+                last_checked: NOW,
+                latest_tag: "v0.3.0".into()
+            })
+        );
+    }
+
+    #[test]
+    fn fresh_cache_answers_without_network() {
+        let server = FixtureServer::start(|_| Routes::new());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-check.toml");
+        cache::write(
+            &path,
+            &CacheEntry {
+                last_checked: NOW - 60,
+                latest_tag: "v0.3.0".into(),
+            },
+        )
+        .unwrap();
+
+        let status = recv(spawn_check_with(
+            "v0.2.0".into(),
+            path,
+            client(&server),
+            NOW,
+        ));
+
+        assert_eq!(status.unwrap().latest, "v0.3.0");
+        assert!(server.requests().is_empty());
+    }
+
+    #[test]
+    fn no_message_when_up_to_date() {
+        let server = serve(FixtureRelease::new("v0.2.0", b"x"), vec![]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-check.toml");
+
+        let status = recv(spawn_check_with(
+            "v0.2.0".into(),
+            path.clone(),
+            client(&server),
+            NOW,
+        ));
+
+        assert_eq!(status, None);
+        assert_eq!(cache::read(&path).unwrap().latest_tag, "v0.2.0");
+    }
+
+    #[test]
+    fn network_failure_falls_back_to_stale_cache() {
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", dead.local_addr().unwrap());
+        drop(dead);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-check.toml");
+        let stale = CacheEntry {
+            last_checked: 0,
+            latest_tag: "v0.3.0".into(),
+        };
+        cache::write(&path, &stale).unwrap();
+
+        let client = Client::new(base, Duration::from_secs(2));
+        let status = recv(spawn_check_with("v0.2.0".into(), path.clone(), client, NOW));
+
+        assert_eq!(status.unwrap().latest, "v0.3.0");
+        assert_eq!(cache::read(&path), Some(stale));
+    }
+}

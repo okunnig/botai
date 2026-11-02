@@ -76,6 +76,8 @@ pub struct DashboardState {
     pub config_path: Option<PathBuf>,
     pub config_last_modified: Option<std::time::SystemTime>,
     pub config_file_len: Option<u64>,
+    /// Update notice shown on the top bar, e.g. `update v0.2.0 available: botai update`.
+    pub update_notice: Option<String>,
 }
 
 impl DashboardState {
@@ -112,6 +114,7 @@ impl DashboardState {
             config_path: None,
             config_last_modified: None,
             config_file_len: None,
+            update_notice: None,
         }
     }
 
@@ -411,25 +414,32 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     let compact_hints = "Enter: Attach | n: New | d: Destroy | q: Quit";
     let minimal_hints = "q: Quit";
 
-    let full_len = full_hints.chars().count() as u16;
-    let compact_len = compact_hints.chars().count() as u16;
-    let minimal_len = minimal_hints.chars().count() as u16;
+    let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
+    let notice_style = Style::default()
+        .fg(theme.status_waiting)
+        .bg(theme.status_bar_bg)
+        .add_modifier(Modifier::BOLD);
 
-    let hint_to_render = if header_area.width >= brand_len + full_len + 2 {
-        Some((full_hints, full_len))
-    } else if header_area.width >= brand_len + compact_len + 2 {
-        Some((compact_hints, compact_len))
-    } else if header_area.width >= brand_len + minimal_len + 2 {
-        Some((minimal_hints, minimal_len))
-    } else {
-        None
-    };
+    // The notice is dropped before the hints shrink.
+    let mut candidates: Vec<Line> = Vec::new();
+    if let Some(notice) = &state.update_notice {
+        candidates.push(Line::from(vec![
+            Span::styled(notice.as_str(), notice_style),
+            Span::styled(" | ", hint_style),
+            Span::styled(full_hints, hint_style),
+        ]));
+    }
+    for hints in [full_hints, compact_hints, minimal_hints] {
+        candidates.push(Line::from(Span::styled(hints, hint_style)));
+    }
 
     let mut top_bar = TopBar::new(brand_line).with_theme(theme);
-    if let Some((hint_str, hint_len)) = hint_to_render {
-        let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
-        let hint_line = Line::from(Span::styled(hint_str, hint_style));
-        top_bar = top_bar.with_right(hint_line, hint_len);
+    if let Some(line) = candidates
+        .into_iter()
+        .find(|line| header_area.width >= brand_len + line.width() as u16 + 2)
+    {
+        let len = line.width() as u16;
+        top_bar = top_bar.with_right(line, len);
     }
     top_bar.render(header_area, buf);
 
@@ -1414,5 +1424,33 @@ repos = ["repo1"]
             state.creation_modal.unwrap().templates,
             vec!["base_tpl".to_string()]
         );
+    }
+
+    fn header_row(state: &DashboardState, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 10);
+        let mut buf = Buffer::empty(area);
+        render_dashboard(state, area, &mut buf, &Theme::default());
+        (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    #[test]
+    fn test_render_dashboard_update_notice() {
+        let mut state = DashboardState::new(vec!["ws".into()], vec!["proj".into()]);
+        state.update_notice = Some("update v9.0.0 available: botai update".into());
+
+        let wide = header_row(&state, 140);
+        assert!(
+            wide.contains("update v9.0.0 available: botai update"),
+            "{wide}"
+        );
+        assert!(wide.contains("↑/↓: Navigate"), "{wide}");
+
+        // Too narrow for both: the notice goes first, full hints stay.
+        let medium = header_row(&state, 100);
+        assert!(!medium.contains("update v9.0.0"), "{medium}");
+        assert!(medium.contains("↑/↓: Navigate"), "{medium}");
+
+        state.update_notice = None;
+        assert!(!header_row(&state, 140).contains("available"));
     }
 }
