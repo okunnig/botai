@@ -29,6 +29,7 @@ vt100 = "0.16"
 tokio = { version = "1.38", features = ["full"] }
 # Canonicalize without a `\\?\` prefix: git rejects those as positional path arguments.
 dunce = "1.0"
+semver = "1.0.28"
 
 # Safe console-mode wrappers; the crate is `#![forbid(unsafe_code)]`.
 [target.'cfg(windows)'.dependencies]
