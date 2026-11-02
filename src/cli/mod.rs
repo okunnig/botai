@@ -111,6 +111,21 @@ pub enum Commands {
     },
 }
 
+impl Commands {
+    /// Whether a cached update notice is printed to stderr after this command succeeds.
+    ///
+    /// False for commands that open the TUI (it shows its own notice), for `update`, and for
+    /// `init --stdout`, whose output is meant to be redirected.
+    pub fn shows_cli_update_notice(&self) -> bool {
+        match self {
+            Self::Attach { .. } | Self::Update { .. } => false,
+            Self::Create { attach, .. } => !attach,
+            Self::Init { stdout, .. } => !stdout,
+            Self::Sync { .. } | Self::List | Self::Edit { .. } | Self::Destroy { .. } => true,
+        }
+    }
+}
+
 impl Cli {
     /// Parses CLI arguments from the environment.
     pub fn parse_args() -> Self {
@@ -873,6 +888,25 @@ mod tests {
         let err =
             Cli::try_parse_from(["botai", "update", "--check", "--version", "v0.2.0"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_shows_cli_update_notice() {
+        let shows = |args: &[&str]| {
+            Cli::try_parse_from(args)
+                .unwrap()
+                .command
+                .unwrap()
+                .shows_cli_update_notice()
+        };
+        assert!(shows(&["botai", "list"]));
+        assert!(shows(&["botai", "init"]));
+        assert!(shows(&["botai", "edit"]));
+        assert!(shows(&["botai", "create", "tpl", "proj"]));
+        assert!(!shows(&["botai", "create", "tpl", "proj", "--attach"]));
+        assert!(!shows(&["botai", "attach", "proj"]));
+        assert!(!shows(&["botai", "init", "--stdout"]));
+        assert!(!shows(&["botai", "update", "--check"]));
     }
 
     #[test]

@@ -47,8 +47,7 @@ fn update_check_prints_current_and_latest() {
 
 #[test]
 fn update_check_with_pre_includes_prereleases() {
-    let mut rc = FixtureRelease::new("v99.1.0-rc.1", b"rc");
-    rc.prerelease = true;
+    let rc = FixtureRelease::new("v99.1.0-rc.1", b"rc");
     let server = serve(FixtureRelease::new("v99.0.0", b"new"), vec![rc]);
     botai(&server)
         .args(["update", "--check", "--pre"])

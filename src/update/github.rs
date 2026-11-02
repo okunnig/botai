@@ -7,11 +7,11 @@ use std::time::Duration;
 use super::{version, UpdateError};
 
 /// Repository whose releases botai updates from.
-pub const REPO: &str = "okunnig/botai";
+const REPO: &str = "okunnig/botai";
 /// Public GitHub API endpoint.
-pub const DEFAULT_API_BASE: &str = "https://api.github.com";
+const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// Hidden override of the API base URL, used by tests.
-pub const BASE_URL_ENV: &str = "BOTAI_UPDATE_BASE_URL";
+const BASE_URL_ENV: &str = "BOTAI_UPDATE_BASE_URL";
 
 /// Upper bound on a downloaded asset; release archives are a few MB.
 const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
@@ -22,8 +22,6 @@ pub struct Release {
     pub tag_name: String,
     #[serde(default)]
     pub draft: bool,
-    #[serde(default)]
-    pub prerelease: bool,
     #[serde(default)]
     pub assets: Vec<ReleaseAsset>,
 }
@@ -36,9 +34,16 @@ pub struct ReleaseAsset {
 }
 
 impl Release {
-    /// Finds an attached asset by exact name.
-    pub fn asset(&self, name: &str) -> Option<&ReleaseAsset> {
-        self.assets.iter().find(|a| a.name == name)
+    /// Download URL of the attached asset with exactly this name.
+    pub fn asset_url(&self, name: &str) -> Result<&str, UpdateError> {
+        self.assets
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.browser_download_url.as_str())
+            .ok_or_else(|| UpdateError::AssetMissing {
+                tag: self.tag_name.clone(),
+                asset: name.to_string(),
+            })
     }
 }
 
@@ -54,17 +59,17 @@ pub enum ReleaseQuery {
 }
 
 /// Normalizes a user supplied tag so `0.2.0` and `v0.2.0` both work.
-pub fn normalize_tag(tag: &str) -> String {
-    let tag = tag.trim();
-    if tag.starts_with(|c: char| c.is_ascii_digit()) {
-        format!("v{tag}")
+fn normalize_tag(tag: &str) -> String {
+    let bare = version::strip_v(tag);
+    if bare.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("v{bare}")
     } else {
-        tag.to_string()
+        tag.trim().to_string()
     }
 }
 
 /// API base URL, honouring `BOTAI_UPDATE_BASE_URL`.
-pub fn api_base_from_env() -> String {
+fn api_base_from_env() -> String {
     std::env::var(BASE_URL_ENV)
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -109,7 +114,8 @@ impl Client {
         self
     }
 
-    fn api_get(&self, path: &str) -> Result<(u16, String), UpdateError> {
+    /// GETs an API path; `None` means 404.
+    fn api_get(&self, path: &str) -> Result<Option<String>, UpdateError> {
         let url = format!("{}/repos/{REPO}{path}", self.api_base);
         let mut req = self
             .agent
@@ -133,7 +139,8 @@ impl Client {
                 message: e.to_string(),
             })?;
         match status {
-            200..=299 | 404 => Ok((status, body)),
+            200..=299 => Ok(Some(body)),
+            404 => Ok(None),
             403 | 429 => Err(UpdateError::RateLimited),
             _ => Err(UpdateError::Http {
                 url,
@@ -146,18 +153,16 @@ impl Client {
     pub fn fetch_release(&self, query: &ReleaseQuery) -> Result<Release, UpdateError> {
         match query {
             ReleaseQuery::Latest => {
-                let (status, body) = self.api_get("/releases/latest")?;
-                if status == 404 {
-                    return Err(UpdateError::NoRelease);
-                }
+                let body = self
+                    .api_get("/releases/latest")?
+                    .ok_or(UpdateError::NoRelease)?;
                 parse_json(&body)
             }
             ReleaseQuery::Tag(tag) => {
                 let tag = normalize_tag(tag);
-                let (status, body) = self.api_get(&format!("/releases/tags/{tag}"))?;
-                if status == 404 {
+                let Some(body) = self.api_get(&format!("/releases/tags/{tag}"))? else {
                     return Err(UpdateError::ReleaseNotFound(tag));
-                }
+                };
                 let release: Release = parse_json(&body)?;
                 if release.draft {
                     return Err(UpdateError::ReleaseNotFound(tag));
@@ -165,10 +170,9 @@ impl Client {
                 Ok(release)
             }
             ReleaseQuery::LatestIncludingPrerelease => {
-                let (status, body) = self.api_get("/releases?per_page=30")?;
-                if status == 404 {
-                    return Err(UpdateError::NoRelease);
-                }
+                let body = self
+                    .api_get("/releases?per_page=30")?
+                    .ok_or(UpdateError::NoRelease)?;
                 let releases: Vec<Release> = parse_json(&body)?;
                 releases
                     .into_iter()
@@ -231,10 +235,13 @@ mod tests {
         let release: Release = parse_json(json).unwrap();
         assert_eq!(release.tag_name, "v0.0.1");
         assert_eq!(
-            release.asset("SHA256SUMS").unwrap().browser_download_url,
+            release.asset_url("SHA256SUMS").unwrap(),
             "https://x/SHA256SUMS"
         );
-        assert!(release.asset("missing").is_none());
+        assert!(matches!(
+            release.asset_url("missing"),
+            Err(UpdateError::AssetMissing { ref tag, ref asset }) if tag == "v0.0.1" && asset == "missing"
+        ));
     }
 
     #[test]

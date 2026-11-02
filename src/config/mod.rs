@@ -576,15 +576,11 @@ pub struct Config {
     pub update: UpdateConfig,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// `[update]` section controlling the startup update check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct UpdateConfig {
     /// Check GitHub Releases for a newer version when the TUI starts (at most once per 24h).
-    #[serde(default = "default_true")]
     pub check_on_startup: bool,
 }
 
@@ -594,6 +590,13 @@ impl Default for UpdateConfig {
             check_on_startup: true,
         }
     }
+}
+
+/// The directory containing `path`; `.` for a bare file name.
+pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 fn default_shell() -> String {
@@ -651,12 +654,7 @@ impl Config {
             return Err(ConfigError::AlreadyExists(path.to_path_buf()));
         }
 
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-
+        std::fs::create_dir_all(parent_or_cwd(path))?;
         std::fs::write(path, Self::default_template())?;
         Ok(path.to_path_buf())
     }
@@ -678,6 +676,13 @@ impl Config {
     /// - Windows: `%APPDATA%\botai\config.toml`
     pub fn default_path() -> Option<PathBuf> {
         directories::BaseDirs::new().map(|dirs| dirs.config_dir().join("botai").join("config.toml"))
+    }
+
+    /// The `--config` override, else [`Config::default_path`].
+    pub fn resolve_path(config_override: Option<&Path>) -> Option<PathBuf> {
+        config_override
+            .map(Path::to_path_buf)
+            .or_else(Self::default_path)
     }
 
     /// Resolves the effective central repository directory, respecting:

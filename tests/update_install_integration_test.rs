@@ -69,8 +69,7 @@ fn check_latest_not_newer_when_current_matches() {
 
 #[test]
 fn prerelease_query_picks_highest_version_including_prereleases() {
-    let mut rc = FixtureRelease::new("v0.3.0-rc.1", b"rc");
-    rc.prerelease = true;
+    let rc = FixtureRelease::new("v0.3.0-rc.1", b"rc");
     let server = serve(
         FixtureRelease::new("v0.2.0", b"stable"),
         vec![rc, FixtureRelease::new("v0.1.0", b"old")],
@@ -125,7 +124,6 @@ fn install_replaces_target_on_happy_path() {
     assert_eq!(
         outcome,
         InstallOutcome::Installed {
-            from: "v0.1.0".into(),
             to: "v0.2.0".into()
         }
     );
@@ -150,12 +148,7 @@ fn install_skips_when_already_up_to_date() {
     let outcome =
         update::install(&client(&server), &ReleaseQuery::Latest, "v0.2.0", &target).unwrap();
 
-    assert_eq!(
-        outcome,
-        InstallOutcome::AlreadyUpToDate {
-            version: "v0.2.0".into()
-        }
-    );
+    assert_eq!(outcome, InstallOutcome::AlreadyUpToDate);
     assert_eq!(fs::read(&target).unwrap(), b"old-binary");
 }
 
@@ -178,7 +171,6 @@ fn install_specific_tag_allows_downgrade() {
     assert_eq!(
         outcome,
         InstallOutcome::Installed {
-            from: "v0.2.0".into(),
             to: "v0.1.0".into()
         }
     );
@@ -267,10 +259,11 @@ mod startup_check {
         )
         .unwrap();
 
+        let client = client(&server);
         let status = recv(spawn_check_with(
             "v0.2.0".into(),
             path.clone(),
-            client(&server),
+            move || client,
             NOW,
         ));
 
@@ -301,7 +294,7 @@ mod startup_check {
         let status = recv(spawn_check_with(
             "v0.2.0".into(),
             path,
-            client(&server),
+            || panic!("a fresh cache must not build a client"),
             NOW,
         ));
 
@@ -315,10 +308,11 @@ mod startup_check {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("update-check.toml");
 
+        let client = client(&server);
         let status = recv(spawn_check_with(
             "v0.2.0".into(),
             path.clone(),
-            client(&server),
+            move || client,
             NOW,
         ));
 
@@ -340,7 +334,12 @@ mod startup_check {
         cache::write(&path, &stale).unwrap();
 
         let client = Client::new(base, Duration::from_secs(2));
-        let status = recv(spawn_check_with("v0.2.0".into(), path.clone(), client, NOW));
+        let status = recv(spawn_check_with(
+            "v0.2.0".into(),
+            path.clone(),
+            move || client,
+            NOW,
+        ));
 
         assert_eq!(status.unwrap().latest, "v0.3.0");
         assert_eq!(cache::read(&path), Some(stale));

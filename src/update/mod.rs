@@ -101,8 +101,8 @@ pub fn check_latest(
 /// What `install` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallOutcome {
-    AlreadyUpToDate { version: String },
-    Installed { from: String, to: String },
+    AlreadyUpToDate,
+    Installed { to: String },
 }
 
 /// Installs the release selected by `query` over `target`.
@@ -121,45 +121,50 @@ pub fn install(
         _ => !version::is_newer(current, &release.tag_name),
     };
     if skip {
-        return Ok(InstallOutcome::AlreadyUpToDate {
-            version: current.to_string(),
-        });
+        return Ok(InstallOutcome::AlreadyUpToDate);
     }
     install::install_release(client, &release, target)?;
     Ok(InstallOutcome::Installed {
-        from: current.to_string(),
         to: release.tag_name,
     })
 }
 
 /// Disables the startup check when set to anything but empty or `0`.
-pub const NO_CHECK_ENV: &str = "BOTAI_NO_UPDATE_CHECK";
+const NO_CHECK_ENV: &str = "BOTAI_NO_UPDATE_CHECK";
 /// Timeout for the background startup check.
-pub const STARTUP_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const STARTUP_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+/// Timeout for each request made by `botai update`; archives are a few MB.
+pub const UPDATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Whether update notices and the startup check apply to this process.
+/// Whether the environment and build allow update checks, before consulting `[update]`.
 ///
 /// `env` is injected so tests do not depend on the real environment (CI sets `CI`).
+pub fn checks_allowed(current: &str, env: impl Fn(&str) -> Option<String>) -> bool {
+    let opted_out = env(NO_CHECK_ENV).is_some_and(|v| !v.trim().is_empty() && v.trim() != "0");
+    !opted_out && env("CI").is_none() && version::is_release_build(current)
+}
+
+/// Whether update notices and the startup check apply to this process.
 pub fn startup_check_enabled(
     current: &str,
     config: &UpdateConfig,
     env: impl Fn(&str) -> Option<String>,
 ) -> bool {
-    let opted_out = env(NO_CHECK_ENV).is_some_and(|v| !v.trim().is_empty() && v.trim() != "0");
-    config.check_on_startup
-        && !opted_out
-        && env("CI").is_none()
-        && version::is_release_build(current)
+    config.check_on_startup && checks_allowed(current, env)
+}
+
+/// Builds the status for `latest`, keeping it only when it is newer than `current`.
+fn newer(current: &str, latest: String) -> Option<UpdateStatus> {
+    let status = UpdateStatus {
+        current: current.to_string(),
+        latest,
+    };
+    status.update_available().then_some(status)
 }
 
 /// The newer release recorded in the cache, if any.
 pub fn cached_update(current: &str, entry: Option<&cache::CacheEntry>) -> Option<UpdateStatus> {
-    let entry = entry?;
-    let status = UpdateStatus {
-        current: current.to_string(),
-        latest: entry.latest_tag.clone(),
-    };
-    status.update_available().then_some(status)
+    newer(current, entry?.latest_tag.clone())
 }
 
 /// Line printed to stderr after short CLI commands.
@@ -188,43 +193,45 @@ pub fn spawn_startup_check(config: &UpdateConfig) -> Option<Receiver<UpdateStatu
     Some(spawn_check_with(
         current.to_string(),
         cache_path,
-        Client::from_env(STARTUP_CHECK_TIMEOUT),
+        || Client::from_env(STARTUP_CHECK_TIMEOUT),
         cache::now_secs(),
     ))
 }
 
-/// Testable core of [`spawn_startup_check`].
+/// Testable core of [`spawn_startup_check`]. `make_client` runs only when the cache is stale.
 pub fn spawn_check_with(
     current: String,
     cache_path: PathBuf,
-    client: Client,
+    make_client: impl FnOnce() -> Client + Send + 'static,
     now: u64,
 ) -> Receiver<UpdateStatus> {
     let (tx, rx) = mpsc::channel();
     let entry = cache::read(&cache_path);
-    if !cache::is_stale(entry.as_ref(), now) {
-        if let Some(status) = cached_update(&current, entry.as_ref()) {
+    let cached_tag = entry.as_ref().map(|e| e.latest_tag.clone());
+    let send = move |latest: Option<String>| {
+        if let Some(status) = latest.and_then(|tag| newer(&current, tag)) {
             let _ = tx.send(status);
         }
+    };
+    if !cache::is_stale(entry.as_ref(), now) {
+        send(cached_tag);
         return rx;
     }
     std::thread::spawn(move || {
-        let latest = match check_latest(&client, &ReleaseQuery::Latest, &current) {
-            Ok(status) => {
+        let latest = match make_client().fetch_release(&ReleaseQuery::Latest) {
+            Ok(release) => {
                 let _ = cache::write(
                     &cache_path,
                     &cache::CacheEntry {
                         last_checked: now,
-                        latest_tag: status.latest.clone(),
+                        latest_tag: release.tag_name.clone(),
                     },
                 );
-                Some(status)
+                Some(release.tag_name)
             }
-            Err(_) => cached_update(&current, entry.as_ref()),
+            Err(_) => cached_tag,
         };
-        if let Some(status) = latest.filter(UpdateStatus::update_available) {
-            let _ = tx.send(status);
-        }
+        send(latest);
     });
     rx
 }

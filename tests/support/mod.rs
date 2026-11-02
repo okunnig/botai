@@ -79,12 +79,12 @@ fn handle(mut stream: TcpStream, routes: &Routes, log: &Mutex<Vec<String>>) {
 }
 
 /// Builds a gzip tarball; names are written raw so tests can include unsafe paths.
-pub fn tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+pub fn tar_gz<S: AsRef<str>>(entries: &[(S, &[u8])]) -> Vec<u8> {
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut builder = tar::Builder::new(gz);
     for (name, data) in entries {
         let mut header = tar::Header::new_gnu();
-        let name_bytes = name.as_bytes();
+        let name_bytes = name.as_ref().as_bytes();
         header.as_gnu_mut().unwrap().name[..name_bytes.len()].copy_from_slice(name_bytes);
         header.set_size(data.len() as u64);
         header.set_mode(0o755);
@@ -115,8 +115,7 @@ pub fn platform_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
                 .iter()
                 .map(|(n, d)| (format!("./{n}"), *d))
                 .collect();
-            let refs: Vec<(&str, &[u8])> = prefixed.iter().map(|(n, d)| (n.as_str(), *d)).collect();
-            tar_gz(&refs)
+            tar_gz(&prefixed)
         }
         ArchiveKind::Zip => zip(entries),
     }
@@ -136,7 +135,7 @@ pub fn asset_name(tag: &str) -> String {
 }
 
 /// Release JSON with download URLs pointing at the fixture.
-pub fn release_json(base: &str, tag: &str, prerelease: bool, assets: &[&str]) -> String {
+pub fn release_json(base: &str, tag: &str, assets: &[&str]) -> String {
     let assets: Vec<String> = assets
         .iter()
         .map(|name| {
@@ -144,7 +143,7 @@ pub fn release_json(base: &str, tag: &str, prerelease: bool, assets: &[&str]) ->
         })
         .collect();
     format!(
-        r#"{{"tag_name":"{tag}","draft":false,"prerelease":{prerelease},"assets":[{}]}}"#,
+        r#"{{"tag_name":"{tag}","draft":false,"assets":[{}]}}"#,
         assets.join(",")
     )
 }
@@ -152,7 +151,6 @@ pub fn release_json(base: &str, tag: &str, prerelease: bool, assets: &[&str]) ->
 /// What a fixture release should serve.
 pub struct FixtureRelease {
     pub tag: String,
-    pub prerelease: bool,
     pub archive: Option<Vec<u8>>,
     /// `None` computes a correct SHA256SUMS for the archive.
     pub sums: Option<String>,
@@ -162,7 +160,6 @@ impl FixtureRelease {
     pub fn new(tag: &str, binary: &[u8]) -> Self {
         Self {
             tag: tag.to_string(),
-            prerelease: false,
             archive: Some(release_archive(binary)),
             sums: None,
         }
@@ -193,7 +190,7 @@ pub fn add_release(routes: &mut Routes, base: &str, release: &FixtureRelease) ->
         format!("/download/{tag}/SHA256SUMS"),
         (200, sums.into_bytes()),
     );
-    let json = release_json(base, tag, release.prerelease, &assets);
+    let json = release_json(base, tag, &assets);
     routes.insert(
         format!("{REPO_PATH}/releases/tags/{tag}"),
         (200, json.clone().into_bytes()),

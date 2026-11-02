@@ -238,6 +238,44 @@ pub fn compute_visible_tab_range(
     (start, end)
 }
 
+/// Picks the right-hand content of a bar: `notice | hints[0]` first, then each of `hints` alone,
+/// returning the first that fits beside `left_width` columns, with its width.
+///
+/// The notice is dropped before the hints shrink.
+pub(crate) fn fit_hints<'a>(
+    notice: Option<&'a str>,
+    hints: &[&'a str],
+    left_width: u16,
+    width: u16,
+    theme: &Theme,
+) -> Option<(Line<'a>, u16)> {
+    const SEP: &str = " | ";
+    let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
+    let fits = |w: usize| usize::from(left_width) + w + 2 <= usize::from(width);
+    let text_width = |s: &str| s.chars().count();
+
+    if let (Some(notice), Some(first)) = (notice, hints.first()) {
+        let w = text_width(notice) + SEP.len() + text_width(first);
+        if fits(w) {
+            let notice_style = Style::default()
+                .fg(theme.status_waiting)
+                .bg(theme.status_bar_bg)
+                .add_modifier(Modifier::BOLD);
+            let line = Line::from(vec![
+                Span::styled(notice, notice_style),
+                Span::styled(SEP, hint_style),
+                Span::styled(*first, hint_style),
+            ]);
+            return Some((line, w as u16));
+        }
+    }
+    hints
+        .iter()
+        .map(|h| (*h, text_width(h)))
+        .find(|(_, w)| fits(*w))
+        .map(|(h, w)| (Line::from(Span::styled(h, hint_style)), w as u16))
+}
+
 /// Status bar widget displaying active project tabs, agent status badges, and multiplexer hotkeys.
 pub struct StatusBar<'a> {
     registry: &'a SessionRegistry,
@@ -443,7 +481,7 @@ impl<'a> StatusBar<'a> {
     }
 
     /// Renders the status bar, showing `update_notice` beside the hint when it fits.
-    pub fn render_with_notice(
+    fn render_with_notice(
         registry: &SessionRegistry,
         leader_active: bool,
         update_notice: Option<&str>,
@@ -513,44 +551,21 @@ impl<'a> StatusBar<'a> {
 
             top_bar.render_to_buffer(area, buf);
         } else {
-            let hint = "Ctrl+Space: Actions";
-            let hint_len = hint.chars().count() as u16;
-            let needed_hint_width = hint_len + 1;
-
             let full_tabs_line = Self::build_tabs_line(sessions, active_idx, area.width, theme);
             let full_tabs_width = full_tabs_line.width() as u16;
-            let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
+            let right = fit_hints(
+                update_notice,
+                &["Ctrl+Space: Actions"],
+                full_tabs_width,
+                area.width,
+                theme,
+            );
 
-            let notice_line = update_notice.map(|notice| {
-                let notice_style = Style::default()
-                    .fg(theme.status_waiting)
-                    .bg(theme.status_bar_bg)
-                    .add_modifier(Modifier::BOLD);
-                Line::from(vec![
-                    Span::styled(notice, notice_style),
-                    Span::styled(" | ", hint_style),
-                    Span::styled(hint, hint_style),
-                ])
-            });
-
-            if let Some(line) =
-                notice_line.filter(|line| area.width > full_tabs_width + line.width() as u16 + 1)
-            {
-                let len = line.width() as u16;
-                TopBar::new(full_tabs_line)
-                    .with_theme(theme)
-                    .with_right_and_padding(line, len, true)
-                    .render_to_buffer(area, buf);
-            } else if area.width > full_tabs_width + needed_hint_width {
-                let hint_line = Line::from(Span::styled(hint, hint_style));
-                let top_bar = TopBar::new(full_tabs_line)
-                    .with_theme(theme)
-                    .with_right_and_padding(hint_line, hint_len, true);
-                top_bar.render_to_buffer(area, buf);
-            } else {
-                let top_bar = TopBar::new(full_tabs_line).with_theme(theme);
-                top_bar.render_to_buffer(area, buf);
+            let mut top_bar = TopBar::new(full_tabs_line).with_theme(theme);
+            if let Some((line, len)) = right {
+                top_bar = top_bar.with_right_and_padding(line, len, true);
             }
+            top_bar.render_to_buffer(area, buf);
         }
     }
 }

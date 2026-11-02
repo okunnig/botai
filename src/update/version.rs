@@ -7,35 +7,33 @@ pub fn current() -> &'static str {
     env!("BOTAI_VERSION")
 }
 
-/// A `BOTAI_VERSION` string split into its semver base and the `git describe` decorations.
+/// A `BOTAI_VERSION` string reduced to its semver base and whether it names an exact tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildVersion {
     pub base: Version,
-    pub commits_ahead: bool,
-    pub dirty: bool,
-    pub dev_fallback: bool,
+    /// No `git describe` commit count and no `-dirty` suffix.
+    pub exact: bool,
 }
 
 impl BuildVersion {
     /// Parses `v0.1.0`, `v0.1.0-4-gabc1234`, `v0.1.0-dirty`, `v0.0.0-dev-<sha>` and `v0.2.0-rc.1`.
     pub fn parse(raw: &str) -> Option<Self> {
-        let trimmed = raw.trim();
-        let without_v = trimmed.strip_prefix('v').unwrap_or(trimmed);
+        let without_v = strip_v(raw);
 
         let (rest, dirty) = match without_v.strip_suffix("-dirty") {
             Some(rest) => (rest, true),
             None => (without_v, false),
         };
 
-        if let Some(sha) = rest.strip_prefix("0.0.0-dev-") {
-            if !sha.is_empty() {
-                return Some(Self {
-                    base: Version::new(0, 0, 0),
-                    commits_ahead: false,
-                    dirty,
-                    dev_fallback: true,
-                });
-            }
+        // Would otherwise parse as a semver prerelease of 0.0.0 and pass as a release.
+        if rest
+            .strip_prefix("0.0.0-dev-")
+            .is_some_and(|sha| !sha.is_empty())
+        {
+            return Some(Self {
+                base: Version::new(0, 0, 0),
+                exact: false,
+            });
         }
 
         // Stripped before semver parsing so `v0.0.1-4-gabc` is "after v0.0.1", not a prerelease of it.
@@ -47,19 +45,20 @@ impl BuildVersion {
         let base = Version::parse(rest).ok()?;
         Some(Self {
             base,
-            commits_ahead,
-            dirty,
-            dev_fallback: false,
+            exact: !commits_ahead && !dirty,
         })
     }
 
     /// Whether the build corresponds exactly to a published tag.
     pub fn is_release(&self) -> bool {
-        !self.commits_ahead
-            && !self.dirty
-            && !self.dev_fallback
-            && self.base != Version::new(0, 0, 0)
+        self.exact && self.base != Version::new(0, 0, 0)
     }
+}
+
+/// Trims whitespace and one leading `v`.
+pub(crate) fn strip_v(s: &str) -> &str {
+    let s = s.trim();
+    s.strip_prefix('v').unwrap_or(s)
 }
 
 /// Strips a trailing `-<N>-g<hex>` from `git describe`, returning the tag part.
@@ -78,8 +77,7 @@ fn strip_describe_suffix(s: &str) -> Option<&str> {
 
 /// Parses a release tag such as `v0.2.0` or `v0.2.0-rc.1`.
 pub fn parse_tag(tag: &str) -> Option<Version> {
-    let trimmed = tag.trim();
-    Version::parse(trimmed.strip_prefix('v').unwrap_or(trimmed)).ok()
+    Version::parse(strip_v(tag)).ok()
 }
 
 /// Whether `raw` is a build of an exact release tag (prerelease tags count).
@@ -108,41 +106,37 @@ mod tests {
     fn parses_exact_tag() {
         let v = BuildVersion::parse("v0.1.0").unwrap();
         assert_eq!(v.base, Version::new(0, 1, 0));
-        assert!(!v.commits_ahead && !v.dirty && !v.dev_fallback);
+        assert!(v.exact);
     }
 
     #[test]
     fn parses_commits_ahead_as_base_tag() {
         let v = BuildVersion::parse("v0.0.1-4-gabc1234").unwrap();
         assert_eq!(v.base, Version::new(0, 0, 1));
-        assert!(v.commits_ahead);
-        assert!(!v.dirty);
+        assert!(!v.exact);
     }
 
     #[test]
     fn parses_dirty_and_ahead() {
         let v = BuildVersion::parse("v0.0.1-4-gabc1234-dirty").unwrap();
         assert_eq!(v.base, Version::new(0, 0, 1));
-        assert!(v.commits_ahead && v.dirty);
+        assert!(!v.exact);
     }
 
     #[test]
     fn parses_prerelease_tag_with_describe_suffix() {
         let v = BuildVersion::parse("v0.2.0-rc.1-3-gdeadbee").unwrap();
         assert_eq!(v.base, Version::parse("0.2.0-rc.1").unwrap());
-        assert!(v.commits_ahead);
+        assert!(!v.exact);
     }
 
     #[test]
     fn parses_dev_fallback() {
-        let v = BuildVersion::parse("v0.0.0-dev-a490519").unwrap();
-        assert!(v.dev_fallback);
-        assert_eq!(v.base, Version::new(0, 0, 0));
-        assert!(
-            BuildVersion::parse("v0.0.0-dev-a490519-dirty")
-                .unwrap()
-                .dirty
-        );
+        for raw in ["v0.0.0-dev-a490519", "v0.0.0-dev-a490519-dirty"] {
+            let v = BuildVersion::parse(raw).unwrap();
+            assert_eq!(v.base, Version::new(0, 0, 0), "{raw}");
+            assert!(!v.exact, "{raw}");
+        }
     }
 
     #[test]

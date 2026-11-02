@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use crate::config::parent_or_cwd;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How long a cached check result stays fresh.
@@ -19,8 +21,8 @@ pub struct CacheEntry {
 
 /// Default cache file location, e.g. `~/Library/Caches/botai/update-check.toml`.
 pub fn default_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "botai")
-        .map(|dirs| dirs.cache_dir().join("update-check.toml"))
+    directories::BaseDirs::new()
+        .map(|dirs| dirs.cache_dir().join("botai").join("update-check.toml"))
 }
 
 /// Current time in unix seconds.
@@ -39,10 +41,7 @@ pub fn read(path: &Path) -> Option<CacheEntry> {
 
 /// Writes the cache via a temp file and rename, since two botai instances may write at once.
 pub fn write(path: &Path, entry: &CacheEntry) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+    let parent = parent_or_cwd(path);
     std::fs::create_dir_all(parent)?;
     let content = toml::to_string(entry).map_err(std::io::Error::other)?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
@@ -52,7 +51,7 @@ pub fn write(path: &Path, entry: &CacheEntry) -> std::io::Result<()> {
 }
 
 /// Whether a new network check is due at `now` (unix seconds).
-pub fn is_stale(entry: Option<&CacheEntry>, now: u64) -> bool {
+pub(crate) fn is_stale(entry: Option<&CacheEntry>, now: u64) -> bool {
     match entry {
         None => true,
         // A clock that moved backwards also forces a fresh check.

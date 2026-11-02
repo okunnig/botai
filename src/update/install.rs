@@ -8,17 +8,21 @@ use std::path::{Component, Path, PathBuf};
 use super::github::{Client, Release};
 use super::platform::{self, ArchiveKind};
 use super::UpdateError;
+use crate::config::parent_or_cwd;
 
 /// Lowercase hex SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for b in Sha256::digest(bytes) {
+        out.push(HEX[usize::from(b >> 4)] as char);
+        out.push(HEX[usize::from(b & 0x0f)] as char);
+    }
+    out
 }
 
 /// Looks up the checksum for `asset_name` in `sha256sum` output (`<hex>  <name>` or `<hex> *<name>`).
-pub fn expected_checksum(sums: &str, asset_name: &str) -> Option<String> {
+fn expected_checksum(sums: &str, asset_name: &str) -> Option<String> {
     sums.lines().find_map(|line| {
         let mut parts = line.split_whitespace();
         let hash = parts.next()?;
@@ -32,7 +36,7 @@ pub fn expected_checksum(sums: &str, asset_name: &str) -> Option<String> {
 }
 
 /// Fails unless `bytes` hash to the value listed for `asset_name` in `sums`.
-pub fn verify_checksum(bytes: &[u8], sums: &str, asset_name: &str) -> Result<(), UpdateError> {
+fn verify_checksum(bytes: &[u8], sums: &str, asset_name: &str) -> Result<(), UpdateError> {
     let expected = expected_checksum(sums, asset_name)
         .ok_or_else(|| UpdateError::ChecksumMissing(asset_name.to_string()))?;
     let actual = sha256_hex(bytes);
@@ -67,7 +71,7 @@ fn is_binary_entry(raw: &str, bin_name: &str) -> Result<bool, UpdateError> {
 }
 
 /// Extracts only `bin_name` from a release archive into `dest`.
-pub fn extract_binary(
+fn extract_binary(
     archive: &[u8],
     kind: ArchiveKind,
     bin_name: &str,
@@ -161,33 +165,16 @@ pub fn install_release(
     target: &Path,
 ) -> Result<(), UpdateError> {
     let asset = platform::current_asset(&release.tag_name)?;
-    let archive_url = release
-        .asset(&asset.name)
-        .ok_or_else(|| UpdateError::AssetMissing {
-            tag: release.tag_name.clone(),
-            asset: asset.name.clone(),
-        })?
-        .browser_download_url
-        .clone();
-    let sums_url = release
-        .asset("SHA256SUMS")
-        .ok_or_else(|| UpdateError::AssetMissing {
-            tag: release.tag_name.clone(),
-            asset: "SHA256SUMS".to_string(),
-        })?
-        .browser_download_url
-        .clone();
+    let archive_url = release.asset_url(&asset.name)?;
+    let sums_url = release.asset_url("SHA256SUMS")?;
 
-    let sums = client.download(&sums_url)?;
+    let sums = client.download(sums_url)?;
     let sums = String::from_utf8_lossy(&sums);
-    let archive = client.download(&archive_url)?;
+    let archive = client.download(archive_url)?;
     verify_checksum(&archive, &sums, &asset.name)?;
 
     let target = dunce::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-    let target_dir = target
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+    let target_dir = parent_or_cwd(&target);
     // Same directory as the target so the final rename stays on one filesystem.
     let staging = tempfile::Builder::new()
         .prefix(".botai-update-")

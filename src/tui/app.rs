@@ -296,8 +296,11 @@ impl TuiApp {
     }
 
     /// Attaches the receiver of a background update check started by `update::spawn_startup_check`.
-    pub fn with_update_check(mut self, rx: std::sync::mpsc::Receiver<UpdateStatus>) -> Self {
-        self.update_rx = Some(rx);
+    pub fn with_update_check(
+        mut self,
+        rx: Option<std::sync::mpsc::Receiver<UpdateStatus>>,
+    ) -> Self {
+        self.update_rx = rx;
         self
     }
 
@@ -309,11 +312,8 @@ impl TuiApp {
         match rx.try_recv() {
             Ok(status) => {
                 self.update_rx = None;
-                if status.update_available() {
-                    self.update_notice = Some(update::notice_text(&status.latest));
-                    return true;
-                }
-                false
+                self.update_notice = Some(update::notice_text(&status.latest));
+                true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -639,16 +639,19 @@ impl TuiApp {
             // 3. Draw active frame conditionally
             if dirty {
                 let theme = self.config.theme();
-                if let Some(dashboard) = &mut self.dashboard {
-                    dashboard.update_notice.clone_from(&self.update_notice);
-                }
                 terminal
                     .draw(|f| {
                         let (status_area, term_area) = compute_layout(f.area());
 
                         if self.is_showing_dashboard() {
                             if let Some(dashboard) = &self.dashboard {
-                                render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
+                                render_dashboard(
+                                    dashboard,
+                                    f.area(),
+                                    f.buffer_mut(),
+                                    &theme,
+                                    self.update_notice.as_deref(),
+                                );
                                 if let Some(pos) = dashboard.cursor_position(f.area()) {
                                     f.set_cursor_position(pos);
                                 }
@@ -4228,7 +4231,7 @@ repos = []
     #[test]
     fn test_poll_update_check_sets_notice_once() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(rx);
+        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(Some(rx));
 
         assert!(!app.poll_update_check());
         assert!(app.update_rx.is_some());
@@ -4248,19 +4251,9 @@ repos = []
     }
 
     #[test]
-    fn test_poll_update_check_ignores_up_to_date_and_disconnect() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(rx);
-        tx.send(UpdateStatus {
-            current: "v0.2.0".into(),
-            latest: "v0.2.0".into(),
-        })
-        .unwrap();
-        assert!(!app.poll_update_check());
-        assert!(app.update_notice.is_none());
-
+    fn test_poll_update_check_ignores_disconnect() {
         let (tx, rx) = std::sync::mpsc::channel::<UpdateStatus>();
-        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(rx);
+        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(Some(rx));
         drop(tx);
         assert!(!app.poll_update_check());
         assert!(app.update_rx.is_none());

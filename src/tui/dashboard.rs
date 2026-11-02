@@ -14,7 +14,7 @@ use crate::config::{Config, ConfigError};
 use crate::session::SessionStatus;
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
 use crate::tui::modal_frame::{centered_modal, render_modal_frame};
-use crate::tui::status_bar::TopBar;
+use crate::tui::status_bar::{fit_hints, TopBar};
 use crate::tui::theme::Theme;
 
 /// Backward compatibility alias for ProjectCreationModal.
@@ -76,8 +76,6 @@ pub struct DashboardState {
     pub config_path: Option<PathBuf>,
     pub config_last_modified: Option<std::time::SystemTime>,
     pub config_file_len: Option<u64>,
-    /// Update notice shown on the top bar, e.g. `update v0.2.0 available: botai update`.
-    pub update_notice: Option<String>,
 }
 
 impl DashboardState {
@@ -114,7 +112,6 @@ impl DashboardState {
             config_path: None,
             config_last_modified: None,
             config_file_len: None,
-            update_notice: None,
         }
     }
 
@@ -385,7 +382,15 @@ impl DashboardState {
 }
 
 /// Renders the full-width local projects dashboard, top header status bar, and optional floating modals into the given `Buffer`.
-pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, theme: &Theme) {
+///
+/// `update_notice` is shown before the key hints when the header has room.
+pub fn render_dashboard(
+    state: &DashboardState,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    update_notice: Option<&str>,
+) {
     if area.height < 3 || area.width < 10 {
         return;
     }
@@ -414,31 +419,14 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     let compact_hints = "Enter: Attach | n: New | d: Destroy | q: Quit";
     let minimal_hints = "q: Quit";
 
-    let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
-    let notice_style = Style::default()
-        .fg(theme.status_waiting)
-        .bg(theme.status_bar_bg)
-        .add_modifier(Modifier::BOLD);
-
-    // The notice is dropped before the hints shrink.
-    let mut candidates: Vec<Line> = Vec::new();
-    if let Some(notice) = &state.update_notice {
-        candidates.push(Line::from(vec![
-            Span::styled(notice.as_str(), notice_style),
-            Span::styled(" | ", hint_style),
-            Span::styled(full_hints, hint_style),
-        ]));
-    }
-    for hints in [full_hints, compact_hints, minimal_hints] {
-        candidates.push(Line::from(Span::styled(hints, hint_style)));
-    }
-
     let mut top_bar = TopBar::new(brand_line).with_theme(theme);
-    if let Some(line) = candidates
-        .into_iter()
-        .find(|line| header_area.width >= brand_len + line.width() as u16 + 2)
-    {
-        let len = line.width() as u16;
+    if let Some((line, len)) = fit_hints(
+        update_notice,
+        &[full_hints, compact_hints, minimal_hints],
+        brand_len,
+        header_area.width,
+        theme,
+    ) {
         top_bar = top_bar.with_right(line, len);
     }
     top_bar.render(header_area, buf);
@@ -562,14 +550,14 @@ pub fn render_destroy_modal(
 impl Widget for &DashboardState {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let theme = Theme::default();
-        render_dashboard(self, area, buf, &theme);
+        render_dashboard(self, area, buf, &theme, None);
     }
 }
 
 impl Widget for DashboardState {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let theme = Theme::default();
-        render_dashboard(&self, area, buf, &theme);
+        render_dashboard(&self, area, buf, &theme, None);
     }
 }
 
@@ -595,7 +583,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -623,7 +611,7 @@ mod tests {
         // 1. Wide screen (100 cols) -> Full hints
         let area_wide = Rect::new(0, 0, 100, 20);
         let mut buf_wide = Buffer::empty(area_wide);
-        render_dashboard(&state, area_wide, &mut buf_wide, &theme);
+        render_dashboard(&state, area_wide, &mut buf_wide, &theme, None);
         let text_wide = buf_wide
             .content()
             .iter()
@@ -636,7 +624,7 @@ mod tests {
         // 2. Medium screen (60 cols) -> Compact hints
         let area_med = Rect::new(0, 0, 60, 20);
         let mut buf_med = Buffer::empty(area_med);
-        render_dashboard(&state, area_med, &mut buf_med, &theme);
+        render_dashboard(&state, area_med, &mut buf_med, &theme, None);
         let text_med = buf_med
             .content()
             .iter()
@@ -649,7 +637,7 @@ mod tests {
         // 3. Narrow screen (20 cols) -> Minimal hints
         let area_narrow = Rect::new(0, 0, 20, 20);
         let mut buf_narrow = Buffer::empty(area_narrow);
-        render_dashboard(&state, area_narrow, &mut buf_narrow, &theme);
+        render_dashboard(&state, area_narrow, &mut buf_narrow, &theme, None);
         let text_narrow = buf_narrow
             .content()
             .iter()
@@ -676,7 +664,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -701,7 +689,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -723,7 +711,7 @@ mod tests {
         let area = Rect::new(0, 0, 100, 20);
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -760,7 +748,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let theme = Theme::gruvbox();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         // Check top header status bar cell background matches theme.status_bar_bg
         let header_cell = buf.cell((0, 0)).unwrap();
@@ -1137,7 +1125,7 @@ command = "claude"
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
         let rendered = buf
             .content()
             .iter()
@@ -1227,7 +1215,7 @@ command = "claude"
         let mut buf = Buffer::empty(area);
         let theme = Theme::tokyo_night();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -1286,7 +1274,7 @@ command = "claude"
         let mut buf = Buffer::empty(area);
         let theme = Theme::gruvbox();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let cell_busy_dot = buf.cell((4, 2)).unwrap();
         assert_eq!(cell_busy_dot.symbol(), "●");
@@ -1426,19 +1414,19 @@ repos = ["repo1"]
         );
     }
 
-    fn header_row(state: &DashboardState, width: u16) -> String {
+    fn header_row(state: &DashboardState, notice: Option<&str>, width: u16) -> String {
         let area = Rect::new(0, 0, width, 10);
         let mut buf = Buffer::empty(area);
-        render_dashboard(state, area, &mut buf, &Theme::default());
+        render_dashboard(state, area, &mut buf, &Theme::default(), notice);
         (0..width).map(|x| buf[(x, 0)].symbol()).collect()
     }
 
     #[test]
     fn test_render_dashboard_update_notice() {
-        let mut state = DashboardState::new(vec!["ws".into()], vec!["proj".into()]);
-        state.update_notice = Some("update v9.0.0 available: botai update".into());
+        let state = DashboardState::new(vec!["ws".into()], vec!["proj".into()]);
+        let notice = Some("update v9.0.0 available: botai update");
 
-        let wide = header_row(&state, 140);
+        let wide = header_row(&state, notice, 140);
         assert!(
             wide.contains("update v9.0.0 available: botai update"),
             "{wide}"
@@ -1446,11 +1434,10 @@ repos = ["repo1"]
         assert!(wide.contains("↑/↓: Navigate"), "{wide}");
 
         // Too narrow for both: the notice goes first, full hints stay.
-        let medium = header_row(&state, 100);
+        let medium = header_row(&state, notice, 100);
         assert!(!medium.contains("update v9.0.0"), "{medium}");
         assert!(medium.contains("↑/↓: Navigate"), "{medium}");
 
-        state.update_notice = None;
-        assert!(!header_row(&state, 140).contains("available"));
+        assert!(!header_row(&state, None, 140).contains("available"));
     }
 }
