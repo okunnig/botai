@@ -54,7 +54,7 @@ pub enum UpdateError {
     #[error("Invalid release archive: {0}")]
     InvalidArchive(String),
 
-    #[error("Release archive contains an unsafe path: {0}")]
+    #[error("Release archive contains a path outside the archive root: {0}")]
     UnsafeArchiveEntry(String),
 
     #[error("Release archive does not contain {0}")]

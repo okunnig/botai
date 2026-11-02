@@ -23,6 +23,13 @@ fn copied_botai() -> (tempfile::TempDir, PathBuf) {
     (dir, exe)
 }
 
+fn copied_command(server: &FixtureServer, exe: &std::path::Path) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.env("BOTAI_UPDATE_BASE_URL", &server.base)
+        .env_remove("GITHUB_TOKEN");
+    cmd
+}
+
 #[test]
 fn update_check_prints_current_and_latest() {
     let server = serve(FixtureRelease::new("v99.0.0", b"new"), vec![]);
@@ -73,9 +80,7 @@ fn update_check_conflicts_with_version() {
 fn update_reports_unknown_tag() {
     let server = serve(FixtureRelease::new("v99.0.0", b"new"), vec![]);
     let (_dir, exe) = copied_botai();
-    Command::new(&exe)
-        .env("BOTAI_UPDATE_BASE_URL", &server.base)
-        .env_remove("GITHUB_TOKEN")
+    copied_command(&server, &exe)
         .args(["update", "--version", "v42.0.0"])
         .assert()
         .failure()
@@ -104,9 +109,7 @@ fn update_version_replaces_the_running_copy() {
     );
     let (_dir, exe) = copied_botai();
 
-    let assert = Command::new(&exe)
-        .env("BOTAI_UPDATE_BASE_URL", &server.base)
-        .env_remove("GITHUB_TOKEN")
+    let assert = copied_command(&server, &exe)
         .args(["update", "--version", "v98.0.0"])
         .assert()
         .success()
@@ -130,9 +133,7 @@ fn update_without_newer_release_leaves_binary_alone() {
     let (_dir, exe) = copied_botai();
     let before = fs::read(&exe).unwrap();
 
-    Command::new(&exe)
-        .env("BOTAI_UPDATE_BASE_URL", &server.base)
-        .env_remove("GITHUB_TOKEN")
+    copied_command(&server, &exe)
         .arg("update")
         .assert()
         .success()
