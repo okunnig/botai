@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use thiserror::Error;
 
 use crate::config::{Config, ConfigError, ResolvedRepo};
@@ -142,6 +144,45 @@ pub struct ProjectBuilder {
     pub prompt: Option<String>,
     pub cwd: PathBuf,
     pub viewport_size: (u16, u16),
+}
+
+/// Caps concurrent git/hook processes: each holds pipe fds in this process
+/// (macOS default soft limit is 256) and may open its own SSH connection.
+const MAX_PARALLEL_OPS: usize = 8;
+
+/// Runs `work` over `items` on at most `MAX_PARALLEL_OPS` worker threads.
+///
+/// `on_msg` runs on the calling thread for every message as it arrives, so
+/// callers can forward to sinks that are not `Sync`.
+fn run_bounded<'a, T: Sync, M: Send>(
+    items: &'a [T],
+    work: impl Fn(&'a T, &mpsc::Sender<M>) + Sync,
+    mut on_msg: impl FnMut(M),
+) {
+    let workers = items.len().min(MAX_PARALLEL_OPS);
+    let next = AtomicUsize::new(0);
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let (next, work) = (&next, &work);
+            s.spawn(move || {
+                while let Some(item) = items.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    work(item, &tx);
+                }
+            });
+        }
+        drop(tx);
+        for msg in rx {
+            on_msg(msg);
+        }
+    });
+}
+
+fn worktree_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
 }
 
 /// Undoes worktrees created for `project_name`, and the branches that came with them.
@@ -477,54 +518,62 @@ impl ProjectBuilder {
                 message: "Cloning and updating repositories...".to_string(),
             });
 
-            if !resolved_repos.is_empty() {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let mut errors = Vec::new();
-
-                std::thread::scope(|s| {
-                    for repo in &resolved_repos {
-                        let thread_tx = tx.clone();
-                        s.spawn(move || {
-                            if !repo.exists_locally() {
-                                if let Some(url) = &repo.clone_url {
-                                    let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                        "[2/4] Cloning repository '{}' from {}...",
-                                        repo.name, url
-                                    )));
-                                    if let Err(err) = crate::git::clone_repo(url, &repo.local_path) {
-                                        let _ = thread_tx.send(ProjectSetupEvent::Error(format!(
-                                            "Failed to clone repository '{}': {}",
-                                            repo.name, err
-                                        )));
-                                    }
-                                } else {
-                                    let _ = thread_tx.send(ProjectSetupEvent::Error(format!(
-                                        "Repository '{}' does not exist locally and has no remote URL configured",
-                                        repo.name
-                                    )));
-                                }
-                            } else {
-                                let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                    "[2/4] Fetching latest updates for repository '{}'...",
-                                    repo.name
-                                )));
-                                let _ = crate::git::fetch_repo(&repo.local_path);
-                            }
-                        });
-                    }
-
-                    drop(tx);
-                    while let Ok(event) = rx.recv() {
-                        if let ProjectSetupEvent::Error(ref err) = event {
-                            errors.push(err.clone());
+            // Entries sharing a backing repo would otherwise clone or fetch it concurrently.
+            let mut backing_repos: Vec<&ResolvedRepo> = Vec::new();
+            let mut backing_index: HashMap<&Path, usize> = HashMap::new();
+            for repo in &resolved_repos {
+                match backing_index.get(repo.local_path.as_path()) {
+                    Some(&i) => {
+                        if backing_repos[i].clone_url.is_none() {
+                            backing_repos[i] = repo;
                         }
-                        progress_sink(event);
                     }
-                });
-
-                if !errors.is_empty() {
-                    anyhow::bail!("{}", errors.join("; "));
+                    None => {
+                        backing_index.insert(&repo.local_path, backing_repos.len());
+                        backing_repos.push(repo);
+                    }
                 }
+            }
+
+            let mut errors = Vec::new();
+            run_bounded(
+                &backing_repos,
+                |repo, tx| {
+                    if !repo.exists_locally() {
+                        if let Some(url) = &repo.clone_url {
+                            let _ = tx.send(ProjectSetupEvent::Log(format!(
+                                "[2/4] Cloning repository '{}' from {}...",
+                                repo.name, url
+                            )));
+                            if let Err(err) = crate::git::clone_repo(url, &repo.local_path) {
+                                let _ = tx.send(ProjectSetupEvent::Error(format!(
+                                    "Failed to clone repository '{}': {}",
+                                    repo.name, err
+                                )));
+                            }
+                        } else {
+                            let _ = tx.send(ProjectSetupEvent::Error(format!(
+                                "Repository '{}' does not exist locally and has no remote URL configured",
+                                repo.name
+                            )));
+                        }
+                    } else {
+                        let _ = tx.send(ProjectSetupEvent::Log(format!(
+                            "[2/4] Fetching latest updates for repository '{}'...",
+                            repo.name
+                        )));
+                        let _ = crate::git::fetch_repo(&repo.local_path);
+                    }
+                },
+                |event| {
+                    if let ProjectSetupEvent::Error(ref err) = event {
+                        errors.push(err.clone());
+                    }
+                    progress_sink(event);
+                },
+            );
+            if !errors.is_empty() {
+                anyhow::bail!("{}", errors.join("; "));
             }
 
             // Step 3: Creating project directory and git worktrees
@@ -543,7 +592,7 @@ impl ProjectBuilder {
                 dunce::canonicalize(&project_dir).unwrap_or_else(|_| project_dir.clone());
 
             // Group repositories by backing repository path (`repo.local_path`) so distinct
-            // backing repos run concurrently in std::thread::scope, while multiple worktrees
+            // backing repos run in parallel (bounded by `run_bounded`), while multiple worktrees
             // sharing the same backing repo run sequentially to prevent git index.lock collisions.
             let mut repo_groups: HashMap<PathBuf, Vec<(usize, &ResolvedRepo)>> = HashMap::new();
             for (idx, repo) in resolved_repos.iter().enumerate() {
@@ -564,72 +613,67 @@ impl ProjectBuilder {
                 },
             }
 
-            let (tx, rx) = std::sync::mpsc::channel();
+            let mut repo_groups: Vec<Vec<(usize, &ResolvedRepo)>> =
+                repo_groups.into_values().collect();
+            // Largest groups first: they run serially, so starting them late stretches wall time.
+            repo_groups.sort_by_key(|g| std::cmp::Reverse(g.len()));
             let mut created_mappings_indexed: Vec<(usize, RepoMapping)> = Vec::new();
             let mut failed_creations: Vec<(usize, String, PathBuf, GitError)> = Vec::new();
 
-            std::thread::scope(|s| {
-                for repos in repo_groups.values() {
-                    let thread_tx = tx.clone();
-                    let project_dir_canon = &project_dir_canon;
-                    s.spawn(move || {
-                        for (idx, repo) in repos {
-                            let worktree_path = project_dir_canon.join(&repo.name);
-                            let _ = thread_tx.send(WorktreeMsg::Log(format!(
-                                "[3/4] Creating git worktree for '{}' at {}...",
-                                repo.name,
-                                worktree_path.display()
-                            )));
+            run_bounded(
+                &repo_groups,
+                |repos, tx| {
+                    for (idx, repo) in repos {
+                        let worktree_path = project_dir_canon.join(&repo.name);
+                        let _ = tx.send(WorktreeMsg::Log(format!(
+                            "[3/4] Creating git worktree for '{}' at {}...",
+                            repo.name,
+                            worktree_path.display()
+                        )));
 
-                            match create_worktree(
-                                &repo.local_path,
-                                &worktree_path,
-                                trimmed_project_name,
-                            ) {
-                                Ok(()) => {
-                                    let mapping = RepoMapping::new(
-                                        repo.name.clone(),
-                                        repo.local_path.clone(),
-                                        worktree_path,
-                                    );
-                                    let _ = thread_tx.send(WorktreeMsg::Success(*idx, mapping));
-                                }
-                                Err(err) => {
-                                    let _ = thread_tx.send(WorktreeMsg::Failure {
-                                        index: *idx,
-                                        name: repo.name.clone(),
-                                        local_path: repo.local_path.clone(),
-                                        error: err,
-                                    });
-                                    // Stop creating further worktrees for this backing repository
-                                    break;
-                                }
+                        match create_worktree(
+                            &repo.local_path,
+                            &worktree_path,
+                            trimmed_project_name,
+                        ) {
+                            Ok(()) => {
+                                let mapping = RepoMapping::new(
+                                    repo.name.clone(),
+                                    repo.local_path.clone(),
+                                    worktree_path,
+                                );
+                                let _ = tx.send(WorktreeMsg::Success(*idx, mapping));
+                            }
+                            Err(err) => {
+                                let _ = tx.send(WorktreeMsg::Failure {
+                                    index: *idx,
+                                    name: repo.name.clone(),
+                                    local_path: repo.local_path.clone(),
+                                    error: err,
+                                });
+                                // Stop creating further worktrees for this backing repository
+                                break;
                             }
                         }
-                    });
-                }
-
-                drop(tx);
-
-                while let Ok(msg) = rx.recv() {
-                    match msg {
-                        WorktreeMsg::Log(log) => {
-                            progress_sink(ProjectSetupEvent::Log(log));
-                        }
-                        WorktreeMsg::Success(idx, mapping) => {
-                            created_mappings_indexed.push((idx, mapping));
-                        }
-                        WorktreeMsg::Failure {
-                            index,
-                            name,
-                            local_path,
-                            error,
-                        } => {
-                            failed_creations.push((index, name, local_path, error));
-                        }
                     }
-                }
-            });
+                },
+                |msg| match msg {
+                    WorktreeMsg::Log(log) => {
+                        progress_sink(ProjectSetupEvent::Log(log));
+                    }
+                    WorktreeMsg::Success(idx, mapping) => {
+                        created_mappings_indexed.push((idx, mapping));
+                    }
+                    WorktreeMsg::Failure {
+                        index,
+                        name,
+                        local_path,
+                        error,
+                    } => {
+                        failed_creations.push((index, name, local_path, error));
+                    }
+                },
+            );
 
             if !failed_creations.is_empty() {
                 let created_mappings: Vec<RepoMapping> = created_mappings_indexed
@@ -670,35 +714,22 @@ impl ProjectBuilder {
                 .map(|r| (r, project_dir_canon.join(&r.name)))
                 .collect();
 
-            if !repos_with_hooks.is_empty() {
-                let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::scope(|s| {
-                    for (repo, worktree_path) in &repos_with_hooks {
-                        let thread_tx = tx.clone();
-                        let tpl_env = &tpl.env;
-                        let repo_env = &repo.env;
-                        let setup_hooks = &repo.setup_hooks;
-                        let repo_name = &repo.name;
-                        let wt_path = worktree_path.clone();
-
-                        s.spawn(move || {
-                            let labels = HookLabels {
-                                running: &format!("setup hook for '{repo_name}'"),
-                                result: &format!("Setup hook for '{repo_name}'"),
-                            };
-                            for cmd in setup_hooks {
-                                run_hook(cmd, &wt_path, &[tpl_env, repo_env], &labels, |msg| {
-                                    let _ = thread_tx.send(ProjectSetupEvent::Log(msg));
-                                });
-                            }
+            run_bounded(
+                &repos_with_hooks,
+                |(repo, wt_path), tx| {
+                    let repo_name = &repo.name;
+                    let labels = HookLabels {
+                        running: &format!("setup hook for '{repo_name}'"),
+                        result: &format!("Setup hook for '{repo_name}'"),
+                    };
+                    for cmd in &repo.setup_hooks {
+                        run_hook(cmd, wt_path, &[&tpl.env, &repo.env], &labels, |msg| {
+                            let _ = tx.send(ProjectSetupEvent::Log(msg));
                         });
                     }
-                    drop(tx);
-                    while let Ok(event) = rx.recv() {
-                        progress_sink(event);
-                    }
-                });
-            }
+                },
+                &progress_sink,
+            );
 
             // Step 5: Generating AGENTS.md context
             progress_sink(ProjectSetupEvent::Step {
@@ -967,60 +998,40 @@ where
             )));
         }
 
-        if !force && !child_paths.is_empty() {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::scope(|s| {
-                for child_path in &child_paths {
-                    let thread_tx = tx.clone();
-                    let path = child_path.clone();
-                    s.spawn(move || {
-                        let repo_name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let result = crate::git::has_uncommitted_changes(&path);
-                        let _ = thread_tx.send((repo_name, path, result));
-                    });
-                }
-                drop(tx);
+        if !force {
+            let mut dirty_worktrees = Vec::new();
+            let mut check_errors = Vec::new();
 
-                let mut dirty_worktrees = Vec::new();
-                let mut check_errors = Vec::new();
+            run_bounded(
+                &child_paths,
+                |path, tx| {
+                    let _ = tx.send((path, crate::git::has_uncommitted_changes(path)));
+                },
+                |(path, result)| match result {
+                    Ok(true) => dirty_worktrees.push((worktree_name(path), path)),
+                    Ok(false) => {}
+                    Err(err) => check_errors.push(format!("'{}': {err}", worktree_name(path))),
+                },
+            );
 
-                while let Ok((repo_name, path, result)) = rx.recv() {
-                    match result {
-                        Ok(true) => {
-                            dirty_worktrees.push((repo_name, path));
-                        }
-                        Ok(false) => {}
-                        Err(err) => {
-                            check_errors.push(format!("'{repo_name}': {err}"));
-                        }
-                    }
-                }
+            if !check_errors.is_empty() {
+                anyhow::bail!(
+                    "Failed to check uncommitted changes: {}",
+                    check_errors.join("; ")
+                );
+            }
 
-                if !check_errors.is_empty() {
-                    anyhow::bail!(
-                        "Failed to check uncommitted changes: {}",
-                        check_errors.join("; ")
-                    );
-                }
-
-                if !dirty_worktrees.is_empty() {
-                    dirty_worktrees.sort_by(|a, b| a.0.cmp(&b.0));
-                    let dirty_list: Vec<String> = dirty_worktrees
-                        .iter()
-                        .map(|(name, path)| format!("'{name}' ({})", path.display()))
-                        .collect();
-                    anyhow::bail!(
-                        "Worktree(s) have uncommitted changes: {}. Use --force to destroy anyway.",
-                        dirty_list.join(", ")
-                    );
-                }
-
-                Ok::<(), anyhow::Error>(())
-            })?;
+            if !dirty_worktrees.is_empty() {
+                dirty_worktrees.sort_by_key(|(name, _)| *name);
+                let dirty_list: Vec<String> = dirty_worktrees
+                    .iter()
+                    .map(|(name, path)| format!("'{name}' ({})", path.display()))
+                    .collect();
+                anyhow::bail!(
+                    "Worktree(s) have uncommitted changes: {}. Use --force to destroy anyway.",
+                    dirty_list.join(", ")
+                );
+            }
         }
         progress_sink(ProjectDestroyEvent::Log(
             "Worktree validation passed.".to_string(),
@@ -1033,52 +1044,41 @@ where
             message: "Removing git worktrees...".to_string(),
         });
 
-        if !child_paths.is_empty() {
-            let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-            for child_path in &child_paths {
-                let main_repo = crate::git::resolve_main_repo(child_path)
-                    .unwrap_or_else(|_| child_path.clone());
-                groups
-                    .entry(main_repo)
-                    .or_default()
-                    .push(child_path.clone());
-            }
-
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::scope(|s| {
-                for group in groups.into_values() {
-                    let thread_tx = tx.clone();
-                    s.spawn(move || {
-                        for child_path in group {
-                            let repo_name = child_path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let _ = thread_tx.send(ProjectDestroyEvent::Log(format!(
-                                "Removing worktree '{repo_name}'..."
-                            )));
-                            match crate::git::remove_worktree_auto(&child_path, force) {
-                                Ok(_) => {
-                                    let _ = thread_tx.send(ProjectDestroyEvent::Log(format!(
-                                        "✓ Removed worktree '{repo_name}' and pruned metadata."
-                                    )));
-                                }
-                                Err(err) => {
-                                    let _ = thread_tx.send(ProjectDestroyEvent::Log(format!(
-                                        "⚠ Warning removing worktree '{repo_name}': {err}"
-                                    )));
-                                }
-                            }
-                        }
-                    });
-                }
-                drop(tx);
-                while let Ok(event) = rx.recv() {
-                    progress_sink(event);
-                }
-            });
+        let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for child_path in &child_paths {
+            let main_repo =
+                crate::git::resolve_main_repo(child_path).unwrap_or_else(|_| child_path.clone());
+            groups
+                .entry(main_repo)
+                .or_default()
+                .push(child_path.clone());
         }
+
+        let groups: Vec<Vec<PathBuf>> = groups.into_values().collect();
+        run_bounded(
+            &groups,
+            |group, tx| {
+                for child_path in group {
+                    let repo_name = worktree_name(child_path);
+                    let _ = tx.send(ProjectDestroyEvent::Log(format!(
+                        "Removing worktree '{repo_name}'..."
+                    )));
+                    match crate::git::remove_worktree_auto(child_path, force) {
+                        Ok(_) => {
+                            let _ = tx.send(ProjectDestroyEvent::Log(format!(
+                                "✓ Removed worktree '{repo_name}' and pruned metadata."
+                            )));
+                        }
+                        Err(err) => {
+                            let _ = tx.send(ProjectDestroyEvent::Log(format!(
+                                "⚠ Warning removing worktree '{repo_name}': {err}"
+                            )));
+                        }
+                    }
+                }
+            },
+            &mut progress_sink,
+        );
 
         // Step 4: Removing project directory
         progress_sink(ProjectDestroyEvent::Step {
@@ -1299,6 +1299,66 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
+
+    #[test]
+    fn test_run_bounded_caps_concurrency_and_delivers_every_message() {
+        let items: Vec<usize> = (0..50).collect();
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let mut received = Vec::new();
+
+        run_bounded(
+            &items,
+            |item, tx| {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                active.fetch_sub(1, Ordering::SeqCst);
+                let _ = tx.send(*item);
+            },
+            |msg| received.push(msg),
+        );
+
+        received.sort_unstable();
+        assert_eq!(received, items);
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak <= MAX_PARALLEL_OPS,
+            "peak concurrency {peak} exceeded cap"
+        );
+    }
+
+    #[test]
+    fn test_run_bounded_empty_slice_runs_nothing() {
+        let items: Vec<usize> = Vec::new();
+        let work_calls = AtomicUsize::new(0);
+        let mut msg_calls = 0usize;
+        run_bounded(
+            &items,
+            |_, tx: &mpsc::Sender<usize>| {
+                work_calls.fetch_add(1, Ordering::SeqCst);
+                let _ = tx.send(0);
+            },
+            |_| msg_calls += 1,
+        );
+        assert_eq!(work_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(msg_calls, 0);
+    }
+
+    #[test]
+    fn test_run_bounded_fewer_items_than_cap_runs_all() {
+        let items = vec!["a", "b", "c"];
+        let mut received = Vec::new();
+        run_bounded(
+            &items,
+            |item, tx| {
+                let _ = tx.send(item.to_string());
+            },
+            |msg| received.push(msg),
+        );
+        received.sort();
+        assert_eq!(received, vec!["a", "b", "c"]);
+    }
 
     fn create_mock_git_repo(path: &Path) {
         fs::create_dir_all(path).unwrap();
