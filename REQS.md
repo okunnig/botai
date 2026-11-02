@@ -760,7 +760,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **4. Unsafe Code Audit Gate (`unsafe-audit`)**:
     - Runs on `ubuntu-latest`.
     - **Strict `#![forbid(unsafe_code)]` Enforcement**: Verifies that crate root headers (`src/lib.rs` and `src/main.rs`) explicitly mandate `#![forbid(unsafe_code)]`.
-    - **Zero Unsafe Usage Policy**: Scans all source files under `src/` to guarantee zero `unsafe` keyword blocks or invocations exist in the production codebase.
+    - **Zero Unsafe Usage Policy**: Scans all source files under `src/` for `unsafe` used as code (`unsafe {`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`, `#[unsafe(...)]`), so the word in comments or identifiers does not trip the gate.
     - **Compilation Verification**: Confirms clean `cargo check --all-targets --all-features` pass under the strict forbid lint constraint.
 
 ---
