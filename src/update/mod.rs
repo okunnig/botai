@@ -1,5 +1,6 @@
 //! Self update: release discovery on GitHub, startup checks and binary replacement.
 
+pub mod cache;
 pub mod platform;
 pub mod version;
 
