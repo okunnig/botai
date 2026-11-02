@@ -70,6 +70,27 @@ fn normalize_tag(tag: &str) -> String {
     }
 }
 
+/// Rejects tags that could alter the request path (`/`, `?`, `%`, `..`, ...).
+fn validate_tag(tag: &str) -> Result<(), UpdateError> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-');
+    if tag.is_empty() || tag == "." || tag.contains("..") || !tag.chars().all(allowed) {
+        return Err(UpdateError::InvalidTag(tag.to_string()));
+    }
+    Ok(())
+}
+
+/// The `message` field of a GitHub JSON error body, if any.
+fn github_message(body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        message: String,
+    }
+    serde_json::from_str::<ErrorBody>(body)
+        .ok()
+        .map(|b| b.message)
+        .filter(|m| !m.trim().is_empty())
+}
+
 /// API base URL, honouring `BOTAI_UPDATE_BASE_URL` in debug builds.
 fn api_base_from_env() -> String {
     #[cfg(debug_assertions)]
@@ -137,6 +158,13 @@ impl Client {
             message: e.to_string(),
         })?;
         let status = resp.status().as_u16();
+        let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok());
+        // GitHub signals primary limits with `x-ratelimit-remaining: 0`, secondary ones with
+        // `retry-after`; any other 403 is a permission problem.
+        let rate_limited = status == 429
+            || (status == 403
+                && (header("x-ratelimit-remaining").is_some_and(|v| v.trim() == "0")
+                    || header("retry-after").is_some()));
         let body = resp
             .body_mut()
             .read_to_string()
@@ -147,10 +175,13 @@ impl Client {
         match status {
             200..=299 => Ok(Some(body)),
             404 => Ok(None),
-            403 | 429 => Err(UpdateError::RateLimited),
+            _ if rate_limited => Err(UpdateError::RateLimited),
             _ => Err(UpdateError::Http {
                 url,
-                message: format!("HTTP {status}"),
+                message: match github_message(&body) {
+                    Some(message) => format!("HTTP {status}: {message}"),
+                    None => format!("HTTP {status}"),
+                },
             }),
         }
     }
@@ -166,6 +197,7 @@ impl Client {
             }
             ReleaseQuery::Tag(tag) => {
                 let tag = normalize_tag(tag);
+                validate_tag(&tag)?;
                 let Some(body) = self.api_get(&format!("/releases/tags/{tag}"))? else {
                     return Err(UpdateError::ReleaseNotFound(tag));
                 };
@@ -232,6 +264,40 @@ mod tests {
         assert_eq!(normalize_tag("0.2.0"), "v0.2.0");
         assert_eq!(normalize_tag("v0.2.0"), "v0.2.0");
         assert_eq!(normalize_tag(" v0.2.0-rc.1 "), "v0.2.0-rc.1");
+    }
+
+    #[test]
+    fn validates_tags() {
+        for ok in [
+            "v0.2.0",
+            "0.2.0",
+            "v0.2.0-rc.1",
+            "v1.0.0+build.5",
+            "nightly_2",
+        ] {
+            assert!(validate_tag(&normalize_tag(ok)).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", " ", ".", "..", "v1..2", "../x", "v1/2", "v1?x", "v1#x", "v1%2F", "a b", "v1\\x",
+        ] {
+            assert!(
+                matches!(
+                    validate_tag(&normalize_tag(bad)),
+                    Err(UpdateError::InvalidTag(_))
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_message_is_extracted_from_json_body() {
+        assert_eq!(
+            github_message(r#"{"message":"Bad credentials","documentation_url":"x"}"#),
+            Some("Bad credentials".to_string())
+        );
+        assert_eq!(github_message("<html>"), None);
+        assert_eq!(github_message(r#"{"message":""}"#), None);
     }
 
     #[test]

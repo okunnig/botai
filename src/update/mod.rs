@@ -24,10 +24,11 @@ pub enum UpdateError {
     #[error("Request to {url} failed: {message}")]
     Http { url: String, message: String },
 
-    #[error(
-        "GitHub API rate limit reached or access denied. Try again later or set GITHUB_TOKEN."
-    )]
+    #[error("GitHub API rate limit reached. Try again later or set GITHUB_TOKEN.")]
     RateLimited,
+
+    #[error("Invalid release tag {0:?}: use letters, digits, '.', '_', '+' or '-'")]
+    InvalidTag(String),
 
     #[error("Unexpected response from GitHub: {0}")]
     InvalidResponse(String),
@@ -105,31 +106,49 @@ pub enum InstallOutcome {
     Installed { to: String },
 }
 
-/// Installs the release selected by `query` over `target`.
+/// Resolves the release selected by `query`, or `None` when nothing should be installed.
 ///
-/// Without an explicit tag nothing happens unless the release is newer than `current`; an
-/// explicit tag installs unless it is exactly `current` (downgrades allowed).
+/// Without an explicit tag nothing is installed unless the release is newer than `current`;
+/// an explicit tag installs unless it is exactly `current` (downgrades allowed).
+pub fn release_to_install(
+    client: &Client,
+    query: &ReleaseQuery,
+    current: &str,
+) -> Result<Option<Release>, UpdateError> {
+    let release = client.fetch_release(query)?;
+    let skip = match query {
+        ReleaseQuery::Tag(_) => release.tag_name == current,
+        _ => !version::is_newer(current, &release.tag_name),
+    };
+    Ok((!skip).then_some(release))
+}
+
+/// Installs `release` over `target` and returns its tag.
+pub fn install_release(
+    client: &Client,
+    release: Release,
+    target: &Path,
+) -> Result<String, UpdateError> {
+    install::install_release(client, &release, target)?;
+    Ok(release.tag_name)
+}
+
+/// Installs the release selected by `query` over `target`; see [`release_to_install`].
 pub fn install(
     client: &Client,
     query: &ReleaseQuery,
     current: &str,
     target: &Path,
 ) -> Result<InstallOutcome, UpdateError> {
-    let release = client.fetch_release(query)?;
-    let skip = match query {
-        ReleaseQuery::Tag(_) => release.tag_name == current,
-        _ => !version::is_newer(current, &release.tag_name),
-    };
-    if skip {
-        return Ok(InstallOutcome::AlreadyUpToDate);
+    match release_to_install(client, query, current)? {
+        Some(release) => Ok(InstallOutcome::Installed {
+            to: install_release(client, release, target)?,
+        }),
+        None => Ok(InstallOutcome::AlreadyUpToDate),
     }
-    install::install_release(client, &release, target)?;
-    Ok(InstallOutcome::Installed {
-        to: release.tag_name,
-    })
 }
 
-/// Disables the startup check when set to anything but empty or `0`.
+/// Disables the startup check when set to a truthy value (see [`env_flag`]).
 const NO_CHECK_ENV: &str = "BOTAI_NO_UPDATE_CHECK";
 /// Timeout for the background startup check.
 const STARTUP_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -140,8 +159,18 @@ pub const UPDATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 ///
 /// `env` is injected so tests do not depend on the real environment (CI sets `CI`).
 pub fn checks_allowed(current: &str, env: impl Fn(&str) -> Option<String>) -> bool {
-    let opted_out = env(NO_CHECK_ENV).is_some_and(|v| !v.trim().is_empty() && v.trim() != "0");
-    !opted_out && env("CI").is_none() && version::is_release_build(current)
+    !env_flag(env(NO_CHECK_ENV)) && !env_flag(env("CI")) && version::is_release_build(current)
+}
+
+/// Whether an environment flag is set: unset, empty, `0`, `false`, `no` and `off` are not.
+fn env_flag(value: Option<String>) -> bool {
+    value.is_some_and(|v| {
+        let v = v.trim();
+        !(v.is_empty()
+            || ["0", "false", "no", "off"]
+                .iter()
+                .any(|f| v.eq_ignore_ascii_case(f)))
+    })
 }
 
 /// Whether update notices and the startup check apply to this process.
@@ -164,7 +193,7 @@ fn newer(current: &str, latest: String) -> Option<UpdateStatus> {
 
 /// The newer release recorded in the cache, if any.
 pub fn cached_update(current: &str, entry: Option<&cache::CacheEntry>) -> Option<UpdateStatus> {
-    newer(current, entry?.latest_tag.clone())
+    newer(current, entry?.latest_tag.clone()?)
 }
 
 /// Line printed to stderr after short CLI commands.
@@ -183,7 +212,8 @@ pub fn notice_text(latest: &str) -> String {
 /// Starts the TUI startup check. The receiver yields once, and only when an update exists.
 ///
 /// A fresh cache answers immediately; otherwise a background thread queries GitHub and
-/// rewrites the cache. Errors are swallowed: the check must never affect the launch.
+/// rewrites the cache. Errors are swallowed: the check must never affect the launch. A failed
+/// check still records the attempt, keeping the known tag, so failures back off for 24h too.
 pub fn spawn_startup_check(config: &UpdateConfig) -> Option<Receiver<UpdateStatus>> {
     let current = version::current();
     if !startup_check_enabled(current, config, |k| std::env::var(k).ok()) {
@@ -207,30 +237,29 @@ pub fn spawn_check_with(
 ) -> Receiver<UpdateStatus> {
     let (tx, rx) = mpsc::channel();
     let entry = cache::read(&cache_path);
-    let cached_tag = entry.as_ref().map(|e| e.latest_tag.clone());
+    let stale = cache::is_stale(entry.as_ref(), now);
+    let cached_tag = entry.and_then(|e| e.latest_tag);
     let send = move |latest: Option<String>| {
         if let Some(status) = latest.and_then(|tag| newer(&current, tag)) {
             let _ = tx.send(status);
         }
     };
-    if !cache::is_stale(entry.as_ref(), now) {
+    if !stale {
         send(cached_tag);
         return rx;
     }
     std::thread::spawn(move || {
         let latest = match make_client().fetch_release(&ReleaseQuery::Latest) {
-            Ok(release) => {
-                let _ = cache::write(
-                    &cache_path,
-                    &cache::CacheEntry {
-                        last_checked: now,
-                        latest_tag: release.tag_name.clone(),
-                    },
-                );
-                Some(release.tag_name)
-            }
+            Ok(release) => Some(release.tag_name),
             Err(_) => cached_tag,
         };
+        let _ = cache::write(
+            &cache_path,
+            &cache::CacheEntry {
+                last_checked: now,
+                latest_tag: latest.clone(),
+            },
+        );
         send(latest);
     });
     rx
@@ -289,12 +318,43 @@ mod tests {
     }
 
     #[test]
+    fn env_flags_share_one_truthiness_rule() {
+        let on = UpdateConfig::default();
+        for falsy in ["", " ", "0", "false", "FALSE", "no", "off"] {
+            for var in ["CI", NO_CHECK_ENV] {
+                assert!(
+                    startup_check_enabled("v0.0.1", &on, env_from(&[(var, falsy)])),
+                    "{var}={falsy:?}"
+                );
+            }
+        }
+        for truthy in ["1", "true", "yes", "anything"] {
+            for var in ["CI", NO_CHECK_ENV] {
+                assert!(
+                    !startup_check_enabled("v0.0.1", &on, env_from(&[(var, truthy)])),
+                    "{var}={truthy:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cached_update_only_when_newer() {
         let entry = |tag: &str| cache::CacheEntry {
             last_checked: 0,
-            latest_tag: tag.into(),
+            latest_tag: Some(tag.into()),
         };
         assert_eq!(cached_update("v0.0.1", None), None);
+        assert_eq!(
+            cached_update(
+                "v0.0.1",
+                Some(&cache::CacheEntry {
+                    last_checked: 0,
+                    latest_tag: None
+                })
+            ),
+            None
+        );
         assert_eq!(cached_update("v0.0.2", Some(&entry("v0.0.2"))), None);
         assert_eq!(
             cached_update("v0.0.1", Some(&entry("v0.0.2"))),

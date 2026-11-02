@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use botai::update::platform::{self, ArchiveKind};
 use botai::update::{self, Client, InstallOutcome, ReleaseQuery, UpdateError};
-use support::{serve, FixtureRelease, FixtureServer, Routes, REPO_PATH};
+use support::{serve, FixtureRelease, FixtureServer, Headers, Routes, REPO_PATH};
 
 fn client(server: &FixtureServer) -> Client {
     Client::new(server.base.clone(), Duration::from_secs(5))
@@ -98,19 +98,69 @@ fn unknown_tag_is_reported() {
     );
 }
 
-#[test]
-fn rate_limit_is_reported_with_token_hint() {
-    let server = FixtureServer::start(|_| {
+/// Server answering `/releases/latest` with `status`, `body` and extra `headers`.
+fn latest_responds(status: u16, body: &str, headers: &[(&str, &str)]) -> FixtureServer {
+    let body = body.as_bytes().to_vec();
+    let headers: Vec<(String, String)> = headers
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    FixtureServer::start_with_headers(move |_| {
+        let path = format!("{REPO_PATH}/releases/latest");
         let mut routes = Routes::new();
-        routes.insert(
-            format!("{REPO_PATH}/releases/latest"),
-            (403, b"{}".to_vec()),
-        );
-        routes
-    });
+        routes.insert(path.clone(), (status, body));
+        let mut extra = Headers::new();
+        extra.insert(path, headers);
+        (routes, extra)
+    })
+}
+
+#[test]
+fn exhausted_rate_limit_is_reported_with_token_hint() {
+    let server = latest_responds(
+        403,
+        r#"{"message":"API rate limit exceeded"}"#,
+        &[("x-ratelimit-remaining", "0")],
+    );
     let err = update::check_latest(&client(&server), &ReleaseQuery::Latest, "v0.1.0").unwrap_err();
-    assert!(matches!(err, UpdateError::RateLimited));
+    assert!(matches!(err, UpdateError::RateLimited), "{err}");
     assert!(err.to_string().contains("GITHUB_TOKEN"));
+}
+
+#[test]
+fn status_429_is_reported_as_rate_limit() {
+    let server = latest_responds(429, "{}", &[]);
+    let err = update::check_latest(&client(&server), &ReleaseQuery::Latest, "v0.1.0").unwrap_err();
+    assert!(matches!(err, UpdateError::RateLimited), "{err}");
+}
+
+#[test]
+fn forbidden_without_exhausted_limit_reports_status_and_message() {
+    let server = latest_responds(
+        403,
+        r#"{"message":"Resource not accessible by integration"}"#,
+        &[("x-ratelimit-remaining", "4999")],
+    );
+    let err = update::check_latest(&client(&server), &ReleaseQuery::Latest, "v0.1.0").unwrap_err();
+    assert!(matches!(err, UpdateError::Http { .. }), "{err}");
+    let text = err.to_string();
+    assert!(text.contains("HTTP 403"), "{text}");
+    assert!(
+        text.contains("Resource not accessible by integration"),
+        "{text}"
+    );
+    assert!(!text.contains("rate limit"), "{text}");
+}
+
+#[test]
+fn invalid_tag_is_rejected_before_any_request() {
+    let server = serve(FixtureRelease::new("v0.2.0", b"x"), vec![]);
+    for tag in ["..", "v1/../latest", "v1.0.0?x=1", "", "v1..2", "a b"] {
+        let err = update::check_latest(&client(&server), &ReleaseQuery::Tag(tag.into()), "v0.1.0")
+            .unwrap_err();
+        assert!(matches!(err, UpdateError::InvalidTag(_)), "{tag}: {err}");
+    }
+    assert!(server.requests().is_empty());
 }
 
 #[test]
@@ -254,7 +304,7 @@ mod startup_check {
             &path,
             &CacheEntry {
                 last_checked: NOW - CHECK_INTERVAL.as_secs(),
-                latest_tag: "v0.1.0".into(),
+                latest_tag: Some("v0.1.0".into()),
             },
         )
         .unwrap();
@@ -272,7 +322,7 @@ mod startup_check {
             cache::read(&path),
             Some(CacheEntry {
                 last_checked: NOW,
-                latest_tag: "v0.3.0".into()
+                latest_tag: Some("v0.3.0".into())
             })
         );
     }
@@ -286,7 +336,7 @@ mod startup_check {
             &path,
             &CacheEntry {
                 last_checked: NOW - 60,
-                latest_tag: "v0.3.0".into(),
+                latest_tag: Some("v0.3.0".into()),
             },
         )
         .unwrap();
@@ -317,7 +367,10 @@ mod startup_check {
         ));
 
         assert_eq!(status, None);
-        assert_eq!(cache::read(&path).unwrap().latest_tag, "v0.2.0");
+        assert_eq!(
+            cache::read(&path).unwrap().latest_tag.as_deref(),
+            Some("v0.2.0")
+        );
     }
 
     #[test]
@@ -329,7 +382,7 @@ mod startup_check {
         let path = dir.path().join("update-check.toml");
         let stale = CacheEntry {
             last_checked: 0,
-            latest_tag: "v0.3.0".into(),
+            latest_tag: Some("v0.3.0".into()),
         };
         cache::write(&path, &stale).unwrap();
 
@@ -342,6 +395,77 @@ mod startup_check {
         ));
 
         assert_eq!(status.unwrap().latest, "v0.3.0");
-        assert_eq!(cache::read(&path), Some(stale));
+        assert_eq!(
+            cache::read(&path),
+            Some(CacheEntry {
+                last_checked: NOW,
+                ..stale
+            })
+        );
+    }
+
+    #[test]
+    fn error_response_records_attempt_and_keeps_known_tag() {
+        let server = latest_responds(500, "{}", &[]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-check.toml");
+        cache::write(
+            &path,
+            &CacheEntry {
+                last_checked: NOW - CHECK_INTERVAL.as_secs(),
+                latest_tag: Some("v0.3.0".into()),
+            },
+        )
+        .unwrap();
+
+        let client = client(&server);
+        let status = recv(spawn_check_with(
+            "v0.2.0".into(),
+            path.clone(),
+            move || client,
+            NOW,
+        ));
+
+        assert_eq!(status.unwrap().latest, "v0.3.0");
+        assert_eq!(
+            cache::read(&path),
+            Some(CacheEntry {
+                last_checked: NOW,
+                latest_tag: Some("v0.3.0".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn error_without_cache_records_attempt_so_next_launch_skips_network() {
+        let server = latest_responds(403, "{}", &[("x-ratelimit-remaining", "0")]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-check.toml");
+
+        let client = client(&server);
+        let status = recv(spawn_check_with(
+            "v0.2.0".into(),
+            path.clone(),
+            move || client,
+            NOW,
+        ));
+
+        assert_eq!(status, None);
+        assert_eq!(
+            cache::read(&path),
+            Some(CacheEntry {
+                last_checked: NOW,
+                latest_tag: None,
+            })
+        );
+
+        let status = recv(spawn_check_with(
+            "v0.2.0".into(),
+            path,
+            || panic!("a recorded failed attempt must not build a client"),
+            NOW + 60,
+        ));
+        assert_eq!(status, None);
+        assert_eq!(server.requests().len(), 1);
     }
 }

@@ -7,7 +7,7 @@ use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use botai::cli::{resolve_cli_selected_repos, Cli, Commands};
-use botai::config::Config;
+use botai::config::{Config, UpdateConfig};
 use botai::project::{ProjectBuilder, ProjectSetupEvent};
 use botai::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen, DEFAULT_VIEWPORT,
@@ -26,28 +26,28 @@ fn main() -> Result<()> {
         .is_some_and(Commands::shows_cli_update_notice);
     let config_override = cli.config.clone();
 
-    let result = run(cli);
-    if result.is_ok() && show_notice {
-        print_cached_update_notice(config_override.as_deref());
+    let loaded = run(cli)?;
+    if show_notice {
+        print_cached_update_notice(loaded, config_override.as_deref());
     }
-    result
+    Ok(())
 }
 
-/// Dispatches the parsed command.
-fn run(cli: Cli) -> Result<()> {
+/// Dispatches the parsed command, returning the `[update]` settings when the config was loaded.
+fn run(cli: Cli) -> Result<Option<UpdateConfig>> {
     let command = match cli.command {
         Some(Commands::Init { force, stdout }) => {
-            return cmd_init(cli.config.as_deref(), force, stdout)
+            return cmd_init(cli.config.as_deref(), force, stdout).map(|()| None)
         }
         Some(Commands::Edit { editor }) => {
-            return cmd_edit(cli.config.as_deref(), editor.as_deref())
+            return cmd_edit(cli.config.as_deref(), editor.as_deref()).map(|()| None)
         }
         // Before config load so a broken config cannot block an update.
         Some(Commands::Update {
             check,
             version,
             pre,
-        }) => return cmd_update(check, version, pre),
+        }) => return cmd_update(check, version, pre).map(|()| None),
         other => other,
     };
 
@@ -59,7 +59,7 @@ fn run(cli: Cli) -> Result<()> {
         Config::default()
     };
 
-    match command {
+    let result = match command {
         None => run_default_dashboard(&config, &config_path),
         Some(Commands::Init { .. })
         | Some(Commands::Edit { .. })
@@ -95,27 +95,29 @@ fn run(cli: Cli) -> Result<()> {
         Some(Commands::Attach { project }) => cmd_attach(&config, &project),
         Some(Commands::List) => cmd_list(&config),
         Some(Commands::Destroy { project, force }) => cmd_destroy(Some(&config), &project, force),
-    }
+    };
+    result.map(|()| Some(config.update))
 }
 
 /// Prints one stderr line when the cached startup check knows of a newer release.
 ///
 /// Never touches the network: a background check would be killed when a short command exits.
-/// The config is read best-effort, and only after the cheap checks pass.
-fn print_cached_update_notice(config_override: Option<&Path>) {
+/// `loaded` is `None` for commands that run before config load; the config is then read
+/// best-effort, and only after the stderr check passes.
+fn print_cached_update_notice(loaded: Option<UpdateConfig>, config_override: Option<&Path>) {
     use botai::update::{self, cache, version};
 
     if !io::stderr().is_terminal() {
         return;
     }
+    let config = loaded.unwrap_or_else(|| {
+        Config::resolve_path(config_override)
+            .and_then(|path| Config::load_from_file(path).ok())
+            .map(|config| config.update)
+            .unwrap_or_default()
+    });
     let current = version::current();
-    if !update::checks_allowed(current, |k| env::var(k).ok()) {
-        return;
-    }
-    let check_on_startup = Config::resolve_path(config_override)
-        .and_then(|path| Config::load_from_file(path).ok())
-        .is_none_or(|config| config.update.check_on_startup);
-    if !check_on_startup {
+    if !update::startup_check_enabled(current, &config, |k| env::var(k).ok()) {
         return;
     }
     let Some(path) = cache::default_path() else {
@@ -166,7 +168,7 @@ fn cmd_edit(config_override: Option<&Path>, editor_override: Option<&str>) -> Re
 
 /// `botai update [--check] [--version <TAG>] [--pre]`
 fn cmd_update(check: bool, tag: Option<String>, pre: bool) -> Result<()> {
-    use botai::update::{self, version, Client, InstallOutcome, ReleaseQuery};
+    use botai::update::{self, version, Client, ReleaseQuery};
 
     let current = version::current();
     let client = Client::from_env(update::UPDATE_COMMAND_TIMEOUT);
@@ -188,21 +190,18 @@ fn cmd_update(check: bool, tag: Option<String>, pre: bool) -> Result<()> {
         return Ok(());
     }
 
+    let target = update::install::current_exe()?;
+    let Some(release) = update::release_to_install(&client, &query, current)? else {
+        println!("botai {current} is already up to date.");
+        return Ok(());
+    };
     if !version::is_release_build(current) {
         eprintln!(
             "warning: botai {current} is a source build; `botai update` replaces it with the prebuilt release binary."
         );
     }
-
-    let target = update::install::current_exe()?;
-    match update::install(&client, &query, current, &target)? {
-        InstallOutcome::AlreadyUpToDate => {
-            println!("botai {current} is already up to date.");
-        }
-        InstallOutcome::Installed { to } => {
-            println!("Updated botai {current} -> {to}");
-        }
-    }
+    let to = update::install_release(&client, release, &target)?;
+    println!("Updated botai {current} -> {to}");
     Ok(())
 }
 

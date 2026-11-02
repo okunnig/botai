@@ -849,22 +849,23 @@ env = { PORT = "8080", NODE_ENV = "development" }
   | Other CLI subcommands | No network. After a successful command, one stderr line is printed if the cache records a newer release. Suppressed when stderr is not a TTY, and for `update` and `init --stdout`. |
   | `botai update` | Resolves the release, downloads the platform archive and `SHA256SUMS`, verifies, extracts, replaces the running executable, prints `vOLD -> vNEW` or "already up to date". |
   | `botai update --check` | Prints current and latest version; exit `0` either way. |
-  | `botai update --version vX.Y.Z` | Installs that tag, downgrade allowed. Skipped only when the tag equals the running version exactly. |
+  | `botai update --version vX.Y.Z` | Installs that tag, downgrade allowed. Skipped only when the tag equals the running version exactly. After the optional `v` prefix is added, the tag must be non-empty, use only `[A-Za-z0-9._+-]` and contain no `..` (`.` alone is rejected too); otherwise it fails with "Invalid release tag" before any request. |
   | `botai update --pre` | Resolves the highest non-draft release from the `/releases` list, prereleases included (`/releases/latest` excludes them). |
 
 - **Startup Check Opt-Outs**: The startup check and the CLI notice are skipped when any of these hold:
   - `[update] check_on_startup = false`.
-  - `BOTAI_NO_UPDATE_CHECK` is set to a value other than empty or `0`.
-  - `CI` is set.
+  - `BOTAI_NO_UPDATE_CHECK` is set to a truthy value.
+  - `CI` is set to a truthy value.
+  - Both variables use one rule: unset, empty, `0`, `false`, `no` and `off` (case-insensitive, surrounding whitespace ignored) are false; any other value is true.
   - The build is not a release build: `-dirty` suffix, `-N-g<sha>` suffix, exactly `v0.0.0`, or `v0.0.0-dev-*`. Semver prerelease tags such as `v0.2.0-rc.1` count as release builds.
 - **Version Comparison**: `-dirty` and `-N-g<sha>` are stripped before semver parsing, so `v0.0.1-4-gabc` compares equal to `v0.0.1` (not as a prerelease of it) and a release is offered only when strictly newer.
-- **Source Builds**: `botai update` works on non-release builds and prints a warning first that it replaces a source build with the prebuilt release binary.
+- **Source Builds**: `botai update` works on non-release builds. Once a release to install has been resolved, and before the binary is replaced, it warns that it replaces a source build with the prebuilt release binary. No warning when it is already up to date.
 - **GitHub API**:
   - `GET https://api.github.com/repos/okunnig/botai/releases/latest`, `/releases/tags/<tag>`, or `/releases?per_page=30` for `--pre` (drafts skipped).
-  - Headers: `User-Agent: botai/<version>`, `Accept: application/vnd.github+json`, and `Authorization: Bearer $GITHUB_TOKEN` when set (the anonymous limit is 60 requests/hour; the 24h cache keeps checks well under it). 403/429 produce an error suggesting `GITHUB_TOKEN`. The token is sent to the API only, not to asset downloads.
+  - Headers: `User-Agent: botai/<version>`, `Accept: application/vnd.github+json`, and `Authorization: Bearer $GITHUB_TOKEN` when set (the anonymous limit is 60 requests/hour; the 24h cache keeps checks well under it). 429, and 403 with `x-ratelimit-remaining: 0` or a `retry-after` header (secondary rate limit), produce a rate limit error suggesting `GITHUB_TOKEN`. Any other non-2xx, non-404 status (including other 403s) produces `HTTP <status>`, followed by GitHub's JSON `message` when present. The token is sent to the API only, not to asset downloads.
   - Proxies are honoured via `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`.
   - Hidden `BOTAI_UPDATE_BASE_URL` overrides the API base URL in debug builds only (tests point it at a local fixture server); release builds always use `https://api.github.com`. Asset URLs come from each asset's `browser_download_url`.
-- **Cache**: `update-check.toml` in the platform cache directory (`<cache dir>/botai/`, e.g. `~/Library/Caches/botai/`, `~/.cache/botai/`, `%LOCALAPPDATA%\botai\`) with `last_checked` (unix seconds) and `latest_tag`. Written via temp file and rename because two botai instances may write at once. A missing or corrupt cache counts as stale. On a failed network check the previous cache entry is still used for the notice.
+- **Cache**: `update-check.toml` in the platform cache directory (`<cache dir>/botai/`, e.g. `~/Library/Caches/botai/`, `~/.cache/botai/`, `%LOCALAPPDATA%\botai\`) with `last_checked` (unix seconds of the last attempt) and `latest_tag` (omitted until a check succeeds). Written via temp file and rename because two botai instances may write at once. A missing or corrupt cache counts as stale. A failed startup check (network error, HTTP error, rate limit) still rewrites `last_checked`, so failures also wait 24h before the next attempt; the previously known `latest_tag` is kept and still used for the notice.
 - **Install Procedure & Checksum Policy**:
   - Download the platform archive and `SHA256SUMS`; the archive's line in `SHA256SUMS` must exist and match, otherwise the install fails without touching the binary.
   - Extract only the `botai` / `botai.exe` entry at the archive root (a leading `./` is accepted). Entries with `..` components or absolute paths fail the install.

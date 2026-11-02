@@ -14,6 +14,8 @@ pub const REPO_PATH: &str = "/repos/okunnig/botai";
 
 /// Path -> (status, body).
 pub type Routes = HashMap<String, (u16, Vec<u8>)>;
+/// Path -> extra response headers.
+pub type Headers = HashMap<String, Vec<(String, String)>>;
 
 /// Serves `Routes` on 127.0.0.1 until the test process exits.
 pub struct FixtureServer {
@@ -24,16 +26,22 @@ pub struct FixtureServer {
 impl FixtureServer {
     /// Binds first so `build` can embed the base URL in release JSON.
     pub fn start(build: impl FnOnce(&str) -> Routes) -> Self {
+        Self::start_with_headers(|base| (build(base), Headers::new()))
+    }
+
+    /// Like [`Self::start`], with extra response headers per path.
+    pub fn start_with_headers(build: impl FnOnce(&str) -> (Routes, Headers)) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let routes = Arc::new(build(&base));
+        let (routes, headers) = build(&base);
+        let fixture = Arc::new((routes, headers));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&requests);
         thread::spawn(move || {
             for stream in listener.incoming().flatten() {
-                let routes = Arc::clone(&routes);
+                let fixture = Arc::clone(&fixture);
                 let log = Arc::clone(&log);
-                thread::spawn(move || handle(stream, &routes, &log));
+                thread::spawn(move || handle(stream, &fixture.0, &fixture.1, &log));
             }
         });
         Self { base, requests }
@@ -45,7 +53,7 @@ impl FixtureServer {
     }
 }
 
-fn handle(mut stream: TcpStream, routes: &Routes, log: &Mutex<Vec<String>>) {
+fn handle(mut stream: TcpStream, routes: &Routes, headers: &Headers, log: &Mutex<Vec<String>>) {
     let mut head = Vec::new();
     let mut buf = [0u8; 1024];
     while !head.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -69,8 +77,14 @@ fn handle(mut stream: TcpStream, routes: &Routes, log: &Mutex<Vec<String>>) {
         .cloned()
         .unwrap_or((404, br#"{"message":"Not Found"}"#.to_vec()));
     let reason = if status == 200 { "OK" } else { "ERR" };
+    let extra: String = headers
+        .get(path.split('?').next().unwrap_or(""))
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
     let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n{extra}Connection: close\r\n\r\n",
         body.len()
     );
     let _ = stream.write_all(header.as_bytes());

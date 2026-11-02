@@ -13,10 +13,11 @@ pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Contents of the cache file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheEntry {
-    /// Unix seconds of the last successful check.
+    /// Unix seconds of the last check attempt, successful or not.
     pub last_checked: u64,
-    /// Latest release tag seen at that check.
-    pub latest_tag: String,
+    /// Latest release tag known; kept across failed checks, `None` until one succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_tag: Option<String>,
 }
 
 /// Default cache file location, e.g. `~/Library/Caches/botai/update-check.toml`.
@@ -66,7 +67,7 @@ mod tests {
     fn entry(last_checked: u64) -> CacheEntry {
         CacheEntry {
             last_checked,
-            latest_tag: "v0.0.2".into(),
+            latest_tag: Some("v0.0.2".into()),
         }
     }
 
@@ -79,10 +80,27 @@ mod tests {
 
         write(&path, &entry(43)).unwrap();
         assert_eq!(read(&path), Some(entry(43)));
+
+        let unknown = CacheEntry {
+            last_checked: 44,
+            latest_tag: None,
+        };
+        write(&path, &unknown).unwrap();
+        assert_eq!(read(&path), Some(unknown));
+        write(&path, &entry(43)).unwrap();
+        assert_eq!(read(&path), Some(entry(43)));
         assert_eq!(
             std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
             1
         );
+    }
+
+    #[test]
+    fn reads_cache_written_by_earlier_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-check.toml");
+        std::fs::write(&path, "last_checked = 42\nlatest_tag = \"v0.0.2\"\n").unwrap();
+        assert_eq!(read(&path), Some(entry(42)));
     }
 
     #[test]

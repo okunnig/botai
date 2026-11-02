@@ -136,7 +136,20 @@ fn update_without_newer_release_leaves_binary_alone() {
         .arg("update")
         .assert()
         .success()
-        .stdout(predicate::str::contains("already up to date"));
+        .stdout(predicate::str::contains("already up to date"))
+        .stderr(predicate::str::contains("is a source build").not());
 
     assert_eq!(fs::read(&exe).unwrap(), before);
+}
+
+#[test]
+fn update_rejects_invalid_tag_without_a_request() {
+    let server = serve(FixtureRelease::new("v99.0.0", b"new"), vec![]);
+    let (_dir, exe) = copied_botai();
+    copied_command(&server, &exe)
+        .args(["update", "--version", "../latest"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid release tag"));
+    assert!(server.requests().is_empty());
 }
