@@ -154,15 +154,12 @@ const MAX_PARALLEL_OPS: usize = 8;
 ///
 /// `on_msg` runs on the calling thread for every message as it arrives, so
 /// callers can forward to sinks that are not `Sync`.
-fn run_bounded<T: Sync, M: Send>(
-    items: &[T],
-    work: impl Fn(&T, &mpsc::Sender<M>) + Sync,
+fn run_bounded<'a, T: Sync, M: Send>(
+    items: &'a [T],
+    work: impl Fn(&'a T, &mpsc::Sender<M>) + Sync,
     mut on_msg: impl FnMut(M),
 ) {
     let workers = items.len().min(MAX_PARALLEL_OPS);
-    if workers == 0 {
-        return;
-    }
     let next = AtomicUsize::new(0);
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|s| {
@@ -180,6 +177,12 @@ fn run_bounded<T: Sync, M: Send>(
             on_msg(msg);
         }
     });
+}
+
+fn worktree_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
 }
 
 /// Undoes worktrees created for `project_name`, and the branches that came with them.
@@ -975,25 +978,19 @@ where
             )));
         }
 
-        if !force && !child_paths.is_empty() {
+        if !force {
             let mut dirty_worktrees = Vec::new();
             let mut check_errors = Vec::new();
 
             run_bounded(
                 &child_paths,
                 |path, tx| {
-                    let repo_name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let result = crate::git::has_uncommitted_changes(path);
-                    let _ = tx.send((repo_name, path.clone(), result));
+                    let _ = tx.send((path, crate::git::has_uncommitted_changes(path)));
                 },
-                |(repo_name, path, result)| match result {
-                    Ok(true) => dirty_worktrees.push((repo_name, path)),
+                |(path, result)| match result {
+                    Ok(true) => dirty_worktrees.push((worktree_name(path), path)),
                     Ok(false) => {}
-                    Err(err) => check_errors.push(format!("'{repo_name}': {err}")),
+                    Err(err) => check_errors.push(format!("'{}': {err}", worktree_name(path))),
                 },
             );
 
@@ -1005,7 +1002,7 @@ where
             }
 
             if !dirty_worktrees.is_empty() {
-                dirty_worktrees.sort_by(|a, b| a.0.cmp(&b.0));
+                dirty_worktrees.sort_by_key(|(name, _)| *name);
                 let dirty_list: Vec<String> = dirty_worktrees
                     .iter()
                     .map(|(name, path)| format!("'{name}' ({})", path.display()))
@@ -1027,47 +1024,41 @@ where
             message: "Removing git worktrees...".to_string(),
         });
 
-        if !child_paths.is_empty() {
-            let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-            for child_path in &child_paths {
-                let main_repo = crate::git::resolve_main_repo(child_path)
-                    .unwrap_or_else(|_| child_path.clone());
-                groups
-                    .entry(main_repo)
-                    .or_default()
-                    .push(child_path.clone());
-            }
+        let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for child_path in &child_paths {
+            let main_repo =
+                crate::git::resolve_main_repo(child_path).unwrap_or_else(|_| child_path.clone());
+            groups
+                .entry(main_repo)
+                .or_default()
+                .push(child_path.clone());
+        }
 
-            let groups: Vec<Vec<PathBuf>> = groups.into_values().collect();
-            run_bounded(
-                &groups,
-                |group, tx| {
-                    for child_path in group {
-                        let repo_name = child_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let _ = tx.send(ProjectDestroyEvent::Log(format!(
-                            "Removing worktree '{repo_name}'..."
-                        )));
-                        match crate::git::remove_worktree_auto(child_path, force) {
-                            Ok(_) => {
-                                let _ = tx.send(ProjectDestroyEvent::Log(format!(
-                                    "✓ Removed worktree '{repo_name}' and pruned metadata."
-                                )));
-                            }
-                            Err(err) => {
-                                let _ = tx.send(ProjectDestroyEvent::Log(format!(
-                                    "⚠ Warning removing worktree '{repo_name}': {err}"
-                                )));
-                            }
+        let groups: Vec<Vec<PathBuf>> = groups.into_values().collect();
+        run_bounded(
+            &groups,
+            |group, tx| {
+                for child_path in group {
+                    let repo_name = worktree_name(child_path);
+                    let _ = tx.send(ProjectDestroyEvent::Log(format!(
+                        "Removing worktree '{repo_name}'..."
+                    )));
+                    match crate::git::remove_worktree_auto(child_path, force) {
+                        Ok(_) => {
+                            let _ = tx.send(ProjectDestroyEvent::Log(format!(
+                                "✓ Removed worktree '{repo_name}' and pruned metadata."
+                            )));
+                        }
+                        Err(err) => {
+                            let _ = tx.send(ProjectDestroyEvent::Log(format!(
+                                "⚠ Warning removing worktree '{repo_name}': {err}"
+                            )));
                         }
                     }
-                },
-                &mut progress_sink,
-            );
-        }
+                }
+            },
+            &mut progress_sink,
+        );
 
         // Step 4: Removing project directory
         progress_sink(ProjectDestroyEvent::Step {
