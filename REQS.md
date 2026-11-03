@@ -298,6 +298,21 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Lifecycle state and exit codes for active sessions are retrieved using a single consolidated `try_wait` invocation per session, eliminating redundant duplicate `waitpid` syscalls and mutex locking in the render loop.
 - **Zero-Allocation VT Cell Rendering & High-Throughput Performance**:
   - `TerminalView::render_to_buffer` renders virtual terminal cells directly from `vt100::Screen` borrowing `&str` symbols, mapping colors, and mapping SGR attributes bold, dim, italic, underline and inverse to ratatui modifiers without per-cell heap allocations, ensuring high-throughput 60FPS+ TUI rendering.
+  - **Experimental `kmp-terminal` Dogfooding Integration**:
+    - **Optional Feature**: Configurable via Cargo `--features kmp-terminal`, introducing an optional dependency on `kmp-terminal-rs = { path = "crates/kmp-terminal-rs", optional = true }`.
+    - **Dual Backend Architecture**: `VtScreen` encapsulates both `vt100::Parser` and `kmp-terminal-rs::Terminal`. Methods `screen()`, `parser()`, and `parser_mut()` remain backward-compatible, while explicit constructors `VtScreen::new_kmp(cols, rows)` and `VtScreen::new_vt100(cols, rows)` support targeted testing and deterministic engine selection.
+    - **Runtime Activation & Toggle**:
+      - Global CLI Flag: `--kmp-terminal` (`pub kmp_terminal: bool` on `Cli`).
+      - Environment Variable: `BOTAI_KMP_TERMINAL=1` (or `true`) to enable; `BOTAI_KMP_TERMINAL=0` (or `false`) to disable and force fallback to `vt100`.
+      - Default Behavior: When compiled with `--features kmp-terminal`, the KMP terminal engine is enabled by default unless disabled via environment variable or CLI flag.
+      - Programmatic API: Controlled and queried via `botai::session::set_kmp_terminal_enabled(bool)` and `botai::session::is_kmp_terminal_enabled() -> bool`.
+    - **Direct Viewport Rendering**:
+      - Under `#[cfg(feature = "kmp-terminal")]`, `TerminalView::render_to_buffer` directly consumes packed viewport cells via `self.vt.read_kmp_viewport()` and maps `cell.fg_raw()` / `cell.bg_raw()` (`RawColor::Indexed`, `RawColor::Rgb`), `cell.attrs()` (bold, dim, italic, underline, reverse, wide spacer), and `cell.glyph()` directly into Ratatui `Buffer`, properly preserving wide CJK glyphs and multi-codepoint emoji.
+    - **Native Library Resolution & Build Pipeline (`kmp-terminal-rs`)**:
+      - **Tier 1 (Explicit Override)**: Honors `KMP_TERMINAL_LIB_DIR` environment variable pointing directly to directory containing pre-built static (`libterminal_core.a`/`terminal_core.lib`) or shared libraries.
+      - **Tier 2 (Local Build Output Discovery)**: Automatically scans local Gradle build outputs across `../terminal-core`, `../../../kmp-terminal/terminal-core`, and `../../../kmp-terminal-emulator/terminal-core` across `releaseStatic`, `debugStatic`, `releaseShared`, and `debugShared` directories for the active target architecture (`linuxX64`, `linuxArm64`, `macosArm64`, `macosX64`, `mingwX64`).
+      - **Tier 3 (Automated GitHub Release Asset Fallback)**: If no local native library is discovered, attempts downloading pre-built static archive from GitHub Releases (`releases/latest/download/libterminal_core-{target}.a` with fallback to `v1.0.3`, configurable via `KMP_TERMINAL_RELEASE_URL`).
+      - **Stub Fallback & Build Diagnostics**: If native library is entirely missing or download fails, gracefully compiles with stub fallback (`kmp_terminal_linked` not set) and emits a compiler warning detailing the exact Gradle link task to build the binary locally (e.g. `./gradlew :terminal-core:linkReleaseStatic<Target>` in `kmp-terminal` or setting `KMP_TERMINAL_LIB_DIR`).
 - **Dynamic Viewport & Responsive Resizing**:
   - Automatically synchronizes PTY dimensions and VT virtual screen buffers to the host terminal viewport on initial startup, on window resize events (`Event::Resize`), and when creating or switching active project sessions.
   - Propagates window size changes (`SIGWINCH` / `ResizePseudoConsole`) so full-screen interactive agent CLIs (`agy`, `claude`, `aider`, etc.) dynamically re-render to the exact available terminal dimensions.

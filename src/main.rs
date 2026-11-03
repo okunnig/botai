@@ -18,6 +18,10 @@ fn main() -> Result<()> {
     botai::tui::install_panic_hook();
     let cli = Cli::parse_args();
 
+    if cli.kmp_terminal {
+        botai::session::set_kmp_terminal_enabled(true);
+    }
+
     if let Some(Commands::Init { force, stdout }) = cli.command {
         return cmd_init(cli.config.as_deref(), force, stdout);
     }

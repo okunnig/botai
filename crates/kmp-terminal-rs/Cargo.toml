@@ -1,0 +1,12 @@
+[package]
+name = "kmp-terminal-rs"
+version = "1.0.3"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+name = "kmp_terminal_rs"
+path = "src/lib.rs"
+
+
+[dependencies]

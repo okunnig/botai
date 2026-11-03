@@ -11,6 +11,10 @@ pub struct Cli {
     #[arg(short, long, global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
+    /// Use the experimental kmp-terminal backend (requires --features kmp-terminal; also configurable via BOTAI_KMP_TERMINAL=1).
+    #[arg(long, global = true)]
+    pub kmp_terminal: bool,
+
     /// Subcommand to execute. If omitted, launches the interactive TUI multiplexer.
     #[command(subcommand)]
     pub command: Option<Commands>,
