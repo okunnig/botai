@@ -116,7 +116,7 @@ repos = []
     );
 
     // Also verify app.config is synced
-    let app_cfg = app.config.as_ref().unwrap();
+    let app_cfg = &app.config;
     assert!(app_cfg.templates.contains_key("newly_added_service"));
 
     // 4. Select the newly added template (it is at index 1: newly_added_service)
@@ -428,7 +428,7 @@ repos = []
 
     // 4. Reload config on app - returns Ok(true)
     assert!(matches!(app.reload_config(), Ok(true)));
-    assert!(app.config.as_ref().unwrap().templates.contains_key("t2"));
+    assert!(app.config.templates.contains_key("t2"));
     // Calling reload again without disk modification returns Ok(false)
     assert!(matches!(app.reload_config(), Ok(false)));
 }

@@ -1,0 +1,39 @@
+name: Feature Request
+description: Propose a new feature, enhancement, or CLI capability for botai
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting an enhancement to botai! Please describe your use case and idea below.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement / Motivation
+      description: Is your feature request related to a problem or limitation? A clear description of the pain point.
+      placeholder: "I'm always frustrated when..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution / Feature Description
+      description: A clear and concise description of what you want to happen and how it fits into botai's architecture.
+      placeholder: "Describe the proposed CLI flag, configuration option, or TUI behavior..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions, workarounds, or features you've considered.
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Add any screenshots, mockups, or relevant links here.

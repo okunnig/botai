@@ -11,6 +11,9 @@ pub use vt::{DsrResponder, VtCell, VtScreen};
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Terminal size (columns, rows) used for PTY sessions when the real viewport is unknown.
+pub const DEFAULT_VIEWPORT: (u16, u16) = (100, 30);
+
 /// Errors that can occur during PTY session management, virtual terminal operations,
 /// and process lifecycle management.
 #[derive(Debug, Error)]

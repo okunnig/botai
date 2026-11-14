@@ -123,8 +123,75 @@ impl<'a> Widget for &TopBar<'a> {
     }
 }
 
+/// Truncates a label string to at most `max_chars` characters, appending an ellipsis `…` if truncated.
+pub fn truncate_label(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return s.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+    let take_count = max_chars.saturating_sub(1);
+    let mut truncated: String = s.chars().take(take_count).collect();
+    truncated.push('…');
+    truncated
+}
+
+/// Maximum width in columns for an individual session tab in the status bar.
+pub const MAX_TAB_WIDTH: usize = 32;
+
+/// Dynamically and gracefully truncates template and project names to fit within `max_tab_width`.
+///
+/// Prioritizes keeping the project name clear for agent session identification while shrinking
+/// or omitting template names when horizontal space is constrained.
+pub fn smart_truncate_tab_title(
+    template: &str,
+    project: &str,
+    max_tab_width: usize,
+) -> (String, String) {
+    let tpl_trimmed = template.trim();
+    if tpl_trimmed.is_empty() {
+        let overhead = 8; // "  ● 1 proj  " (sym, hotkey, spaces)
+        let max_proj = max_tab_width.saturating_sub(overhead);
+        return (String::new(), truncate_label(project, max_proj));
+    }
+
+    let overhead = 11; // "  ● 1 [tpl] proj  "
+    let tpl_len = tpl_trimmed.chars().count();
+    let proj_len = project.chars().count();
+
+    if tpl_len + proj_len + overhead <= max_tab_width {
+        return (tpl_trimmed.to_string(), project.to_string());
+    }
+
+    let budget = max_tab_width.saturating_sub(overhead);
+    // If budget is very tight, omit template to preserve maximum project clarity
+    if budget < 8 {
+        let max_proj = max_tab_width.saturating_sub(8);
+        return (String::new(), truncate_label(project, max_proj));
+    }
+
+    // Attempt to keep project intact and truncate template down to at least 4 chars
+    if budget >= proj_len.saturating_add(4) {
+        let tpl_alloc = budget.saturating_sub(proj_len);
+        (truncate_label(tpl_trimmed, tpl_alloc), project.to_string())
+    } else {
+        // If both need truncation, allocate a compact 4..6 chars to template and the rest to project
+        let tpl_alloc = 5.min(budget / 3).max(3);
+        let proj_alloc = budget.saturating_sub(tpl_alloc);
+        (
+            truncate_label(tpl_trimmed, tpl_alloc),
+            truncate_label(project, proj_alloc),
+        )
+    }
+}
+
 /// Computes the sliding window `(start, end)` of visible tab indices centered around `active_idx`
 /// such that the total length of visible tabs fits within `max_width`.
+///
+/// When tabs overflow `max_width`, 4 columns are reserved to accommodate overflow indicator arrows
+/// (`"◀ "` on the left and `" ▶"` on the right).
 pub fn compute_visible_tab_range(
     tab_lens: &[usize],
     active_idx: usize,
@@ -139,6 +206,8 @@ pub fn compute_visible_tab_range(
         return (0, tab_lens.len());
     }
 
+    // Reserve 4 columns for overflow arrows ("◀ " and " ▶")
+    let budget = max_width.saturating_sub(4);
     let act = active_idx.min(tab_lens.len().saturating_sub(1));
     let mut start = act;
     let mut end = act + 1;
@@ -147,7 +216,7 @@ pub fn compute_visible_tab_range(
     // Expand rightwards as much as possible
     while end < tab_lens.len() {
         let next_len = tab_lens[end] as u16;
-        if used_width + next_len <= max_width {
+        if used_width.saturating_add(next_len) <= budget {
             used_width += next_len;
             end += 1;
         } else {
@@ -158,7 +227,7 @@ pub fn compute_visible_tab_range(
     // Expand leftwards as much as possible
     while start > 0 {
         let prev_len = tab_lens[start - 1] as u16;
-        if used_width + prev_len <= max_width {
+        if used_width.saturating_add(prev_len) <= budget {
             used_width += prev_len;
             start -= 1;
         } else {
@@ -169,10 +238,138 @@ pub fn compute_visible_tab_range(
     (start, end)
 }
 
+/// Picks the right-hand content of a bar: `notice | hints[0]` first, then each of `hints` alone,
+/// returning the first that fits beside `left_width` columns, with its width.
+///
+/// The notice is dropped before the hints shrink.
+pub(crate) fn fit_hints<'a>(
+    notice: Option<&'a str>,
+    hints: &[&'a str],
+    left_width: u16,
+    width: u16,
+    theme: &Theme,
+) -> Option<(Line<'a>, u16)> {
+    const SEP: &str = " | ";
+    let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
+    let fits = |w: usize| usize::from(left_width) + w + 2 <= usize::from(width);
+    let text_width = |s: &str| s.chars().count();
+
+    if let (Some(notice), Some(first)) = (notice, hints.first()) {
+        let w = text_width(notice) + SEP.len() + text_width(first);
+        if fits(w) {
+            let notice_style = Style::default()
+                .fg(theme.status_waiting)
+                .bg(theme.status_bar_bg)
+                .add_modifier(Modifier::BOLD);
+            let line = Line::from(vec![
+                Span::styled(notice, notice_style),
+                Span::styled(SEP, hint_style),
+                Span::styled(*first, hint_style),
+            ]);
+            return Some((line, w as u16));
+        }
+    }
+    hints
+        .iter()
+        .map(|h| (*h, text_width(h)))
+        .find(|(_, w)| fits(*w))
+        .map(|(h, w)| (Line::from(Span::styled(h, hint_style)), w as u16))
+}
+
+/// Keymap menu text displayed inside the leader actions overlay.
+pub const LEADER_ACTIONS_MENU: &str =
+    "[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
+
+/// Dedicated 1-row overlay displaying global multiplexer keybindings when leader mode is active.
+#[derive(Debug, Clone, Default)]
+pub struct ActionsOverlay<'a> {
+    theme: Option<&'a Theme>,
+}
+
+impl<'a> ActionsOverlay<'a> {
+    /// Creates a new `ActionsOverlay` widget with the default theme.
+    pub fn new() -> Self {
+        Self { theme: None }
+    }
+
+    /// Configures the theme used to style the actions overlay.
+    pub fn with_theme(mut self, theme: &'a Theme) -> Self {
+        self.theme = Some(theme);
+        self
+    }
+
+    /// Renders the actions overlay into the given buffer area using the configured (or default) theme.
+    pub fn render_to_buffer(&self, area: Rect, buf: &mut Buffer) {
+        let default_theme = Theme::default();
+        let theme = self.theme.unwrap_or(&default_theme);
+        Self::render_to_buffer_with_theme(theme, area, buf);
+    }
+
+    /// Renders the actions overlay into the given buffer area using the specified `Theme`.
+    pub fn render_to_buffer_with_theme(theme: &Theme, area: Rect, buf: &mut Buffer) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        let row_y = area.y;
+        if row_y < buf.area.top() || row_y >= buf.area.bottom() {
+            return;
+        }
+
+        let bar_style = Style::default()
+            .fg(theme.leader_fg)
+            .bg(theme.leader_bg)
+            .add_modifier(Modifier::BOLD);
+
+        for x in area.left()..area.right() {
+            if let Some(cell) = buf.cell_mut((x, row_y)) {
+                cell.reset();
+                cell.set_char(' ').set_style(bar_style);
+            }
+        }
+
+        let menu_len = LEADER_ACTIONS_MENU.chars().count() as u16;
+        if area.width > menu_len {
+            let menu_line = Line::from(vec![
+                Span::styled(" ", bar_style),
+                Span::styled(LEADER_ACTIONS_MENU, bar_style),
+            ]);
+            buf.set_line(area.x, row_y, &menu_line, area.width);
+
+            const CANCEL_HINT: &str = "Esc: Cancel";
+            let cancel_len = CANCEL_HINT.chars().count() as u16;
+            if area.width > 1 + menu_len + 2 + cancel_len {
+                let cancel_style = Style::default()
+                    .fg(theme.leader_fg)
+                    .bg(theme.leader_bg)
+                    .remove_modifier(Modifier::BOLD);
+                let cancel_x = area.right().saturating_sub(cancel_len + 1);
+                let cancel_line = Line::from(Span::styled(CANCEL_HINT, cancel_style));
+                buf.set_line(cancel_x, row_y, &cancel_line, cancel_len);
+            }
+        } else {
+            let menu_line = Line::from(Span::styled(LEADER_ACTIONS_MENU, bar_style));
+            buf.set_line(area.x, row_y, &menu_line, area.width);
+        }
+    }
+}
+
+impl<'a> Widget for ActionsOverlay<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.render_to_buffer(area, buf);
+    }
+}
+
+impl<'a> Widget for &ActionsOverlay<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.render_to_buffer(area, buf);
+    }
+}
+
 /// Status bar widget displaying active project tabs, agent status badges, and multiplexer hotkeys.
 pub struct StatusBar<'a> {
     registry: &'a SessionRegistry,
     leader_active: bool,
+    update_notice: Option<&'a str>,
     theme: Option<&'a Theme>,
     notification: Option<&'a str>,
 }
@@ -183,9 +380,16 @@ impl<'a> StatusBar<'a> {
         Self {
             registry,
             leader_active: false,
+            update_notice: None,
             theme: None,
             notification: None,
         }
+    }
+
+    /// Configures the update notice shown before the hint when there is room.
+    pub fn with_update_notice(mut self, notice: Option<&'a str>) -> Self {
+        self.update_notice = notice;
+        self
     }
 
     /// Configures whether leader mode is actively displayed on the status bar.
@@ -214,13 +418,17 @@ impl<'a> StatusBar<'a> {
             "-".to_string()
         };
 
-        let proj = session.project_name();
-        let tpl = session.template_name().trim();
+        let sym = session.status().status_symbol();
+        let (tpl, proj) = smart_truncate_tab_title(
+            session.template_name(),
+            session.project_name(),
+            MAX_TAB_WIDTH,
+        );
 
         if tpl.is_empty() {
-            format!("  ● {hotkey} {proj}  ")
+            format!("  {sym} {hotkey} {proj}  ")
         } else {
-            format!("  ● {hotkey} [{tpl}] {proj}  ")
+            format!("  {sym} {hotkey} [{tpl}] {proj}  ")
         }
     }
 
@@ -237,9 +445,18 @@ impl<'a> StatusBar<'a> {
             "-".to_string()
         };
 
-        let proj = session.project_name();
-        let dot_color = session.status().status_color(theme);
-        let tpl = session.template_name().trim();
+        let mut dot_color = session.status().status_color(theme);
+        // Contrast fallback guard on active tabs: if dot color collides with active tab bg, use active tab fg
+        if is_active && dot_color == theme.tab_active_bg {
+            dot_color = theme.tab_active_fg;
+        }
+
+        let sym = session.status().status_symbol();
+        let (tpl, proj) = smart_truncate_tab_title(
+            session.template_name(),
+            session.project_name(),
+            MAX_TAB_WIDTH,
+        );
         let label = if tpl.is_empty() {
             format!(" {hotkey} {proj}  ")
         } else {
@@ -258,7 +475,7 @@ impl<'a> StatusBar<'a> {
 
             vec![
                 Span::styled("  ", active_style),
-                Span::styled("●", dot_style_active),
+                Span::styled(sym, dot_style_active),
                 Span::styled(label, active_style),
             ]
         } else {
@@ -269,7 +486,7 @@ impl<'a> StatusBar<'a> {
 
             vec![
                 Span::styled("  ", inactive_style),
-                Span::styled("●", dot_style_inactive),
+                Span::styled(sym, dot_style_inactive),
                 Span::styled(label, inactive_style),
             ]
         }
@@ -277,12 +494,12 @@ impl<'a> StatusBar<'a> {
 
     /// Builds the styled `Line` for all visible session tabs within the given available width.
     pub fn build_tabs_line<'b>(
-        sessions: &[&SessionEntry],
+        sessions: &[SessionEntry],
         active_idx: usize,
         max_width: u16,
         theme: &'b Theme,
     ) -> Line<'b> {
-        if sessions.is_empty() {
+        if sessions.is_empty() || max_width == 0 {
             return Line::default();
         }
 
@@ -327,7 +544,7 @@ impl<'a> StatusBar<'a> {
 
         if visible_end < tab_spans_list.len() {
             spans.push(Span::styled(
-                "▶",
+                " ▶",
                 Style::default()
                     .fg(theme.leader_bg)
                     .bg(theme.status_bar_bg)
@@ -357,14 +574,7 @@ impl<'a> StatusBar<'a> {
         area: Rect,
         buf: &mut Buffer,
     ) {
-        Self::render_to_buffer_with_theme_and_notification(
-            registry,
-            leader_active,
-            None,
-            theme,
-            area,
-            buf,
-        );
+        Self::render_with_options(registry, leader_active, None, None, theme, area, buf);
     }
 
     /// Renders the status bar directly into a Ratatui `Buffer` with an optional notification banner.
@@ -376,85 +586,73 @@ impl<'a> StatusBar<'a> {
         area: Rect,
         buf: &mut Buffer,
     ) {
+        Self::render_with_options(
+            registry,
+            leader_active,
+            None,
+            notification,
+            theme,
+            area,
+            buf,
+        );
+    }
+
+    /// Renders the status bar with optional update notice and status notification.
+    fn render_with_options(
+        registry: &SessionRegistry,
+        _leader_active: bool,
+        update_notice: Option<&str>,
+        notification: Option<&str>,
+        theme: &Theme,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
         if area.height == 0 || area.width == 0 {
             return;
         }
 
         if registry.is_empty() {
-            if leader_active {
-                let leader_msg =
-                    "[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
-                let line = Line::from(Span::styled(
-                    leader_msg,
-                    Style::default()
-                        .fg(theme.leader_fg)
-                        .bg(theme.leader_bg)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                TopBar::new(line)
-                    .with_theme(theme)
-                    .render_to_buffer(area, buf);
-            } else {
-                let msg = " [No Active Sessions] - Press Ctrl+Space then q to quit ";
-                let line = Line::from(Span::styled(
-                    msg,
-                    Style::default()
-                        .fg(theme.modal_title)
-                        .bg(theme.status_bar_bg)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                TopBar::new(line)
-                    .with_theme(theme)
-                    .render_to_buffer(area, buf);
-            }
+            let msg = " [No Active Sessions] - Press Ctrl+Space then q to quit ";
+            let line = Line::from(Span::styled(
+                msg,
+                Style::default()
+                    .fg(theme.modal_title)
+                    .bg(theme.status_bar_bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            TopBar::new(line)
+                .with_theme(theme)
+                .render_to_buffer(area, buf);
             return;
         }
 
         let active_idx = registry.active_index().unwrap_or(0);
         let sessions = registry.list();
+        let full_tabs_line = Self::build_tabs_line(sessions, active_idx, area.width, theme);
+        let full_tabs_width = full_tabs_line.width() as u16;
+        let mut top_bar = TopBar::new(full_tabs_line).with_theme(theme);
 
-        let tabs_line = Self::build_tabs_line(&sessions, active_idx, area.width, theme);
-        let tabs_width = tabs_line.width() as u16;
-
-        let mut top_bar = TopBar::new(tabs_line).with_theme(theme);
-
-        if leader_active {
-            let leader_msg =
-                "[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
-            let leader_len = leader_msg.chars().count() as u16;
-            let leader_style = Style::default()
-                .fg(theme.leader_fg)
-                .bg(theme.leader_bg)
-                .add_modifier(Modifier::BOLD);
-
-            if area.width >= tabs_width + leader_len + 2 {
-                let leader_line = Line::from(Span::styled(leader_msg, leader_style));
-                top_bar = top_bar.with_right_and_padding(leader_line, leader_len, true);
-            } else if area.width >= leader_len {
-                let leader_line = Line::from(Span::styled(leader_msg, leader_style));
-                top_bar = top_bar.with_right_and_padding(leader_line, leader_len, false);
-            }
-        } else if let Some(notif) = notification {
+        if let Some(notif) = notification {
             let notif_len = notif.chars().count() as u16;
             let notif_style = Style::default()
                 .fg(theme.status_done)
                 .bg(theme.status_bar_bg)
                 .add_modifier(Modifier::BOLD);
-            if area.width >= tabs_width + notif_len + 2 {
+            if area.width >= full_tabs_width + notif_len + 2 {
                 let notif_line = Line::from(Span::styled(notif, notif_style));
                 top_bar = top_bar.with_right_and_padding(notif_line, notif_len, true);
             } else if area.width >= notif_len {
                 let notif_line = Line::from(Span::styled(notif, notif_style));
                 top_bar = top_bar.with_right_and_padding(notif_line, notif_len, false);
             }
-        } else {
-            let hint = "Ctrl+Space: Actions";
-            let hint_len = hint.chars().count() as u16;
-            if area.width >= tabs_width + hint_len + 2 {
-                let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
-                let hint_line = Line::from(Span::styled(hint, hint_style));
-                top_bar = top_bar.with_right_and_padding(hint_line, hint_len, true);
-            }
+        } else if let Some((line, len)) = fit_hints(
+            update_notice,
+            &["Ctrl+Space: Actions"],
+            full_tabs_width,
+            area.width,
+            theme,
+        ) {
+            top_bar = top_bar.with_right_and_padding(line, len, true);
         }
 
         top_bar.render_to_buffer(area, buf);
@@ -465,9 +663,10 @@ impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        Self::render_to_buffer_with_theme_and_notification(
+        Self::render_with_options(
             self.registry,
             self.leader_active,
+            self.update_notice,
             self.notification,
             theme,
             area,
@@ -480,9 +679,10 @@ impl<'a> Widget for &StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        StatusBar::render_to_buffer_with_theme_and_notification(
+        StatusBar::render_with_options(
             self.registry,
             self.leader_active,
+            self.update_notice,
             self.notification,
             theme,
             area,
@@ -591,7 +791,7 @@ mod tests {
             assert_eq!(active_spans[0].style.fg, Some(theme.tab_active_fg));
             assert_eq!(active_spans[0].style.bg, Some(theme.tab_active_bg));
 
-            assert_eq!(active_spans[1].content, "●");
+            assert_eq!(active_spans[1].content, status.status_symbol());
             assert_eq!(active_spans[1].style.fg, Some(expected_color));
             assert_eq!(active_spans[1].style.bg, Some(theme.tab_active_bg));
 
@@ -606,7 +806,7 @@ mod tests {
             assert_eq!(inactive_spans[0].style.fg, Some(theme.tab_inactive_fg));
             assert_eq!(inactive_spans[0].style.bg, Some(theme.tab_inactive_bg));
 
-            assert_eq!(inactive_spans[1].content, "●");
+            assert_eq!(inactive_spans[1].content, status.status_symbol());
             assert_eq!(inactive_spans[1].style.fg, Some(expected_color));
             assert_eq!(inactive_spans[1].style.bg, Some(theme.tab_inactive_bg));
 
@@ -631,17 +831,17 @@ mod tests {
         assert!(rendered.contains("No Active Sessions"));
         assert!(rendered.contains("Press Ctrl+Space then q to quit"));
 
-        // Active leader
+        // Active leader keeps row 0 unchanged (actions overlay renders separately on row 1)
         let mut buffer_leader = Buffer::empty(Rect::new(0, 0, 100, 1));
         StatusBar::render_to_buffer(&registry, true, Rect::new(0, 0, 100, 1), &mut buffer_leader);
 
+        assert_eq!(buffer_leader.content(), buffer.content());
         let rendered_leader = buffer_leader
             .content()
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered_leader
-            .contains("[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]"));
+        assert!(!rendered_leader.contains(LEADER_ACTIONS_MENU));
     }
 
     #[test]
@@ -676,7 +876,7 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("● 1 [ws] proj-backend"));
-        assert!(rendered.contains("● 2 [ws] proj-frontend"));
+        assert!(rendered.contains("? 2 [ws] proj-frontend"));
         assert!(rendered.contains("Ctrl+Space: Actions"));
 
         // Verify status dot colors in buffer cells
@@ -690,7 +890,7 @@ mod tests {
         // Tab 1 length: "  ● 1 [ws] proj-backend  ".chars().count() = 25, + 1 separator space = 26
         // Tab 2 starts at x = 26: "  " (2 chars) -> dot at x = 28
         let dot_cell_2 = buffer.cell((28, 0)).unwrap();
-        assert_eq!(dot_cell_2.symbol(), "●");
+        assert_eq!(dot_cell_2.symbol(), "?");
         assert_eq!(dot_cell_2.fg, theme.status_waiting);
         assert_eq!(dot_cell_2.bg, theme.tab_inactive_bg);
     }
@@ -702,18 +902,29 @@ mod tests {
             create_test_session_with_status("proj-backend", "ws", "claude", SessionStatus::Busy);
         registry.add(ps1, pty1, vt1).unwrap();
 
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 160, 1));
-        StatusBar::render_to_buffer(&registry, true, Rect::new(0, 0, 160, 1), &mut buffer);
+        let mut buffer_normal = Buffer::empty(Rect::new(0, 0, 160, 1));
+        StatusBar::render_to_buffer(
+            &registry,
+            false,
+            Rect::new(0, 0, 160, 1),
+            &mut buffer_normal,
+        );
 
-        let rendered = buffer
+        let mut buffer_leader = Buffer::empty(Rect::new(0, 0, 160, 1));
+        StatusBar::render_to_buffer(&registry, true, Rect::new(0, 0, 160, 1), &mut buffer_leader);
+
+        // StatusBar keeps row 0 cell-for-cell identical when leader_active is true
+        assert_eq!(buffer_leader.content(), buffer_normal.content());
+
+        let rendered = buffer_leader
             .content()
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
         assert!(rendered.contains("● 1 [ws] proj-backend"));
-        assert!(rendered
-            .contains("[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]"));
+        assert!(rendered.contains("Ctrl+Space: Actions"));
+        assert!(!rendered.contains(LEADER_ACTIONS_MENU));
     }
 
     #[test]
@@ -736,7 +947,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered_wide.contains("● 1 [ws] p1"));
-        assert!(rendered_wide.contains("● 2 [ws] p2"));
+        assert!(rendered_wide.contains("? 2 [ws] p2"));
         assert!(rendered_wide.contains("Ctrl+Space: Actions"));
 
         // 2. Tight buffer (35 cols) -> Tabs visible, hint cleanly omitted
@@ -773,9 +984,9 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        // Active tab 8 MUST be rendered
+        // Active tab 8 MUST be rendered with Done checkmark symbol '✓'
         assert!(
-            rendered60.contains("● 8 [ws] service-long-name-8"),
+            rendered60.contains("✓ 8 [ws] service-long-name-8"),
             "Rendered output must contain active tab 8, got: {rendered60}"
         );
     }
@@ -866,13 +1077,15 @@ mod tests {
 
                 // Dot cell is at (2, 0)
                 let dot_cell = buffer.cell((2, 0)).unwrap();
-                assert_eq!(dot_cell.symbol(), "●");
+                assert_eq!(dot_cell.symbol(), status.status_symbol());
+                let mut expected_fg = status.status_color(theme);
+                if expected_fg == theme.tab_active_bg {
+                    expected_fg = theme.tab_active_fg;
+                }
                 assert_eq!(
-                    dot_cell.fg,
-                    status.status_color(theme),
+                    dot_cell.fg, expected_fg,
                     "Status color mismatch for {:?} under theme {}",
-                    status,
-                    theme.name
+                    status, theme.name
                 );
                 assert_eq!(dot_cell.bg, theme.tab_active_bg);
             }
@@ -901,8 +1114,148 @@ mod tests {
         // Start at 5 (len 10), expand right: 6 (20), 7 (30), 8 (40), stop right. Left 4 cannot fit (50 > 45) -> (5, 9)
         assert_eq!(compute_visible_tab_range(&ten_tabs, 5, 45), (5, 9));
 
-        // 6. Active index out of bounds clamped safely
-        assert_eq!(compute_visible_tab_range(&ten_tabs, 99, 30), (7, 10));
+        // 6. Active index out of bounds clamped safely (budget = 30 - 4 = 26, fits 2 tabs: 8 and 9)
+        assert_eq!(compute_visible_tab_range(&ten_tabs, 99, 30), (8, 10));
+    }
+
+    #[test]
+    fn test_status_bar_contrast_fallback_guard_on_active_tab() {
+        // Create a custom theme where status_busy collides with tab_active_bg
+        let mut colliding_theme = Theme::tokyo_night();
+        colliding_theme.status_busy = colliding_theme.tab_active_bg;
+
+        let (ps, pty, vt) =
+            create_test_session_with_status("colliding-tab", "ws", "claude", SessionStatus::Busy);
+        let entry = SessionEntry::new(ps, pty, vt);
+
+        // Active tab format spans must fall back to tab_active_fg
+        let active_spans = StatusBar::format_tab_spans(0, &entry, true, &colliding_theme);
+        let dot_span = &active_spans[1];
+        assert_eq!(dot_span.content, "●");
+        assert_eq!(dot_span.style.fg, Some(colliding_theme.tab_active_fg));
+        assert_eq!(dot_span.style.bg, Some(colliding_theme.tab_active_bg));
+
+        // Inactive tab keeps original status color against tab_inactive_bg
+        let inactive_spans = StatusBar::format_tab_spans(1, &entry, false, &colliding_theme);
+        assert_eq!(
+            inactive_spans[1].style.fg,
+            Some(colliding_theme.tab_active_bg)
+        );
+    }
+
+    #[test]
+    fn test_smart_truncate_tab_title_and_label() {
+        // truncate_label tests
+        assert_eq!(truncate_label("short", 10), "short");
+        assert_eq!(truncate_label("exact", 5), "exact");
+        assert_eq!(truncate_label("toolongstring", 8), "toolong…");
+        assert_eq!(truncate_label("abc", 0), "");
+        assert_eq!(truncate_label("abc", 1), "…");
+
+        // smart_truncate_tab_title tests
+        // Fits comfortably
+        let (tpl, proj) = smart_truncate_tab_title("ecommerce", "payment-api", 35);
+        assert_eq!(tpl, "ecommerce");
+        assert_eq!(proj, "payment-api");
+
+        // Moderate constraint: template truncated, project preserved intact
+        let (tpl_trunc, proj_intact) =
+            smart_truncate_tab_title("microservices-platform", "auth-gateway", 27);
+        assert_eq!(proj_intact, "auth-gateway");
+        assert!(tpl_trunc.ends_with('…'));
+
+        // Very tight constraint: template omitted or compact, project shortened
+        let (tpl_omitted, proj_trunc) =
+            smart_truncate_tab_title("backend", "feature-long-name", 15);
+        assert!(proj_trunc.ends_with('…'));
+        assert!(tpl_omitted.is_empty() || tpl_omitted.ends_with('…'));
+
+        // Empty template fallback
+        let (tpl_empty, proj_short) = smart_truncate_tab_title("", "my-feature-branch", 18);
+        assert!(tpl_empty.is_empty());
+        assert!(proj_short.ends_with('…'));
+    }
+
+    #[test]
+    fn test_status_bar_leader_mode_constrained_tabs_width() {
+        let mut registry = SessionRegistry::new();
+        for i in 1..=5 {
+            let name = format!("service-{}", i);
+            let (ps, pty, vt) =
+                create_test_session_with_status(&name, "template", "claude", SessionStatus::Busy);
+            registry.add(ps, pty, vt).unwrap();
+        }
+        registry.set_active_index(2).unwrap(); // Active is service-3
+
+        let theme = Theme::tokyo_night();
+        // Width 110: StatusBar preserves full tab width without subtracting 74 cols for leader menu.
+        let mut buffer_normal = Buffer::empty(Rect::new(0, 0, 110, 1));
+        StatusBar::render_to_buffer_with_theme(
+            &registry,
+            false,
+            &theme,
+            Rect::new(0, 0, 110, 1),
+            &mut buffer_normal,
+        );
+
+        let mut buffer_leader = Buffer::empty(Rect::new(0, 0, 110, 1));
+        StatusBar::render_to_buffer_with_theme(
+            &registry,
+            true,
+            &theme,
+            Rect::new(0, 0, 110, 1),
+            &mut buffer_leader,
+        );
+
+        assert_eq!(buffer_leader.content(), buffer_normal.content());
+
+        let rendered = buffer_leader
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        // Multiple tabs remain visible and leader menu is not placed on row 0
+        assert!(rendered.contains("3 [template] service-3"));
+        assert!(rendered.contains("4 [template] service-4"));
+        assert!(!rendered.contains(LEADER_ACTIONS_MENU));
+    }
+
+    #[test]
+    fn test_status_bar_overflow_arrow_reservation_and_formatting() {
+        let mut registry = SessionRegistry::new();
+        for i in 1..=8 {
+            let (ps, pty, vt) = create_test_session_with_status(
+                &format!("proj-{}", i),
+                "ws",
+                "claude",
+                SessionStatus::Busy,
+            );
+            registry.add(ps, pty, vt).unwrap();
+        }
+        registry.set_active_index(3).unwrap(); // 4th tab is active (middle)
+
+        let theme = Theme::tokyo_night();
+        // Constrain width so overflow arrows appear on both sides
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 50, 1));
+        StatusBar::render_to_buffer_with_theme(
+            &registry,
+            false,
+            &theme,
+            Rect::new(0, 0, 50, 1),
+            &mut buffer,
+        );
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        // Left overflow arrow formatted as "◀ "
+        assert!(rendered.contains("◀ "));
+        // Right overflow arrow symmetrically formatted as " ▶"
+        assert!(rendered.contains(" ▶"));
     }
 
     #[test]
@@ -1010,5 +1363,348 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("✓ Added repository 'docs' to project 'p1'"));
+    }
+
+    #[test]
+    fn test_status_bar_build_tabs_line_slice_input() {
+        let theme = Theme::tokyo_night();
+        let mut registry = SessionRegistry::new();
+        let (ps1, pty1, vt1) =
+            create_test_session_with_status("slice-tab1", "ws", "claude", SessionStatus::Busy);
+        let (ps2, pty2, vt2) = create_test_session_with_status(
+            "slice-tab2",
+            "ws",
+            "agy",
+            SessionStatus::WaitingForInput,
+        );
+
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        // Pass registry.list() directly as &[SessionEntry] slice
+        let sessions_slice: &[SessionEntry] = registry.list();
+        let tabs_line = StatusBar::build_tabs_line(sessions_slice, 0, 100, &theme);
+
+        let rendered = tabs_line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+
+        assert!(rendered.contains("● 1 [ws] slice-tab1"));
+        assert!(rendered.contains("? 2 [ws] slice-tab2"));
+    }
+
+    #[test]
+    fn test_status_bar_tab_truncation_with_max_tab_width() {
+        let theme = Theme::tokyo_night();
+
+        // 1. Normal / short names remain untouched
+        let (ps_short, pty_short, vt_short) =
+            create_test_session_with_status("my-api", "backend", "claude", SessionStatus::Busy);
+        let entry_short = SessionEntry::new(ps_short, pty_short, vt_short);
+
+        let short_tab = StatusBar::format_tab(0, &entry_short, true);
+        assert_eq!(short_tab, "  ● 1 [backend] my-api  ");
+        assert!(short_tab.chars().count() <= MAX_TAB_WIDTH);
+
+        let short_spans = StatusBar::format_tab_spans(0, &entry_short, true, &theme);
+        assert_eq!(short_spans[2].content, " 1 [backend] my-api  ");
+
+        // 2. Long project name (50+ chars) is cleanly truncated to fit within MAX_TAB_WIDTH
+        let long_proj =
+            "very-long-project-name-exceeding-fifty-characters-in-total-length-for-testing";
+        assert!(long_proj.chars().count() > 50);
+        let (ps_long_proj, pty_long_proj, vt_long_proj) =
+            create_test_session_with_status(long_proj, "tpl", "claude", SessionStatus::Busy);
+        let entry_long_proj = SessionEntry::new(ps_long_proj, pty_long_proj, vt_long_proj);
+
+        let long_proj_tab = StatusBar::format_tab(0, &entry_long_proj, true);
+        assert!(
+            long_proj_tab.chars().count() <= MAX_TAB_WIDTH,
+            "Formatted tab width {} exceeds MAX_TAB_WIDTH {}",
+            long_proj_tab.chars().count(),
+            MAX_TAB_WIDTH
+        );
+        assert!(long_proj_tab.contains('…'));
+        assert!(long_proj_tab.contains("[tpl]"));
+
+        let long_proj_spans = StatusBar::format_tab_spans(0, &entry_long_proj, true, &theme);
+        let long_proj_spans_len: usize = long_proj_spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        assert!(long_proj_spans_len <= MAX_TAB_WIDTH);
+
+        // 3. Long template name (50+ chars) is cleanly truncated to fit within MAX_TAB_WIDTH
+        let long_tpl = "extra-long-template-name-exceeding-fifty-characters-in-length-easily";
+        assert!(long_tpl.chars().count() > 50);
+        let (ps_long_tpl, pty_long_tpl, vt_long_tpl) =
+            create_test_session_with_status("service", long_tpl, "claude", SessionStatus::Busy);
+        let entry_long_tpl = SessionEntry::new(ps_long_tpl, pty_long_tpl, vt_long_tpl);
+
+        let long_tpl_tab = StatusBar::format_tab(0, &entry_long_tpl, true);
+        assert!(
+            long_tpl_tab.chars().count() <= MAX_TAB_WIDTH,
+            "Formatted tab width {} exceeds MAX_TAB_WIDTH {}",
+            long_tpl_tab.chars().count(),
+            MAX_TAB_WIDTH
+        );
+        assert!(long_tpl_tab.contains('…'));
+        assert!(long_tpl_tab.contains("service"));
+
+        // 4. Both template and project 50+ chars
+        let (ps_both_long, pty_both_long, vt_both_long) =
+            create_test_session_with_status(long_proj, long_tpl, "claude", SessionStatus::Busy);
+        let entry_both_long = SessionEntry::new(ps_both_long, pty_both_long, vt_both_long);
+
+        let both_long_tab = StatusBar::format_tab(0, &entry_both_long, true);
+        assert!(both_long_tab.chars().count() <= MAX_TAB_WIDTH);
+        assert!(both_long_tab.contains('…'));
+
+        // 5. Long project with empty template omits brackets and fits MAX_TAB_WIDTH
+        let (ps_no_tpl, pty_no_tpl, vt_no_tpl) =
+            create_test_session_with_status(long_proj, "", "claude", SessionStatus::Busy);
+        let entry_no_tpl = SessionEntry::new(ps_no_tpl, pty_no_tpl, vt_no_tpl);
+
+        let no_tpl_tab = StatusBar::format_tab(0, &entry_no_tpl, true);
+        assert!(no_tpl_tab.chars().count() <= MAX_TAB_WIDTH);
+        assert!(!no_tpl_tab.contains('[') && !no_tpl_tab.contains(']'));
+        assert!(no_tpl_tab.contains('…'));
+    }
+
+    #[test]
+    fn test_status_bar_update_notice_shown_when_it_fits() {
+        let mut registry = SessionRegistry::new();
+        let (ps, pty, vt) =
+            create_test_session_with_status("proj", "tpl", "claude", SessionStatus::Busy);
+        registry.add(ps, pty, vt).unwrap();
+        let theme = Theme::tokyo_night();
+        let notice = "update v9.0.0 available: botai update";
+
+        let render = |width: u16| {
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            StatusBar::new(&registry)
+                .with_update_notice(Some(notice))
+                .with_theme(&theme)
+                .render(area, &mut buffer);
+            buffer
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        };
+
+        let wide = render(120);
+        assert!(wide.contains(notice), "{wide}");
+        assert!(wide.contains("Ctrl+Space: Actions"), "{wide}");
+
+        let narrow = render(50);
+        assert!(!narrow.contains("update v9.0.0"), "{narrow}");
+        assert!(narrow.contains("Ctrl+Space: Actions"), "{narrow}");
+    }
+
+    #[test]
+    fn test_actions_overlay_renders_menu_and_clears_underlying_cells() {
+        use ratatui::style::Color;
+
+        let theme = Theme::tokyo_night();
+        let area = Rect::new(0, 0, 110, 1);
+        let mut buf = Buffer::empty(area);
+
+        // Pre-populate buffer with styled terminal cells to ensure no bleed-through
+        for x in 0..110 {
+            let cell = buf.cell_mut((x, 0)).unwrap();
+            cell.set_char('X').set_style(
+                Style::default()
+                    .fg(Color::Red)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::ITALIC | Modifier::UNDERLINED | Modifier::REVERSED),
+            );
+        }
+
+        ActionsOverlay::new()
+            .with_theme(&theme)
+            .render(area, &mut buf);
+
+        let rendered: String = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains(LEADER_ACTIONS_MENU), "{rendered}");
+        assert!(rendered.contains("Esc: Cancel"), "{rendered}");
+        assert!(!rendered.contains('X'), "{rendered}");
+
+        // Leading space at col 0, menu starts at col 1
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "[");
+        assert!(buf.cell((1, 0)).unwrap().modifier.contains(Modifier::BOLD));
+
+        // "Esc: Cancel" right-aligned 1 col before area.right() (cols 98..109)
+        let cancel: String = (98..109)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol())
+            .collect();
+        assert_eq!(cancel, "Esc: Cancel");
+        assert_eq!(buf.cell((109, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((98, 0)).unwrap().fg, theme.leader_fg);
+        assert_eq!(buf.cell((98, 0)).unwrap().bg, theme.leader_bg);
+        assert!(!buf.cell((98, 0)).unwrap().modifier.contains(Modifier::BOLD));
+
+        // Entire row uses leader palette and cleared underlying modifiers
+        for x in 0..110 {
+            let cell = buf.cell((x, 0)).unwrap();
+            assert_eq!(cell.fg, theme.leader_fg, "fg mismatch at col {x}");
+            assert_eq!(cell.bg, theme.leader_bg, "bg mismatch at col {x}");
+            assert!(!cell.modifier.contains(Modifier::ITALIC));
+            assert!(!cell.modifier.contains(Modifier::UNDERLINED));
+            assert!(!cell.modifier.contains(Modifier::REVERSED));
+        }
+
+        // Boundary width 101 (1 + 86 + 2 + 11 + 1) shows both menu and right-aligned "Esc: Cancel"
+        let area101 = Rect::new(0, 0, 101, 1);
+        let mut buf101 = Buffer::empty(area101);
+        ActionsOverlay::new()
+            .with_theme(&theme)
+            .render(area101, &mut buf101);
+        let rendered101: String = buf101
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered101.contains(LEADER_ACTIONS_MENU), "{rendered101}");
+        assert!(rendered101.contains("Esc: Cancel"), "{rendered101}");
+        assert_eq!(buf101.cell((87, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf101.cell((88, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf101.cell((89, 0)).unwrap().symbol(), "E");
+        assert_eq!(buf101.cell((100, 0)).unwrap().symbol(), " ");
+
+        // Width 100 and 90 render menu with leading space and omit "Esc: Cancel"
+        for width in [90_u16, 100] {
+            let w_area = Rect::new(0, 0, width, 1);
+            let mut w_buf = Buffer::empty(w_area);
+            ActionsOverlay::new()
+                .with_theme(&theme)
+                .render(w_area, &mut w_buf);
+            let w_rendered: String = w_buf
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect();
+            assert!(w_rendered.contains(LEADER_ACTIONS_MENU), "{w_rendered}");
+            assert!(!w_rendered.contains("Esc: Cancel"), "{w_rendered}");
+        }
+    }
+
+    #[test]
+    fn test_actions_overlay_narrow_widths() {
+        let theme = Theme::tokyo_night();
+
+        // Exact menu width 86: draws menu flush at col 0 without leading space
+        let area86 = Rect::new(0, 0, 86, 1);
+        let mut buf86 = Buffer::empty(area86);
+        ActionsOverlay::new()
+            .with_theme(&theme)
+            .render(area86, &mut buf86);
+        let rendered86: String = buf86
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert_eq!(rendered86, LEADER_ACTIONS_MENU);
+
+        // Narrower widths (50 and 10 cols): clips cleanly without panic
+        for width in [50_u16, 10] {
+            let area = Rect::new(0, 0, width, 1);
+            let mut buf = Buffer::empty(area);
+            ActionsOverlay::new()
+                .with_theme(&theme)
+                .render(area, &mut buf);
+            let rendered: String = buf
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect();
+            assert_eq!(rendered, &LEADER_ACTIONS_MENU[..usize::from(width)]);
+            for x in 0..width {
+                let cell = buf.cell((x, 0)).unwrap();
+                assert_eq!(cell.fg, theme.leader_fg);
+                assert_eq!(cell.bg, theme.leader_bg);
+            }
+        }
+    }
+
+    #[test]
+    fn test_actions_overlay_zero_size_and_widget_traits() {
+        let theme = Theme::tokyo_night();
+
+        // Zero-width/height and out-of-bounds areas are safe no-ops
+        let buf_area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(buf_area);
+        for x in 0..20 {
+            buf.cell_mut((x, 0)).unwrap().set_char('K');
+        }
+        let original = buf.content().to_vec();
+
+        for noop_area in [
+            Rect::new(0, 0, 0, 0),
+            Rect::new(0, 0, 20, 0),
+            Rect::new(0, 0, 0, 1),
+            Rect::new(0, 5, 20, 1),
+        ] {
+            ActionsOverlay::new()
+                .with_theme(&theme)
+                .render(noop_area, &mut buf);
+        }
+        assert_eq!(buf.content(), original.as_slice());
+
+        // Value Widget, &Widget, and render_to_buffer_with_theme match identically
+        let area = Rect::new(0, 0, 110, 1);
+        let mut buf_val = Buffer::empty(area);
+        let mut buf_ref = Buffer::empty(area);
+        let mut buf_assoc = Buffer::empty(area);
+
+        let overlay = ActionsOverlay::new().with_theme(&theme);
+        (&overlay).render(area, &mut buf_ref);
+        overlay.render(area, &mut buf_val);
+        ActionsOverlay::render_to_buffer_with_theme(&theme, area, &mut buf_assoc);
+
+        assert_eq!(buf_val.content(), buf_ref.content());
+        assert_eq!(buf_val.content(), buf_assoc.content());
+    }
+
+    #[test]
+    fn test_actions_overlay_respects_all_themes() {
+        let themes = [
+            Theme::tokyo_night(),
+            Theme::catppuccin(),
+            Theme::cyberpunk(),
+            Theme::gruvbox(),
+            Theme::monochrome(),
+            Theme::ansi(),
+        ];
+
+        let area = Rect::new(0, 0, 110, 1);
+        for theme in &themes {
+            let mut buf = Buffer::empty(area);
+            ActionsOverlay::new()
+                .with_theme(theme)
+                .render(area, &mut buf);
+
+            for x in [0_u16, 1, 88, 98, 109] {
+                let cell = buf.cell((x, 0)).unwrap();
+                assert_eq!(
+                    cell.fg, theme.leader_fg,
+                    "fg mismatch at col {x} for theme {}",
+                    theme.name
+                );
+                assert_eq!(
+                    cell.bg, theme.leader_bg,
+                    "bg mismatch at col {x} for theme {}",
+                    theme.name
+                );
+            }
+        }
     }
 }

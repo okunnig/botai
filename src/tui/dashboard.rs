@@ -4,16 +4,17 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Position, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect, Size},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
 };
 
 use crate::config::{Config, ConfigError};
 use crate::session::SessionStatus;
 use crate::tui::creation_modal::{CreationModalAction, ProjectCreationModal};
-use crate::tui::status_bar::TopBar;
+use crate::tui::modal_frame::{centered_modal, render_modal_frame};
+use crate::tui::status_bar::{fit_hints, TopBar};
 use crate::tui::theme::Theme;
 
 /// Backward compatibility alias for ProjectCreationModal.
@@ -81,16 +82,7 @@ pub struct DashboardState {
 impl DashboardState {
     /// Creates a new `DashboardState` with given templates and local projects.
     pub fn new(templates: Vec<String>, local_projects: Vec<String>) -> Self {
-        let mut config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    repos: HashMap::new(),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                });
+        let mut config = Config::default();
 
         for tpl in &templates {
             config
@@ -281,33 +273,9 @@ impl DashboardState {
             }
         }
 
-        if let Some(mut modal) = self.creation_modal.take() {
-            match modal.handle_key(key) {
-                CreationModalAction::Cancel => {
-                    self.creation_modal = None;
-                    return DashboardAction::None;
-                }
-                CreationModalAction::Submit {
-                    template,
-                    project,
-                    agent_override,
-                    prompt,
-                    selected_repos,
-                } => {
-                    self.creation_modal = None;
-                    return DashboardAction::CreateProject {
-                        template,
-                        project,
-                        agent_override,
-                        prompt,
-                        selected_repos,
-                    };
-                }
-                CreationModalAction::None => {
-                    self.creation_modal = Some(modal);
-                    return DashboardAction::None;
-                }
-            }
+        if let Some(modal) = &mut self.creation_modal {
+            let action = modal.handle_key(key);
+            return self.resolve_creation_modal_action(action);
         }
 
         match key.code {
@@ -365,6 +333,33 @@ impl DashboardState {
         }
     }
 
+    /// Maps a creation modal result to a `DashboardAction`, closing the modal unless it stays open.
+    fn resolve_creation_modal_action(&mut self, action: CreationModalAction) -> DashboardAction {
+        match action {
+            CreationModalAction::Cancel => {
+                self.creation_modal = None;
+                DashboardAction::None
+            }
+            CreationModalAction::Submit {
+                template,
+                project,
+                agent_override,
+                prompt,
+                selected_repos,
+            } => {
+                self.creation_modal = None;
+                DashboardAction::CreateProject {
+                    template,
+                    project,
+                    agent_override,
+                    prompt,
+                    selected_repos,
+                }
+            }
+            CreationModalAction::None => DashboardAction::None,
+        }
+    }
+
     /// Handles pasted text into the dashboard or any active creation modal.
     pub fn handle_paste(&mut self, text: &str) {
         if let Some(modal) = &mut self.creation_modal {
@@ -378,30 +373,9 @@ impl DashboardState {
             return DashboardAction::None;
         }
 
-        if let Some(ref mut modal) = self.creation_modal {
-            match modal.handle_mouse(mouse) {
-                CreationModalAction::Cancel => {
-                    self.creation_modal = None;
-                    return DashboardAction::None;
-                }
-                CreationModalAction::Submit {
-                    template,
-                    project,
-                    agent_override,
-                    prompt,
-                    selected_repos,
-                } => {
-                    self.creation_modal = None;
-                    return DashboardAction::CreateProject {
-                        template,
-                        project,
-                        agent_override,
-                        prompt,
-                        selected_repos,
-                    };
-                }
-                CreationModalAction::None => return DashboardAction::None,
-            }
+        if let Some(modal) = &mut self.creation_modal {
+            let action = modal.handle_mouse(mouse);
+            return self.resolve_creation_modal_action(action);
         }
 
         match mouse.kind {
@@ -419,7 +393,15 @@ impl DashboardState {
 }
 
 /// Renders the full-width local projects dashboard, top header status bar, and optional floating modals into the given `Buffer`.
-pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, theme: &Theme) {
+///
+/// `update_notice` is shown before the key hints when the header has room.
+pub fn render_dashboard(
+    state: &DashboardState,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    update_notice: Option<&str>,
+) {
     if area.height < 3 || area.width < 10 {
         return;
     }
@@ -449,25 +431,15 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
     let compact_hints = "Enter: Attach | n: New | a: Add Repo | d: Destroy | q: Quit";
     let minimal_hints = "q: Quit";
 
-    let full_len = full_hints.chars().count() as u16;
-    let compact_len = compact_hints.chars().count() as u16;
-    let minimal_len = minimal_hints.chars().count() as u16;
-
-    let hint_to_render = if header_area.width >= brand_len + full_len + 2 {
-        Some((full_hints, full_len))
-    } else if header_area.width >= brand_len + compact_len + 2 {
-        Some((compact_hints, compact_len))
-    } else if header_area.width >= brand_len + minimal_len + 2 {
-        Some((minimal_hints, minimal_len))
-    } else {
-        None
-    };
-
     let mut top_bar = TopBar::new(brand_line).with_theme(theme);
-    if let Some((hint_str, hint_len)) = hint_to_render {
-        let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
-        let hint_line = Line::from(Span::styled(hint_str, hint_style));
-        top_bar = top_bar.with_right(hint_line, hint_len);
+    if let Some((line, len)) = fit_hints(
+        update_notice,
+        &[full_hints, compact_hints, minimal_hints],
+        brand_len,
+        header_area.width,
+        theme,
+    ) {
+        top_bar = top_bar.with_right(line, len);
     }
     top_bar.render(header_area, buf);
 
@@ -517,7 +489,10 @@ pub fn render_dashboard(state: &DashboardState, area: Rect, buf: &mut Buffer, th
                             .bg(theme.selection_bg)
                             .add_modifier(Modifier::BOLD);
                     }
-                    spans.push(Span::styled("● ", dot_style));
+                    spans.push(Span::styled(
+                        format!("{} ", status.status_symbol()),
+                        dot_style,
+                    ));
                 } else {
                     spans.push(Span::styled("  ", base_style));
                 }
@@ -546,31 +521,15 @@ pub fn render_destroy_modal(
     buf: &mut Buffer,
     theme: &Theme,
 ) {
-    let width = 76.min(area.width.saturating_sub(4));
-    let height = 8.min(area.height.saturating_sub(2));
-
-    if width < 20 || height < 5 {
+    let Some(modal_area) = centered_modal(area, Size::new(76, 8), Size::new(20, 5)) else {
         return;
-    }
-
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let modal_area = Rect::new(x, y, width, height);
-
-    // Clear background of modal area
-    Clear.render(modal_area, buf);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Confirm Destroy Project ")
-        .border_style(
-            Style::default()
-                .fg(theme.status_error)
-                .add_modifier(Modifier::BOLD),
-        );
-
-    let inner = block.inner(modal_area);
-    block.render(modal_area, buf);
+    };
+    let inner = render_modal_frame(
+        modal_area,
+        buf,
+        " Confirm Destroy Project ",
+        theme.status_error,
+    );
 
     let lines = vec![
         Line::from(vec![
@@ -603,14 +562,14 @@ pub fn render_destroy_modal(
 impl Widget for &DashboardState {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let theme = Theme::default();
-        render_dashboard(self, area, buf, &theme);
+        render_dashboard(self, area, buf, &theme, None);
     }
 }
 
 impl Widget for DashboardState {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let theme = Theme::default();
-        render_dashboard(&self, area, buf, &theme);
+        render_dashboard(&self, area, buf, &theme, None);
     }
 }
 
@@ -636,7 +595,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -664,7 +623,7 @@ mod tests {
         // 1. Wide screen (100 cols) -> Full hints
         let area_wide = Rect::new(0, 0, 100, 20);
         let mut buf_wide = Buffer::empty(area_wide);
-        render_dashboard(&state, area_wide, &mut buf_wide, &theme);
+        render_dashboard(&state, area_wide, &mut buf_wide, &theme, None);
         let text_wide = buf_wide
             .content()
             .iter()
@@ -678,7 +637,7 @@ mod tests {
         // 2. Medium screen (75 cols) -> Compact hints
         let area_med = Rect::new(0, 0, 75, 20);
         let mut buf_med = Buffer::empty(area_med);
-        render_dashboard(&state, area_med, &mut buf_med, &theme);
+        render_dashboard(&state, area_med, &mut buf_med, &theme, None);
         let text_med = buf_med
             .content()
             .iter()
@@ -691,7 +650,7 @@ mod tests {
         // 3. Narrow screen (20 cols) -> Minimal hints
         let area_narrow = Rect::new(0, 0, 20, 20);
         let mut buf_narrow = Buffer::empty(area_narrow);
-        render_dashboard(&state, area_narrow, &mut buf_narrow, &theme);
+        render_dashboard(&state, area_narrow, &mut buf_narrow, &theme, None);
         let text_narrow = buf_narrow
             .content()
             .iter()
@@ -718,7 +677,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -743,7 +702,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -765,7 +724,7 @@ mod tests {
         let area = Rect::new(0, 0, 100, 20);
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -802,7 +761,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let theme = Theme::gruvbox();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         // Check top header status bar cell background matches theme.status_bar_bg
         let header_cell = buf.cell((0, 0)).unwrap();
@@ -1204,7 +1163,7 @@ command = "claude"
         let mut buf = Buffer::empty(area);
         let theme = Theme::default();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
         let rendered = buf
             .content()
             .iter()
@@ -1294,7 +1253,7 @@ command = "claude"
         let mut buf = Buffer::empty(area);
         let theme = Theme::tokyo_night();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let rendered = buf
             .content()
@@ -1318,17 +1277,17 @@ command = "claude"
 
         // Row 2 (y = 3): proj-wait (unselected) -> prefix "   ", dot at x = 4
         let cell_wait_dot = buf.cell((4, 3)).unwrap();
-        assert_eq!(cell_wait_dot.symbol(), "●");
+        assert_eq!(cell_wait_dot.symbol(), "?");
         assert_eq!(cell_wait_dot.fg, theme.status_waiting);
 
         // Row 3 (y = 4): proj-done -> dot at x = 4
         let cell_done_dot = buf.cell((4, 4)).unwrap();
-        assert_eq!(cell_done_dot.symbol(), "●");
+        assert_eq!(cell_done_dot.symbol(), "✓");
         assert_eq!(cell_done_dot.fg, theme.status_done);
 
         // Row 4 (y = 5): proj-err -> dot at x = 4
         let cell_err_dot = buf.cell((4, 5)).unwrap();
-        assert_eq!(cell_err_dot.symbol(), "●");
+        assert_eq!(cell_err_dot.symbol(), "✗");
         assert_eq!(cell_err_dot.fg, theme.status_error);
 
         // Row 5 (y = 6): proj-inactive -> no dot, spaces at x = 4 and x = 5, project name starts at x = 6
@@ -1353,7 +1312,7 @@ command = "claude"
         let mut buf = Buffer::empty(area);
         let theme = Theme::gruvbox();
 
-        render_dashboard(&state, area, &mut buf, &theme);
+        render_dashboard(&state, area, &mut buf, &theme, None);
 
         let cell_busy_dot = buf.cell((4, 2)).unwrap();
         assert_eq!(cell_busy_dot.symbol(), "●");
@@ -1491,5 +1450,32 @@ repos = ["repo1"]
             state.creation_modal.unwrap().templates,
             vec!["base_tpl".to_string()]
         );
+    }
+
+    fn header_row(state: &DashboardState, notice: Option<&str>, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 10);
+        let mut buf = Buffer::empty(area);
+        render_dashboard(state, area, &mut buf, &Theme::default(), notice);
+        (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    #[test]
+    fn test_render_dashboard_update_notice() {
+        let state = DashboardState::new(vec!["ws".into()], vec!["proj".into()]);
+        let notice = Some("update v9.0.0 available: botai update");
+
+        let wide = header_row(&state, notice, 140);
+        assert!(
+            wide.contains("update v9.0.0 available: botai update"),
+            "{wide}"
+        );
+        assert!(wide.contains("↑/↓: Navigate"), "{wide}");
+
+        // Too narrow for both: the notice goes first, full hints stay.
+        let medium = header_row(&state, notice, 100);
+        assert!(!medium.contains("update v9.0.0"), "{medium}");
+        assert!(medium.contains("↑/↓: Navigate"), "{medium}");
+
+        assert!(!header_row(&state, None, 140).contains("available"));
     }
 }

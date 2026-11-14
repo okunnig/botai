@@ -185,7 +185,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     let theme = config.theme();
     terminal
         .draw(|f| {
-            render_dashboard(&state, f.area(), f.buffer_mut(), &theme);
+            render_dashboard(&state, f.area(), f.buffer_mut(), &theme, None);
         })
         .expect("Failed to draw frame with modal");
 
@@ -335,7 +335,7 @@ repos = []
     while start.elapsed() < std::time::Duration::from_secs(5) {
         app.poll_destroy_progress();
         if let Some(modal) = &app.destroy_progress_modal {
-            if modal.is_finished {
+            if modal.progress.is_finished {
                 break;
             }
         }
@@ -471,7 +471,7 @@ repos = []
 
     terminal
         .draw(|f| {
-            render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
+            render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme, None);
         })
         .unwrap();
 
@@ -484,5 +484,5 @@ repos = []
 
     assert!(rendered.contains("svc-running"));
     assert!(rendered.contains("svc-stopped"));
-    assert!(rendered.contains("●"));
+    assert!(rendered.contains("○"));
 }

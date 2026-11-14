@@ -7,8 +7,9 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/okunnig/botai/actions/workflows/ci.yml"><img src="https://github.com/okunnig/botai/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2021_Edition-orange.svg?logo=rust&style=flat-square" alt="Rust 2021" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg?style=flat-square" alt="License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square" alt="License" /></a>
   <a href="#platform-support"><img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg?style=flat-square" alt="Platform Support" /></a>
 </p>
 
@@ -29,7 +30,7 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
 | **Multi-Repo Workflows** | Manual cloning, switching branches across multiple repos, accidental dirty working tree clobbering. | **Declarative Templates & Git Worktrees**: One command provisions isolated worktrees across all template repos under `CWD/<project_name>`. |
 | **Agent Context & Orientation** | Agents lack awareness of peer repositories, cross-project dependencies, and service contracts. | **Automated Context Synthesis**: Automatically generates `AGENTS.md` with directory trees, repo purposes, and custom template rules. |
 | **Multiplexing Dependencies** | Requires installing, configuring, and maintaining external multiplexers (`tmux`, `zellij`). | **Native Built-in Multiplexer**: Full terminal session multiplexing with `Ctrl+Space` leader navigation, tab switching, and mouse scroll support. |
-| **Agent Monitoring** | Constantly switching terminals to check if long-running agent tasks have finished or need input. | **Real-Time Visual Badges & OS Notifications**: Tab indicators (`● Thinking`, `● Waiting`, `● Done`, `● Error`) and native desktop alerts. |
+| **Agent Monitoring** | Constantly switching terminals to check if long-running agent tasks have finished or need input. | **Real-Time Visual Badges**: Tab indicators (`● Thinking`, `● Waiting`, `● Done`, `● Error`) track agent lifecycles and idle states across sessions at a glance. |
 
 ---
 
@@ -47,7 +48,6 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
   - **Waiting for Input**: Agent requires user approval or prompt response.
   - **Done / Idle**: Agent finished its task cleanly.
   - **Error / Interrupted**: Process crashed or exited with a non-zero status code (output preserved for inspection).
-  Native OS desktop notifications alert you immediately when tasks finish or need attention.
 - **Multiple Built-in Color Themes**  
   Ship with carefully crafted palettes: **Tokyo Night** (default), **Catppuccin Mocha**, **Cyberpunk**, **Gruvbox Dark**, **Monochrome / Slate**, and standard **ANSI 16-color**.
 - **Interactive TUI Dashboard & CLI Suite**  
@@ -57,9 +57,33 @@ Modern AI coding agents excel at single-directory tasks but struggle when real-w
 
 ## Quick Start
 
+<a id="platform-support"></a>
+### Platform Support
+
+`botai` is engineered for seamless cross-platform performance with zero external multiplexer dependencies (no `tmux` or `zellij` required):
+- **Linux**: Full PTY terminal multiplexing via POSIX `forkpty` and `termios`.
+- **macOS**: Native support across Apple Silicon (`aarch64`) and Intel (`x86_64`).
+- **Windows**: Native Windows Console Pseudo-console (ConPTY) support on Windows 10/11.
+
+---
+
 ### Installation
 
-Ensure [Rust 1.74+](https://www.rust-lang.org/tools/install) is installed, then clone and install the binary:
+#### Option 1: Direct Install via Cargo (Recommended)
+
+Install directly from Git into `~/.cargo/bin`:
+
+```bash
+cargo install --git https://github.com/okunnig/botai.git
+```
+
+#### Option 2: Pre-compiled Release Binaries
+
+Download pre-compiled release binaries for Linux, macOS, and Windows from [GitHub Releases](https://github.com/okunnig/botai/releases). Extract the binary and place it in your `$PATH`.
+
+#### Option 3: Build from Source
+
+Ensure [Rust 1.74+](https://www.rust-lang.org/tools/install) is installed:
 
 ```bash
 # Clone the repository
@@ -69,6 +93,21 @@ cd botai
 # Build and install binary to ~/.cargo/bin
 cargo install --path .
 ```
+
+#### Updating
+
+Release binaries update themselves:
+
+```bash
+botai update --check            # show current and latest version
+botai update                    # install the latest release
+botai update --version v0.1.0   # install a specific release (downgrades allowed)
+botai update --pre              # include prereleases
+```
+
+When the TUI starts, `botai` checks GitHub Releases at most once a day and shows `update vX.Y.Z available: botai update` in the top bar. Disable this with `[update] check_on_startup = false` in `config.toml` or `BOTAI_NO_UPDATE_CHECK=1`. Prebuilt updates cover Linux x86_64, macOS Apple Silicon and Windows x86_64.
+
+Builds installed with `cargo install --git` report a `v0.0.0-dev-<sha>` version, because cargo's git checkout has no tags. They get no update notice; update them by re-running `cargo install --git https://github.com/okunnig/botai.git --force`. Running `botai update` on them works but replaces the cargo-installed binary with the release binary.
 
 ---
 
@@ -135,6 +174,9 @@ botai destroy feat-checkout
 
 # Force removal of a project even if uncommitted changes exist
 botai destroy feat-checkout --force
+
+# Update botai to the latest release (or just check with --check)
+botai update
 ```
 
 ---
@@ -202,6 +244,10 @@ theme = "tokyo-night"
 # Central directory where remote Git repositories are cloned and cached (required)
 repos_dir = "~/.local/share/botai/repos"
 
+# Startup update check (at most once per 24h, TUI only)
+[update]
+check_on_startup = true
+
 # ------------------------------------------------------------------------------
 # Agent Definitions
 # ------------------------------------------------------------------------------
@@ -266,3 +312,9 @@ repos = [
 | **`gruvbox`** | Warm retro earthy palette with rust orange active tabs and forest green badges. |
 | **`monochrome`** | Clean, minimalist zinc/slate dark tones with crisp white borders. |
 | **`ansi`** | Universal 16-color ANSI terminal fallback without 24-bit TrueColor requirements. |
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

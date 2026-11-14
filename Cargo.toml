@@ -1,9 +1,17 @@
 [package]
 name = "botai"
-version = "0.1.0"
+# Git tags are the single source of truth for versioning; dynamically injected at compile time via build.rs.
+version = "0.0.0"
 edition = "2021"
 authors = ["botai team"]
 description = "A cross-platform multi-repo workspace orchestrator and session multiplexer for AI agent workflows"
+publish = false
+license = "MIT"
+repository = "https://github.com/okunnig/botai"
+homepage = "https://github.com/okunnig/botai"
+readme = "README.md"
+keywords = ["tui", "multiplexer", "git-worktree", "developer-tools", "ai-agents"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -17,17 +25,24 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 portable-pty = "0.9"
 crossterm = { version = "0.29", features = ["event-stream"] }
 ratatui = "0.30"
-vt100 = "0.16"
-notify-rust = "4.11"
+vt100 = "0.18"
 tokio = { version = "1.38", features = ["full"] }
 # Canonicalize without a `\\?\` prefix: git rejects those as positional path arguments.
 dunce = "1.0"
+semver = "1.0.28"
+tempfile = "3.27.0"
+ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+self-replace = "1.5.1"
+tar = { version = "0.4.46", default-features = false }
+flate2 = "1.1.10"
+zip = { version = "9.2.2", default-features = false, features = ["deflate-flate2"] }
 
 # Safe console-mode wrappers; the crate is `#![forbid(unsafe_code)]`.
 [target.'cfg(windows)'.dependencies]
 crossterm_winapi = "0.9"
 
 [dev-dependencies]
-tempfile = "3.10"
 assert_cmd = "2.0"
 predicates = "3.1"

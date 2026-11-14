@@ -302,17 +302,22 @@ fn test_silence_timeout_fallback_to_waiting_for_input() {
     assert_eq!(status, SessionStatus::Busy);
     assert!(notif.is_none());
 
-    // 3. After 1.5s silence timeout: transitions to WaitingForInput with event
+    // 3. At 1.6s (past 1.5s idle threshold, but within 500ms debounce window): remains Busy to prevent flicker
     let (status, notif, _) = tracker.evaluate(true, None, now + Duration::from_millis(1600));
+    assert_eq!(status, SessionStatus::Busy);
+    assert!(notif.is_none());
+
+    // 4. At 2.1s (past 1.5s idle threshold + 500ms debounce): locks into WaitingForInput with event
+    let (status, notif, _) = tracker.evaluate(true, None, now + Duration::from_millis(2100));
     assert_eq!(status, SessionStatus::WaitingForInput);
     assert!(matches!(
         notif,
         Some(NotificationEvent::WaitingForInput { .. })
     ));
 
-    // 4. Subsequent evaluate ticks don't re-emit WaitingForInput notification
+    // 5. Subsequent evaluate ticks don't re-emit WaitingForInput notification
     let (status, notif_subsequent, _) =
-        tracker.evaluate(true, None, now + Duration::from_millis(2000));
+        tracker.evaluate(true, None, now + Duration::from_millis(2500));
     assert_eq!(status, SessionStatus::WaitingForInput);
     assert!(notif_subsequent.is_none());
 }

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use thiserror::Error;
 
 use crate::config::{Config, ConfigError, ResolvedRepo};
@@ -157,6 +159,45 @@ pub struct ProjectBuilder {
     pub viewport_size: (u16, u16),
 }
 
+/// Caps concurrent git/hook processes: each holds pipe fds in this process
+/// (macOS default soft limit is 256) and may open its own SSH connection.
+const MAX_PARALLEL_OPS: usize = 8;
+
+/// Runs `work` over `items` on at most `MAX_PARALLEL_OPS` worker threads.
+///
+/// `on_msg` runs on the calling thread for every message as it arrives, so
+/// callers can forward to sinks that are not `Sync`.
+fn run_bounded<'a, T: Sync, M: Send>(
+    items: &'a [T],
+    work: impl Fn(&'a T, &mpsc::Sender<M>) + Sync,
+    mut on_msg: impl FnMut(M),
+) {
+    let workers = items.len().min(MAX_PARALLEL_OPS);
+    let next = AtomicUsize::new(0);
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            let tx = tx.clone();
+            let (next, work) = (&next, &work);
+            s.spawn(move || {
+                while let Some(item) = items.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    work(item, &tx);
+                }
+            });
+        }
+        drop(tx);
+        for msg in rx {
+            on_msg(msg);
+        }
+    });
+}
+
+fn worktree_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+}
+
 /// Undoes worktrees created for `project_name`, and the branches that came with them.
 ///
 /// `git worktree remove` keeps the branch, so without this a failed setup leaves one behind
@@ -185,7 +226,7 @@ impl ProjectBuilder {
             agent_override: None,
             prompt: None,
             cwd,
-            viewport_size: (100, 30),
+            viewport_size: crate::session::DEFAULT_VIEWPORT,
         }
     }
 
@@ -255,15 +296,7 @@ impl ProjectBuilder {
     /// for known agents (`agy`, `aider`, `claude`, `copilot`).
     pub fn resolve_agent_command(&self) -> (String, Vec<String>, HashMap<String, String>) {
         let agent_name = self.resolved_agent_name();
-        let (cmd, base_args, env) = if let Some(agent) = self.config.get_agent(&agent_name) {
-            (agent.command.clone(), agent.args.clone(), agent.env.clone())
-        } else {
-            #[cfg(windows)]
-            let default_shell = "cmd.exe".to_string();
-            #[cfg(not(windows))]
-            let default_shell = "sh".to_string();
-            (default_shell, Vec::new(), HashMap::new())
-        };
+        let (cmd, base_args, env) = self.config.agent_launch(&agent_name);
 
         let adapted_args = adapt_agent_args(&agent_name, &base_args, self.prompt.as_deref());
         (cmd, adapted_args, env)
@@ -498,54 +531,62 @@ impl ProjectBuilder {
                 message: "Cloning and updating repositories...".to_string(),
             });
 
-            if !resolved_repos.is_empty() {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let mut errors = Vec::new();
-
-                std::thread::scope(|s| {
-                    for repo in &resolved_repos {
-                        let thread_tx = tx.clone();
-                        s.spawn(move || {
-                            if !repo.exists_locally() {
-                                if let Some(url) = &repo.clone_url {
-                                    let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                        "[2/4] Cloning repository '{}' from {}...",
-                                        repo.name, url
-                                    )));
-                                    if let Err(err) = crate::git::clone_repo(url, &repo.local_path) {
-                                        let _ = thread_tx.send(ProjectSetupEvent::Error(format!(
-                                            "Failed to clone repository '{}': {}",
-                                            repo.name, err
-                                        )));
-                                    }
-                                } else {
-                                    let _ = thread_tx.send(ProjectSetupEvent::Error(format!(
-                                        "Repository '{}' does not exist locally and has no remote URL configured",
-                                        repo.name
-                                    )));
-                                }
-                            } else {
-                                let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                    "[2/4] Fetching latest updates for repository '{}'...",
-                                    repo.name
-                                )));
-                                let _ = crate::git::fetch_repo(&repo.local_path);
-                            }
-                        });
-                    }
-
-                    drop(tx);
-                    while let Ok(event) = rx.recv() {
-                        if let ProjectSetupEvent::Error(ref err) = event {
-                            errors.push(err.clone());
+            // Entries sharing a backing repo would otherwise clone or fetch it concurrently.
+            let mut backing_repos: Vec<&ResolvedRepo> = Vec::new();
+            let mut backing_index: HashMap<&Path, usize> = HashMap::new();
+            for repo in &resolved_repos {
+                match backing_index.get(repo.local_path.as_path()) {
+                    Some(&i) => {
+                        if backing_repos[i].clone_url.is_none() {
+                            backing_repos[i] = repo;
                         }
-                        progress_sink(event);
                     }
-                });
-
-                if !errors.is_empty() {
-                    anyhow::bail!("{}", errors.join("; "));
+                    None => {
+                        backing_index.insert(&repo.local_path, backing_repos.len());
+                        backing_repos.push(repo);
+                    }
                 }
+            }
+
+            let mut errors = Vec::new();
+            run_bounded(
+                &backing_repos,
+                |repo, tx| {
+                    if !repo.exists_locally() {
+                        if let Some(url) = &repo.clone_url {
+                            let _ = tx.send(ProjectSetupEvent::Log(format!(
+                                "[2/4] Cloning repository '{}' from {}...",
+                                repo.name, url
+                            )));
+                            if let Err(err) = crate::git::clone_repo(url, &repo.local_path) {
+                                let _ = tx.send(ProjectSetupEvent::Error(format!(
+                                    "Failed to clone repository '{}': {}",
+                                    repo.name, err
+                                )));
+                            }
+                        } else {
+                            let _ = tx.send(ProjectSetupEvent::Error(format!(
+                                "Repository '{}' does not exist locally and has no remote URL configured",
+                                repo.name
+                            )));
+                        }
+                    } else {
+                        let _ = tx.send(ProjectSetupEvent::Log(format!(
+                            "[2/4] Fetching latest updates for repository '{}'...",
+                            repo.name
+                        )));
+                        let _ = crate::git::fetch_repo(&repo.local_path);
+                    }
+                },
+                |event| {
+                    if let ProjectSetupEvent::Error(ref err) = event {
+                        errors.push(err.clone());
+                    }
+                    progress_sink(event);
+                },
+            );
+            if !errors.is_empty() {
+                anyhow::bail!("{}", errors.join("; "));
             }
 
             // Step 3: Creating project directory and git worktrees
@@ -563,35 +604,121 @@ impl ProjectBuilder {
             let project_dir_canon =
                 dunce::canonicalize(&project_dir).unwrap_or_else(|_| project_dir.clone());
 
-            let mut created_mappings: Vec<RepoMapping> = Vec::new();
-            for repo in &resolved_repos {
-                let worktree_path = project_dir_canon.join(&repo.name);
-                progress_sink(ProjectSetupEvent::Log(format!(
-                    "[3/4] Creating git worktree for '{}' at {}...",
-                    repo.name,
-                    worktree_path.display()
-                )));
+            // Group repositories by backing repository path (`repo.local_path`) so distinct
+            // backing repos run in parallel (bounded by `run_bounded`), while multiple worktrees
+            // sharing the same backing repo run sequentially to prevent git index.lock collisions.
+            let mut repo_groups: HashMap<PathBuf, Vec<(usize, &ResolvedRepo)>> = HashMap::new();
+            for (idx, repo) in resolved_repos.iter().enumerate() {
+                repo_groups
+                    .entry(repo.local_path.clone())
+                    .or_default()
+                    .push((idx, repo));
+            }
 
-                if let Err(err) =
-                    create_worktree(&repo.local_path, &worktree_path, trimmed_project_name)
-                {
-                    rollback_worktrees(&created_mappings, trimmed_project_name);
-                    // `create_worktree` returns BranchAlreadyExists before invoking git, so
-                    // for any other error the branch of this name is one it just created.
-                    // Reachable for a repo cloned in step 2, which `validate` could not check.
-                    if !matches!(err, GitError::BranchAlreadyExists { .. }) {
-                        let _ = delete_branch(&repo.local_path, trimmed_project_name);
+            enum WorktreeMsg {
+                Log(String),
+                Success(usize, RepoMapping),
+                Failure {
+                    index: usize,
+                    name: String,
+                    local_path: PathBuf,
+                    error: GitError,
+                },
+            }
+
+            let mut repo_groups: Vec<Vec<(usize, &ResolvedRepo)>> =
+                repo_groups.into_values().collect();
+            // Largest groups first: they run serially, so starting them late stretches wall time.
+            repo_groups.sort_by_key(|g| std::cmp::Reverse(g.len()));
+            let mut created_mappings_indexed: Vec<(usize, RepoMapping)> = Vec::new();
+            let mut failed_creations: Vec<(usize, String, PathBuf, GitError)> = Vec::new();
+
+            run_bounded(
+                &repo_groups,
+                |repos, tx| {
+                    for (idx, repo) in repos {
+                        let worktree_path = project_dir_canon.join(&repo.name);
+                        let _ = tx.send(WorktreeMsg::Log(format!(
+                            "[3/4] Creating git worktree for '{}' at {}...",
+                            repo.name,
+                            worktree_path.display()
+                        )));
+
+                        match create_worktree(
+                            &repo.local_path,
+                            &worktree_path,
+                            trimmed_project_name,
+                        ) {
+                            Ok(()) => {
+                                let mapping = RepoMapping::new(
+                                    repo.name.clone(),
+                                    repo.local_path.clone(),
+                                    worktree_path,
+                                );
+                                let _ = tx.send(WorktreeMsg::Success(*idx, mapping));
+                            }
+                            Err(err) => {
+                                let _ = tx.send(WorktreeMsg::Failure {
+                                    index: *idx,
+                                    name: repo.name.clone(),
+                                    local_path: repo.local_path.clone(),
+                                    error: err,
+                                });
+                                // Stop creating further worktrees for this backing repository
+                                break;
+                            }
+                        }
                     }
-                    let _ = fs::remove_dir_all(&project_dir);
-                    anyhow::bail!("Failed to create worktree for '{}': {}", repo.name, err);
+                },
+                |msg| match msg {
+                    WorktreeMsg::Log(log) => {
+                        progress_sink(ProjectSetupEvent::Log(log));
+                    }
+                    WorktreeMsg::Success(idx, mapping) => {
+                        created_mappings_indexed.push((idx, mapping));
+                    }
+                    WorktreeMsg::Failure {
+                        index,
+                        name,
+                        local_path,
+                        error,
+                    } => {
+                        failed_creations.push((index, name, local_path, error));
+                    }
+                },
+            );
+
+            if !failed_creations.is_empty() {
+                let created_mappings: Vec<RepoMapping> = created_mappings_indexed
+                    .into_iter()
+                    .map(|(_, m)| m)
+                    .collect();
+                rollback_worktrees(&created_mappings, trimmed_project_name);
+
+                for (_, name, local_path, err) in &failed_creations {
+                    if !matches!(err, GitError::BranchAlreadyExists { .. }) {
+                        let _ = delete_branch(local_path, trimmed_project_name);
+                    }
+                    let _ = remove_worktree_auto(&project_dir_canon.join(name), true);
                 }
 
-                created_mappings.push(RepoMapping::new(
-                    repo.name.clone(),
-                    repo.local_path.clone(),
-                    worktree_path,
-                ));
+                let _ = fs::remove_dir_all(&project_dir);
+
+                failed_creations.sort_by_key(|f| f.0);
+                let error_msgs: Vec<String> = failed_creations
+                    .iter()
+                    .map(|(_, name, _, err)| {
+                        format!("Failed to create worktree for '{name}': {err}")
+                    })
+                    .collect();
+                anyhow::bail!("{}", error_msgs.join("; "));
             }
+
+            created_mappings_indexed.sort_by_key(|(idx, _)| *idx);
+            let created_mappings: Vec<RepoMapping> = created_mappings_indexed
+                .into_iter()
+                .map(|(_, m)| m)
+                .collect();
 
             // Step 4: Execute per-repository setup hooks in parallel across worktrees
             let repos_with_hooks: Vec<(&ResolvedRepo, PathBuf)> = resolved_repos
@@ -600,78 +727,22 @@ impl ProjectBuilder {
                 .map(|r| (r, project_dir_canon.join(&r.name)))
                 .collect();
 
-            if !repos_with_hooks.is_empty() {
-                let (tx, rx) = std::sync::mpsc::channel();
-                std::thread::scope(|s| {
-                    for (repo, worktree_path) in &repos_with_hooks {
-                        let thread_tx = tx.clone();
-                        let tpl_env = &tpl.env;
-                        let repo_env = &repo.env;
-                        let setup_hooks = &repo.setup_hooks;
-                        let repo_name = &repo.name;
-                        let wt_path = worktree_path.clone();
-
-                        s.spawn(move || {
-                            for cmd in setup_hooks {
-                                if cmd.is_empty() {
-                                    continue;
-                                }
-                                let prog = &cmd[0];
-                                let args = &cmd[1..];
-                                let cmd_display = cmd.join(" ");
-                                let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                    "Running setup hook for '{repo_name}': {cmd_display}"
-                                )));
-
-                                let mut command = prepare_hook_command(prog, args);
-                                command.current_dir(&wt_path);
-                                for (k, v) in tpl_env {
-                                    command.env(k, v);
-                                }
-                                for (k, v) in repo_env {
-                                    command.env(k, v);
-                                }
-
-                                match command.output() {
-                                    Ok(output) => {
-                                        if !output.status.success() {
-                                            let exit_code = output
-                                                .status
-                                                .code()
-                                                .map(|c| c.to_string())
-                                                .unwrap_or_else(|| "signal".to_string());
-                                            let stderr_snippet =
-                                                String::from_utf8_lossy(&output.stderr);
-                                            let trimmed_err = stderr_snippet.trim();
-                                            let msg = if trimmed_err.is_empty() {
-                                                format!("exit code {exit_code}")
-                                            } else {
-                                                format!("exit code {exit_code}: {trimmed_err}")
-                                            };
-                                            let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                                "⚠ Warning: Setup hook for '{repo_name}' failed: {msg}"
-                                            )));
-                                        } else {
-                                            let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                                "✓ Setup hook for '{repo_name}' completed: {cmd_display}"
-                                            )));
-                                        }
-                                    }
-                                    Err(err) => {
-                                        let _ = thread_tx.send(ProjectSetupEvent::Log(format!(
-                                            "⚠ Warning: Setup hook for '{repo_name}' failed: {err}"
-                                        )));
-                                    }
-                                }
-                            }
+            run_bounded(
+                &repos_with_hooks,
+                |(repo, wt_path), tx| {
+                    let repo_name = &repo.name;
+                    let labels = HookLabels {
+                        running: &format!("setup hook for '{repo_name}'"),
+                        result: &format!("Setup hook for '{repo_name}'"),
+                    };
+                    for cmd in &repo.setup_hooks {
+                        run_hook(cmd, wt_path, &[&tpl.env, &repo.env], &labels, |msg| {
+                            let _ = tx.send(ProjectSetupEvent::Log(msg));
                         });
                     }
-                    drop(tx);
-                    while let Ok(event) = rx.recv() {
-                        progress_sink(event);
-                    }
-                });
-            }
+                },
+                &progress_sink,
+            );
 
             // Step 5: Generating AGENTS.md context
             progress_sink(ProjectSetupEvent::Step {
@@ -700,53 +771,14 @@ impl ProjectBuilder {
             }
 
             // Step 6: Execute template post_create hooks sequentially at project root
+            let labels = HookLabels {
+                running: "post_create hook",
+                result: "Post-create hook",
+            };
             for cmd in &tpl.post_create {
-                if cmd.is_empty() {
-                    continue;
-                }
-                let prog = &cmd[0];
-                let args = &cmd[1..];
-                let cmd_display = cmd.join(" ");
-                progress_sink(ProjectSetupEvent::Log(format!(
-                    "Running post_create hook: {cmd_display}"
-                )));
-
-                let mut command = prepare_hook_command(prog, args);
-                command.current_dir(&project_dir_canon);
-                for (k, v) in &tpl.env {
-                    command.env(k, v);
-                }
-
-                match command.output() {
-                    Ok(output) => {
-                        if !output.status.success() {
-                            let exit_code = output
-                                .status
-                                .code()
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| "signal".to_string());
-                            let stderr_snippet = String::from_utf8_lossy(&output.stderr);
-                            let trimmed_err = stderr_snippet.trim();
-                            let msg = if trimmed_err.is_empty() {
-                                format!("exit code {exit_code}")
-                            } else {
-                                format!("exit code {exit_code}: {trimmed_err}")
-                            };
-                            progress_sink(ProjectSetupEvent::Log(format!(
-                                "⚠ Warning: Post-create hook failed: {msg}"
-                            )));
-                        } else {
-                            progress_sink(ProjectSetupEvent::Log(format!(
-                                "✓ Post-create hook completed: {cmd_display}"
-                            )));
-                        }
-                    }
-                    Err(err) => {
-                        progress_sink(ProjectSetupEvent::Log(format!(
-                            "⚠ Warning: Post-create hook failed: {err}"
-                        )));
-                    }
-                }
+                run_hook(cmd, &project_dir_canon, &[&tpl.env], &labels, |msg| {
+                    progress_sink(ProjectSetupEvent::Log(msg))
+                });
             }
 
             Ok((project_dir_canon, created_mappings))
@@ -955,54 +987,14 @@ where
         if let Some(cfg) = config {
             if let Some(tpl_name) = extract_template_name_from_agents_md(&project_dir) {
                 if let Some(tpl) = cfg.get_template(&tpl_name) {
+                    let labels = HookLabels {
+                        running: "pre_destroy hook",
+                        result: "Pre-destroy hook",
+                    };
                     for cmd in &tpl.pre_destroy {
-                        if cmd.is_empty() {
-                            continue;
-                        }
-                        ran_hooks = true;
-                        let prog = &cmd[0];
-                        let args = &cmd[1..];
-                        let cmd_display = cmd.join(" ");
-                        progress_sink(ProjectDestroyEvent::Log(format!(
-                            "Running pre_destroy hook: {cmd_display}"
-                        )));
-
-                        let mut command = prepare_hook_command(prog, args);
-                        command.current_dir(&project_dir);
-                        for (k, v) in &tpl.env {
-                            command.env(k, v);
-                        }
-
-                        match command.output() {
-                            Ok(output) => {
-                                if !output.status.success() {
-                                    let exit_code = output
-                                        .status
-                                        .code()
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "signal".to_string());
-                                    let stderr_snippet = String::from_utf8_lossy(&output.stderr);
-                                    let trimmed_err = stderr_snippet.trim();
-                                    let msg = if trimmed_err.is_empty() {
-                                        format!("exit code {exit_code}")
-                                    } else {
-                                        format!("exit code {exit_code}: {trimmed_err}")
-                                    };
-                                    progress_sink(ProjectDestroyEvent::Log(format!(
-                                        "⚠ Warning: Pre-destroy hook failed: {msg}"
-                                    )));
-                                } else {
-                                    progress_sink(ProjectDestroyEvent::Log(format!(
-                                        "✓ Pre-destroy hook completed: {cmd_display}"
-                                    )));
-                                }
-                            }
-                            Err(err) => {
-                                progress_sink(ProjectDestroyEvent::Log(format!(
-                                    "⚠ Warning: Pre-destroy hook failed: {err}"
-                                )));
-                            }
-                        }
+                        ran_hooks |= run_hook(cmd, &project_dir, &[&tpl.env], &labels, |msg| {
+                            progress_sink(ProjectDestroyEvent::Log(msg))
+                        });
                     }
                 }
             }
@@ -1042,17 +1034,38 @@ where
         }
 
         if !force {
-            for child_path in &child_paths {
-                let repo_name = child_path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown");
-                if crate::git::has_uncommitted_changes(child_path)? {
-                    let err_msg = format!(
-                        "Worktree '{repo_name}' ({child_path:?}) has uncommitted changes. Use --force to destroy anyway."
-                    );
-                    anyhow::bail!("{err_msg}");
-                }
+            let mut dirty_worktrees = Vec::new();
+            let mut check_errors = Vec::new();
+
+            run_bounded(
+                &child_paths,
+                |path, tx| {
+                    let _ = tx.send((path, crate::git::has_uncommitted_changes(path)));
+                },
+                |(path, result)| match result {
+                    Ok(true) => dirty_worktrees.push((worktree_name(path), path)),
+                    Ok(false) => {}
+                    Err(err) => check_errors.push(format!("'{}': {err}", worktree_name(path))),
+                },
+            );
+
+            if !check_errors.is_empty() {
+                anyhow::bail!(
+                    "Failed to check uncommitted changes: {}",
+                    check_errors.join("; ")
+                );
+            }
+
+            if !dirty_worktrees.is_empty() {
+                dirty_worktrees.sort_by_key(|(name, _)| *name);
+                let dirty_list: Vec<String> = dirty_worktrees
+                    .iter()
+                    .map(|(name, path)| format!("'{name}' ({})", path.display()))
+                    .collect();
+                anyhow::bail!(
+                    "Worktree(s) have uncommitted changes: {}. Use --force to destroy anyway.",
+                    dirty_list.join(", ")
+                );
             }
         }
         progress_sink(ProjectDestroyEvent::Log(
@@ -1066,27 +1079,41 @@ where
             message: "Removing git worktrees...".to_string(),
         });
 
+        let mut groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
         for child_path in &child_paths {
-            let repo_name = child_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown");
-            progress_sink(ProjectDestroyEvent::Log(format!(
-                "Removing worktree '{repo_name}'..."
-            )));
-            match crate::git::remove_worktree_auto(child_path, force) {
-                Ok(_) => {
-                    progress_sink(ProjectDestroyEvent::Log(format!(
-                        "✓ Removed worktree '{repo_name}' and pruned metadata."
-                    )));
-                }
-                Err(err) => {
-                    progress_sink(ProjectDestroyEvent::Log(format!(
-                        "⚠ Warning removing worktree '{repo_name}': {err}"
-                    )));
-                }
-            }
+            let main_repo =
+                crate::git::resolve_main_repo(child_path).unwrap_or_else(|_| child_path.clone());
+            groups
+                .entry(main_repo)
+                .or_default()
+                .push(child_path.clone());
         }
+
+        let groups: Vec<Vec<PathBuf>> = groups.into_values().collect();
+        run_bounded(
+            &groups,
+            |group, tx| {
+                for child_path in group {
+                    let repo_name = worktree_name(child_path);
+                    let _ = tx.send(ProjectDestroyEvent::Log(format!(
+                        "Removing worktree '{repo_name}'..."
+                    )));
+                    match crate::git::remove_worktree_auto(child_path, force) {
+                        Ok(_) => {
+                            let _ = tx.send(ProjectDestroyEvent::Log(format!(
+                                "✓ Removed worktree '{repo_name}' and pruned metadata."
+                            )));
+                        }
+                        Err(err) => {
+                            let _ = tx.send(ProjectDestroyEvent::Log(format!(
+                                "⚠ Warning removing worktree '{repo_name}': {err}"
+                            )));
+                        }
+                    }
+                }
+            },
+            &mut progress_sink,
+        );
 
         // Step 4: Removing project directory
         progress_sink(ProjectDestroyEvent::Step {
@@ -1243,43 +1270,37 @@ where
         "[1/4] Cloning and updating repositories...".to_string(),
     ));
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::scope(|s| {
-        for repo in &candidate_repos {
-            let thread_tx = tx.clone();
-            s.spawn(move || {
-                if !repo.exists_locally() {
-                    if let Some(url) = &repo.clone_url {
-                        let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
-                            "[1/4] Cloning repository '{}' from {}...",
-                            repo.name, url
-                        )));
-                        if let Err(err) = crate::git::clone_repo(url, &repo.local_path) {
-                            let _ = thread_tx.send(ProjectAddRepoEvent::Error(format!(
-                                "Failed to clone repository '{}': {}",
-                                repo.name, err
-                            )));
-                        }
-                    } else {
-                        let _ = thread_tx.send(ProjectAddRepoEvent::Error(format!(
-                            "Repository '{}' does not exist locally and has no remote URL configured",
-                            repo.name
+    run_bounded(
+        &candidate_repos,
+        |repo, tx| {
+            if !repo.exists_locally() {
+                if let Some(url) = &repo.clone_url {
+                    let _ = tx.send(ProjectAddRepoEvent::Log(format!(
+                        "[1/4] Cloning repository '{}' from {}...",
+                        repo.name, url
+                    )));
+                    if let Err(err) = crate::git::clone_repo(url, &repo.local_path) {
+                        let _ = tx.send(ProjectAddRepoEvent::Error(format!(
+                            "Failed to clone repository '{}': {}",
+                            repo.name, err
                         )));
                     }
                 } else {
-                    let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
-                        "[1/4] Fetching latest updates for repository '{}'...",
+                    let _ = tx.send(ProjectAddRepoEvent::Error(format!(
+                        "Repository '{}' does not exist locally and has no remote URL configured",
                         repo.name
                     )));
-                    let _ = crate::git::fetch_repo(&repo.local_path);
                 }
-            });
-        }
-        drop(tx);
-        while let Ok(event) = rx.recv() {
-            progress_sink(event);
-        }
-    });
+            } else {
+                let _ = tx.send(ProjectAddRepoEvent::Log(format!(
+                    "[1/4] Fetching latest updates for repository '{}'...",
+                    repo.name
+                )));
+                let _ = crate::git::fetch_repo(&repo.local_path);
+            }
+        },
+        &progress_sink,
+    );
 
     // Step 2: Checking out git worktrees
     progress_sink(ProjectAddRepoEvent::Step {
@@ -1367,75 +1388,22 @@ where
         .collect();
 
     if !repos_with_hooks.is_empty() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::scope(|s| {
-            for (repo, worktree_path) in &repos_with_hooks {
-                let thread_tx = tx.clone();
-                let tpl_env = &tpl.env;
-                let repo_env = &repo.env;
-                let setup_hooks = &repo.setup_hooks;
+        run_bounded(
+            &repos_with_hooks,
+            |(repo, wt_path), tx| {
                 let repo_name = &repo.name;
-                let wt_path = worktree_path.clone();
-
-                s.spawn(move || {
-                    for cmd in setup_hooks {
-                        if cmd.is_empty() {
-                            continue;
-                        }
-                        let prog = &cmd[0];
-                        let args = &cmd[1..];
-                        let cmd_display = cmd.join(" ");
-                        let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
-                            "Running setup hook for '{repo_name}': {cmd_display}"
-                        )));
-
-                        let mut command = prepare_hook_command(prog, args);
-                        command.current_dir(&wt_path);
-                        for (k, v) in tpl_env {
-                            command.env(k, v);
-                        }
-                        for (k, v) in repo_env {
-                            command.env(k, v);
-                        }
-
-                        match command.output() {
-                            Ok(output) => {
-                                if !output.status.success() {
-                                    let exit_code = output
-                                        .status
-                                        .code()
-                                        .map(|c| c.to_string())
-                                        .unwrap_or_else(|| "signal".to_string());
-                                    let stderr_snippet = String::from_utf8_lossy(&output.stderr);
-                                    let trimmed_err = stderr_snippet.trim();
-                                    let msg = if trimmed_err.is_empty() {
-                                        format!("exit code {exit_code}")
-                                    } else {
-                                        format!("exit code {exit_code}: {trimmed_err}")
-                                    };
-                                    let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
-                                        "⚠ Warning: Setup hook for '{repo_name}' failed: {msg}"
-                                    )));
-                                } else {
-                                    let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
-                                        "✓ Setup hook for '{repo_name}' completed: {cmd_display}"
-                                    )));
-                                }
-                            }
-                            Err(err) => {
-                                let _ = thread_tx.send(ProjectAddRepoEvent::Log(format!(
-                                    "⚠ Warning: Setup hook for '{repo_name}' failed: {err}"
-                                )));
-                            }
-                        }
-                    }
-                });
-            }
-            drop(tx);
-            while let Ok(event) = rx.recv() {
-                progress_sink(event);
-            }
-        });
+                let labels = HookLabels {
+                    running: &format!("setup hook for '{repo_name}'"),
+                    result: &format!("Setup hook for '{repo_name}'"),
+                };
+                for cmd in &repo.setup_hooks {
+                    run_hook(cmd, wt_path, &[&tpl.env, &repo.env], &labels, |msg| {
+                        let _ = tx.send(ProjectAddRepoEvent::Log(msg));
+                    });
+                }
+            },
+            &progress_sink,
+        );
     }
 
     // Step 4: Re-generate AGENTS.md
@@ -1550,6 +1518,70 @@ pub(crate) fn resolve_executable_in_paths(
     prog_path.to_path_buf()
 }
 
+/// Log wording for a lifecycle hook: `Running {running}: ...`, `✓ {result} completed: ...`
+/// and `⚠ Warning: {result} failed: ...`.
+struct HookLabels<'a> {
+    running: &'a str,
+    result: &'a str,
+}
+
+/// Runs a lifecycle hook command in `cwd`, logging its start and outcome through `log`.
+///
+/// Empty commands are skipped. Returns whether the hook was run.
+fn run_hook(
+    cmd: &[String],
+    cwd: &Path,
+    envs: &[&HashMap<String, String>],
+    labels: &HookLabels,
+    mut log: impl FnMut(String),
+) -> bool {
+    if cmd.is_empty() {
+        return false;
+    }
+    let cmd_display = cmd.join(" ");
+    log(format!("Running {}: {cmd_display}", labels.running));
+    log(match execute_hook(cmd, cwd, envs) {
+        Ok(()) => format!("✓ {} completed: {cmd_display}", labels.result),
+        Err(msg) => format!("⚠ Warning: {} failed: {msg}", labels.result),
+    });
+    true
+}
+
+/// Runs a non-empty hook command in `cwd` with the given environment maps applied in order.
+///
+/// Returns `Err` with a log-ready failure description: `exit code <N|signal>[: <stderr>]`,
+/// or the spawn error message.
+fn execute_hook(
+    cmd: &[String],
+    cwd: &Path,
+    envs: &[&HashMap<String, String>],
+) -> Result<(), String> {
+    let mut command = prepare_hook_command(&cmd[0], &cmd[1..]);
+    command.current_dir(cwd);
+    for env in envs {
+        for (k, v) in *env {
+            command.env(k, v);
+        }
+    }
+
+    let output = command.output().map_err(|err| err.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let exit_code = output
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    let stderr_snippet = String::from_utf8_lossy(&output.stderr);
+    let trimmed_err = stderr_snippet.trim();
+    if trimmed_err.is_empty() {
+        Err(format!("exit code {exit_code}"))
+    } else {
+        Err(format!("exit code {exit_code}: {trimmed_err}"))
+    }
+}
+
 /// Prepares a `std::process::Command` for a lifecycle hook.
 ///
 /// On Windows, probes `%PATH%` and `%PATHEXT%` (`.COM`, `.EXE`, `.BAT`, `.CMD`)
@@ -1590,6 +1622,66 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
+    #[test]
+    fn test_run_bounded_caps_concurrency_and_delivers_every_message() {
+        let items: Vec<usize> = (0..50).collect();
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let mut received = Vec::new();
+
+        run_bounded(
+            &items,
+            |item, tx| {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                active.fetch_sub(1, Ordering::SeqCst);
+                let _ = tx.send(*item);
+            },
+            |msg| received.push(msg),
+        );
+
+        received.sort_unstable();
+        assert_eq!(received, items);
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak <= MAX_PARALLEL_OPS,
+            "peak concurrency {peak} exceeded cap"
+        );
+    }
+
+    #[test]
+    fn test_run_bounded_empty_slice_runs_nothing() {
+        let items: Vec<usize> = Vec::new();
+        let work_calls = AtomicUsize::new(0);
+        let mut msg_calls = 0usize;
+        run_bounded(
+            &items,
+            |_, tx: &mpsc::Sender<usize>| {
+                work_calls.fetch_add(1, Ordering::SeqCst);
+                let _ = tx.send(0);
+            },
+            |_| msg_calls += 1,
+        );
+        assert_eq!(work_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(msg_calls, 0);
+    }
+
+    #[test]
+    fn test_run_bounded_fewer_items_than_cap_runs_all() {
+        let items = vec!["a", "b", "c"];
+        let mut received = Vec::new();
+        run_bounded(
+            &items,
+            |item, tx| {
+                let _ = tx.send(item.to_string());
+            },
+            |msg| received.push(msg),
+        );
+        received.sort();
+        assert_eq!(received, vec!["a", "b", "c"]);
+    }
+
     fn create_mock_git_repo(path: &Path) {
         fs::create_dir_all(path).unwrap();
         let _ = std::process::Command::new("git")
@@ -1621,8 +1713,7 @@ mod tests {
 
     #[test]
     fn test_project_builder_validation_empty_name() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let builder = ProjectBuilder::new(config, "ecommerce", "   ");
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
@@ -1631,8 +1722,7 @@ mod tests {
 
     #[test]
     fn test_project_builder_validation_template_not_found() {
-        let config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".repos\"\n").unwrap();
+        let config = crate::config::test_config();
         let builder = ProjectBuilder::new(config, "nonexistent", "my-project");
         let val = builder.validate_detailed();
         assert!(!val.is_valid);
@@ -3315,6 +3405,41 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_run_hook_log_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let labels = HookLabels {
+            running: "pre_destroy hook",
+            result: "Pre-destroy hook",
+        };
+        let cmd = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let mut logs = Vec::new();
+
+        assert!(!run_hook(&[], dir.path(), &[], &labels, |m| logs.push(m)));
+        assert!(logs.is_empty());
+
+        assert!(run_hook(&cmd(&["true"]), dir.path(), &[], &labels, |m| {
+            logs.push(m)
+        }));
+        assert!(run_hook(
+            &cmd(&["sh", "-c", "echo boom >&2; exit 3"]),
+            dir.path(),
+            &[],
+            &labels,
+            |m| logs.push(m)
+        ));
+        assert_eq!(
+            logs,
+            vec![
+                "Running pre_destroy hook: true",
+                "✓ Pre-destroy hook completed: true",
+                "Running pre_destroy hook: sh -c echo boom >&2; exit 3",
+                "⚠ Warning: Pre-destroy hook failed: exit code 3: boom",
+            ]
+        );
+    }
+
     #[test]
     fn test_add_worktrees_to_project_success_and_agents_md_regeneration() {
         let temp_dir = TempDir::new().unwrap();
@@ -3555,5 +3680,283 @@ mod tests {
             add_worktrees_to_project(&config, &project_dir, &["repo_a".to_string()], |_| {})
                 .unwrap();
         assert!(added.is_empty());
+    }
+
+    #[test]
+    fn test_concurrent_worktree_creation_multiple_repositories() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_a = repos_dir.join("repo_a");
+        let repo_b = repos_dir.join("repo_b");
+        let repo_c = repos_dir.join("repo_c");
+        create_mock_git_repo(&repo_a);
+        create_mock_git_repo(&repo_b);
+        create_mock_git_repo(&repo_c);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.multi_tpl]
+            repos = ["repo_a", "repo_b", "repo_c"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder =
+            ProjectBuilder::new(config, "multi_tpl", "parallel-proj").with_cwd(&project_cwd);
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = builder.create_workspace(move |ev| {
+            events_clone.lock().unwrap().push(ev);
+        });
+
+        assert!(
+            res.is_ok(),
+            "create_workspace should succeed for multiple repos"
+        );
+        let (project_dir, mappings) = res.unwrap();
+        assert_eq!(mappings.len(), 3);
+        assert_eq!(mappings[0].name, "repo_a");
+        assert_eq!(mappings[1].name, "repo_b");
+        assert_eq!(mappings[2].name, "repo_c");
+
+        for m in &mappings {
+            assert!(m.worktree_path.exists(), "worktree must exist on disk");
+            assert!(
+                crate::git::branch_exists(&m.original_path, "parallel-proj").unwrap(),
+                "branch parallel-proj must exist in backing repo"
+            );
+        }
+
+        assert!(project_dir.join("AGENTS.md").exists());
+
+        let evs = events.lock().unwrap();
+        let log_count = evs
+            .iter()
+            .filter(|e| match e {
+                ProjectSetupEvent::Log(msg) => msg.contains("Creating git worktree for"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(log_count, 3, "must stream creation logs for all 3 repos");
+    }
+
+    #[test]
+    fn test_concurrent_worktree_creation_failure_rollback_and_branch_deletion() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_ok1 = repos_dir.join("repo_ok1");
+        let repo_ok2 = repos_dir.join("repo_ok2");
+        let repo_bad = repos_dir.join("repo_bad");
+        create_mock_git_repo(&repo_ok1);
+        create_mock_git_repo(&repo_ok2);
+        // Exists on disk, but not initialized as a git repo -> create_worktree fails
+        fs::create_dir_all(&repo_bad).unwrap();
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.fail_tpl]
+            repos = ["repo_ok1", "repo_ok2", "repo_bad"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder = ProjectBuilder::new(config, "fail_tpl", "fail-proj").with_cwd(&project_cwd);
+
+        let res = builder.create_workspace(|_| {});
+        assert!(
+            res.is_err(),
+            "create_workspace must fail when a repo cannot be created"
+        );
+
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("repo_bad"));
+
+        // Verify atomic rollback:
+        // 1. Branches created in repo_ok1 and repo_ok2 must be deleted
+        assert!(
+            !crate::git::branch_exists(&repo_ok1, "fail-proj").unwrap(),
+            "rollback must delete branch in repo_ok1"
+        );
+        assert!(
+            !crate::git::branch_exists(&repo_ok2, "fail-proj").unwrap(),
+            "rollback must delete branch in repo_ok2"
+        );
+
+        // 2. Project directory must be completely removed
+        assert!(
+            !project_cwd.join("fail-proj").exists(),
+            "rollback must remove project directory"
+        );
+    }
+
+    #[test]
+    fn test_two_phase_concurrent_teardown_clean_repos() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_1 = repos_dir.join("repo_1");
+        let repo_2 = repos_dir.join("repo_2");
+        let repo_3 = repos_dir.join("repo_3");
+        create_mock_git_repo(&repo_1);
+        create_mock_git_repo(&repo_2);
+        create_mock_git_repo(&repo_3);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.clean_tpl]
+            repos = ["repo_1", "repo_2", "repo_3"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder =
+            ProjectBuilder::new(config.clone(), "clean_tpl", "clean-proj").with_cwd(&project_cwd);
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+        assert!(project_dir.exists());
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        let res = destroy_project_workspace_with_progress(
+            Some(&config),
+            &project_cwd,
+            "clean-proj",
+            false,
+            move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            },
+        );
+
+        assert!(
+            res.is_ok(),
+            "destroying clean workspace without force must succeed"
+        );
+        assert!(!project_dir.exists(), "project directory must be removed");
+
+        let evs = events.lock().unwrap();
+        // Validation step passed
+        assert!(evs.iter().any(|e| match e {
+            ProjectDestroyEvent::Log(msg) => msg.contains("Worktree validation passed"),
+            _ => false,
+        }));
+        // All 3 worktrees removed in Step 3
+        for r in &["repo_1", "repo_2", "repo_3"] {
+            assert!(evs.iter().any(|e| match e {
+                ProjectDestroyEvent::Log(msg) => msg.contains(&format!("Removed worktree '{r}'")),
+                _ => false,
+            }));
+        }
+        assert!(evs
+            .iter()
+            .any(|e| matches!(e, ProjectDestroyEvent::Success)));
+    }
+
+    #[test]
+    fn test_two_phase_concurrent_teardown_aborts_and_reports_multiple_dirty_repos() {
+        let temp_dir = TempDir::new().unwrap();
+        let repos_dir = temp_dir.path().join("repos");
+        let repo_clean = repos_dir.join("repo_clean");
+        let repo_dirty_a = repos_dir.join("repo_dirty_a");
+        let repo_dirty_b = repos_dir.join("repo_dirty_b");
+        create_mock_git_repo(&repo_clean);
+        create_mock_git_repo(&repo_dirty_a);
+        create_mock_git_repo(&repo_dirty_b);
+
+        let toml_str = format!(
+            r#"
+            default_agent = "claude"
+            repos_dir = "{}"
+
+            [templates.dirty_tpl]
+            repos = ["repo_clean", "repo_dirty_a", "repo_dirty_b"]
+            "#,
+            toml_path(&repos_dir)
+        );
+        let config = Config::load_from_str(&toml_str).unwrap();
+        let project_cwd = temp_dir.path().join("workspaces");
+        fs::create_dir_all(&project_cwd).unwrap();
+
+        let builder =
+            ProjectBuilder::new(config.clone(), "dirty_tpl", "dirty-proj").with_cwd(&project_cwd);
+        let (project_dir, _) = builder.create_workspace(|_| {}).unwrap();
+        assert!(project_dir.exists());
+
+        // Introduce uncommitted changes in both dirty_a and dirty_b
+        fs::write(
+            project_dir.join("repo_dirty_a").join("uncommitted.txt"),
+            "changes in a",
+        )
+        .unwrap();
+        fs::write(
+            project_dir.join("repo_dirty_b").join("README.md"),
+            "# Modified dirty b\n",
+        )
+        .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+
+        // Teardown without force must abort at validation phase
+        let res = destroy_project_workspace_with_progress(
+            Some(&config),
+            &project_cwd,
+            "dirty-proj",
+            false,
+            move |ev| {
+                events_clone.lock().unwrap().push(ev);
+            },
+        );
+
+        assert!(
+            res.is_err(),
+            "must abort when dirty repos exist without force"
+        );
+        let err_msg = res.unwrap_err().to_string();
+
+        // Safety Barrier: must report both dirty repos in aggregated message
+        assert!(err_msg.contains("Worktree(s) have uncommitted changes:"));
+        assert!(err_msg.contains("'repo_dirty_a'"));
+        assert!(err_msg.contains("'repo_dirty_b'"));
+        assert!(!err_msg.contains("'repo_clean'"));
+        assert!(err_msg.contains("Use --force to destroy anyway"));
+
+        // Safety Barrier: NONE of the worktrees should have been removed!
+        assert!(project_dir.exists());
+        assert!(project_dir.join("repo_clean").exists());
+        assert!(project_dir.join("repo_dirty_a").exists());
+        assert!(project_dir.join("repo_dirty_b").exists());
+
+        // Now destroy with force -> must succeed and remove everything
+        let res_force = destroy_project_workspace_with_progress(
+            Some(&config),
+            &project_cwd,
+            "dirty-proj",
+            true,
+            |_| {},
+        );
+        assert!(res_force.is_ok(), "destroy with force must succeed");
+        assert!(
+            !project_dir.exists(),
+            "project directory must be removed after forced destroy"
+        );
     }
 }

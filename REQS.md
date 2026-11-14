@@ -50,6 +50,8 @@
     - `post_create`: (Optional) List of commands executed at the project root after worktrees and setup hooks finish.
     - `pre_destroy`: (Optional) List of commands executed at the project root before destroying worktrees.
 - **Agent Definitions**: Configurable agent launch commands, arguments, and environment variables.
+- **Self Update Settings (`[update]`)**:
+  - `check_on_startup`: (Optional Boolean, default `true`) Enables the background update check on TUI launch and the cached update notice after CLI commands. See section 16.
 - **Dynamic Configuration & Template Reloading**:
   - `Config` is designed as a pure, lightweight data structure containing parsed configuration without filesystem path tracking or self-reloading responsibilities.
   - Runtime application state containers (`TuiApp` and `DashboardState`) track the configuration file path (`config_path`), last known filesystem modification time (`config_last_modified` / `mtime`), and file size (`config_file_len` / `len`).
@@ -80,6 +82,16 @@ theme = "tokyo-night"
 # Central directory where remote repositories are cloned and cached (required).
 # Can also be overridden at runtime by setting the BOTAI_REPOS_DIR environment variable.
 repos_dir = "~/.local/share/botai/repos"
+
+# ------------------------------------------------------------------------------
+# Self Update
+# ------------------------------------------------------------------------------
+# When the TUI starts, botai checks GitHub Releases for a newer version at most
+# once every 24 hours and shows a notice. Run `botai update` to install it.
+# The check is also skipped when BOTAI_NO_UPDATE_CHECK=1 or CI is set.
+
+[update]
+check_on_startup = true
 
 # ------------------------------------------------------------------------------
 # Agent Definitions
@@ -189,10 +201,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Executes `git worktree prune` prior to creating new worktrees to automatically clear stale worktree metadata from manually deleted directories.
   - Creates a git worktree inside `<project_name>/<repo_dir_name>`.
   - Checks out a new branch named `<project_name>`.
+  - **Concurrent Worktree Checkout**: Worktrees across distinct backing repositories are checked out concurrently in parallel using a bounded scoped-thread worker pool (`std::thread::scope`, at most 8 concurrent operations). Worktrees sharing the same backing repository are serialized per repository path to prevent Git index lock contention.
+  - **Thread-Safe Event Streaming & Atomic Rollback**: Progress logs and errors stream over an `mpsc::channel` to the setup sink. If any worker thread fails, all spawned threads are joined to completion before executing atomic rollback across all successfully created worktrees and newly created branches.
 - **Lifecycle Command Hooks Execution Model**:
   - **Per-Repository Setup Hooks (`setup`)**:
     - Runs in the checked-out worktree directory (`CWD/<project_name>/<repo_name>`) immediately after worktree creation.
-    - Repositories execute their setup command pipelines concurrently in parallel; commands within a single repository run sequentially in order.
+    - Repositories execute their setup command pipelines concurrently in parallel (at most 8 repositories at a time); commands within a single repository run sequentially in order.
     - Direct execution without shell wrappers (arguments preserved safely).
     - **Warn and Continue Policy**: Non-zero exit codes or execution failures are logged with warning events but do NOT trigger destructive rollback of the workspace, ensuring developers and AI agents can inspect and fix setup issues.
   - **Workspace Post-Creation Hooks (`post_create`)**:
@@ -205,7 +219,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - On Windows, hook execution probes `%PATH%` and `%PATHEXT%` (`.COM`, `.EXE`, `.BAT`, `.CMD`) to automatically resolve scripts like `npm`, `yarn`, and `pnpm`.
     - Automatically resolves bare commands and path-prefixed scripts into their `.cmd` or `.bat` executables so Rust's `std::process::Command` invokes them with Windows `cmd.exe /c` batch wrapping without requiring explicit file extensions or shell wrappers.
   - **Parallel Remote Repository Cloning & Upstream Fetching**:
-    - During project workspace creation, missing remote repository cloning and upstream fetches execute concurrently in parallel across repositories using scoped threads (`std::thread::scope`).
+    - During project workspace creation, missing remote repository cloning and upstream fetches execute concurrently in parallel across repositories using a bounded scoped-thread worker pool (`std::thread::scope`), capped at 8 concurrent git operations so large templates stay within the process file descriptor limit (macOS default soft limit 256) and avoid SSH throttling.
     - Progress logs and error notifications are streamed back asynchronously to the setup progress sink, significantly reducing workspace initialization latency for multi-repo project templates.
   - **Strict Branching Strategy**: Branches strictly off the latest default branch (`origin/main`, `origin/master`, or local `main` / `master`) of each repository.
   - **Collision Prevention**: Fails with an explicit error if a branch or worktree named `<project_name>` already exists in any of the template repositories or if `<project_name>` directory exists.
@@ -261,21 +275,28 @@ env = { PORT = "8080", NODE_ENV = "development" }
       - `\x1b]133;C\x07` (Command output stream): Records active output stream processing.
       - `\x1b]133;D[;<exit_code>]\x07` (Command finished): Evaluates exit status to transition to `SessionStatus::Done` or `SessionStatus::Error`.
     - **Transparent Passthrough**: Control sequence decoding operates non-destructively; raw bytes are passed intact to the virtual terminal (`vt100`) parser.
-    - **Silence / Inactivity Timeout Fallback**: Employs an idle threshold (default 1,500 ms) as a robust baseline fallback for legacy tools or raw command output not emitting explicit control sequences.
+    - **Silence / Inactivity Timeout Fallback & Command Suppression**:
+      - Employs an idle threshold (default 1,500 ms) as a baseline fallback for legacy tools or raw command output not emitting explicit control sequences.
+      - **Command-Aware Timeout Suppression (`command_in_flight`)**: Tracks command execution state. When `StreamControlEvent::CommandStart` (`133;B`) or `CommandOutput` (`133;C`) is processed, `command_in_flight = true`. When `StreamControlEvent::CommandFinished` (`133;D`), `PromptStart` (`133;A`), or `Bell` (`\x07`) is received, `command_in_flight = false`. During `evaluate()`, if `command_in_flight == true`, the 1,500 ms idle timeout transition to `WaitingForInput` is suppressed, ensuring long-running tool executions and compilation commands never flip prematurely to waiting.
+      - **State Debouncing**: Employs a 500 ms debounce window (`debounce_duration`) computed as `idle_threshold + debounce_duration` before transitioning from `Busy` to `WaitingForInput`. If stream activity resumes before total idle time reaches this combined threshold, the session remains `Busy`, eliminating visual indicator flicker during bursty LLM token generation.
   - **Per-Session Activity Tracking**:
-    - Each project session maintains an isolated, independent `ActivityTracker` instance with its own activity clock and state machine, preventing cross-session timer crosstalk.
-- **Background-Aware Desktop Notifications**:
-  - Emits native OS desktop notifications (via `notify-rust` / terminal notifications) with per-project debouncing and cooldown:
+    - Each project session maintains an isolated, independent `ActivityTracker` instance with its own activity clock, command-in-flight tracker, debounce configuration, and stream scanner, preventing cross-session timer crosstalk.
+- **In-Memory Notification Tracking & Debouncing**:
+  - Desktop notifications via `notify-rust` are removed to prevent macOS main-thread hangs (where native notification dispatchers block or hang when invoked outside the main Cocoa/AppKit runloop), while real-time TUI status badges, status banners, semantic stream scanning (OSC 133, OSC 9, OSC 777, BEL, inactivity timeouts), and in-memory event tracking are fully preserved.
+  - `NotificationService` maintains in-memory event tracking, per-project debouncing, and cooldown:
+    - Debounces duplicate notification events per project and event type (Completed, WaitingForInput, Error, Custom).
     - An agent CLI process completes a task or exits.
     - An agent transitions to an idle state awaiting user input / approval, or emits a `BEL` / OSC notification.
-  - **Focus-Aware Notification Filtering**: Desktop notifications for waiting/attention events are suppressed if the user is actively viewing and interacting with that specific session, triggering only when the session is running in the background (different project tab, modal dialog, or dashboard open).
-- **Real-Time Session Indicators in TUI**:
-  - Live status indicators formatted as a leading solid round dot symbol (`●` U+25CF) inside project tabs in the status bar (e.g., `  ● 1 [ecommerce] payment-api  `, falling back to `  ● 1 payment-api  ` if template name is empty, with active/inactive styling):
-    - ● **Busy / Thinking**: Themed Busy color (`theme.status_busy`, e.g., Cyan / Electric Blue / Amber) when agent is actively executing.
-    - ● **Waiting for Input**: Themed Waiting color (`theme.status_waiting`, e.g., Peach / Amber / Sky Blue) when agent is awaiting user response, confirmation, or attention.
-    - ● **Done / Idle**: Themed Done color (`theme.status_done`, e.g., Green) when agent finished its assigned prompt or task.
-    - ● **Error / Interrupted**: Themed Error color (`theme.status_error`, e.g., Red) on non-zero exit code or process failure.
-    - ● **Initializing / Terminated**: Themed status bar foreground color (`theme.status_bar_fg`).
+  - **Focus-Aware Notification Filtering**: Attention events for waiting states are suppressed if the user is actively viewing and interacting with that specific session, triggering tracking only when the session is running in the background (different project tab, modal dialog, or dashboard open).
+- **Real-Time Semantic Session Indicators in TUI**:
+  - Live status indicators rendered using dedicated semantic status glyphs and themed contextual colors inside project tabs in the status bar and running session lists (e.g., `  ● 1 [ecommerce] payment-api  `, falling back to `  ● 1 payment-api  ` if template name is empty, with active/inactive styling):
+    - ○ **Initializing (`○` U+25CB)**: Rendered in `status_bar_fg` while the session worktree, PTY, or initial processes are spawning.
+    - ● **Busy / Thinking (`●` U+25CF)**: Themed Busy color (`theme.status_busy`, e.g., Warm Amber Gold, Electric Neon Yellow) when the agent is actively executing, thinking, or running commands.
+    - ? **Waiting for Input (`?`)**: Themed Waiting color (`theme.status_waiting`, e.g., Warm Peach / Orange / Acid Yellow) when the agent is awaiting user response, confirmation, or tool permission.
+    - ✓ **Done / Idle (`✓` U+2713)**: Themed Done color (`theme.status_done`, e.g., Green) when the agent finished its assigned prompt or task.
+    - ✗ **Error / Interrupted (`✗` U+2717)**: Themed Error color (`theme.status_error`, e.g., Red) on non-zero exit code or process failure.
+    - — **Terminated (`—` U+2014)**: Rendered in `status_bar_fg` when the session was closed or detached.
+  - **Active Tab Contrast Fallback Guard**: On active tabs where a status color matches or collides with the active tab background (`dot_color == theme.tab_active_bg`), the indicator automatically falls back to `theme.tab_active_fg` to guarantee high contrast.
 
 ---
 
@@ -291,6 +312,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - PTY sessions define `PtyWaker = Arc<dyn Fn() + Send + Sync>` configured via `PtySession::set_waker` and `SessionRegistry::set_waker`. Whenever `pty-reader` reads bytes (`n > 0`), it invokes the waker callback.
   - In `TuiApp`, the PTY waker is connected to the raw stdin channel (`stdin_tx`), sending an empty wake-up pulse (`Vec::new()`).
   - In `run_loop_with_receiver`, incoming bytes on `stdin_rx` are demuxed: non-empty bytes are forwarded to `handle_input_bytes` (marking `dirty = true`), while empty vectors (wake-up pulses) bypass input decoding and immediately trigger `process_pty_streams()`, achieving instant event-driven terminal redrawing.
+- **EINTR Retry Resilience on Reader Threads**:
+  - Both the stdin reader thread (`src/tui/app.rs`) and child PTY reader threads (`src/session/pty.rs`) explicitly handle `std::io::ErrorKind::Interrupted` (`EINTR`) errors by retrying `read()` within their processing loops instead of exiting prematurely.
+  - Guarantees thread survival and continuous stream delivery when asynchronous POSIX signals (e.g. `SIGWINCH` on terminal resize, `SIGCHLD`, or process control signals) interrupt ongoing blocking read syscalls.
 - **Consolidated Process Status Polling**:
   - Lifecycle state and exit codes for active sessions are retrieved using a single consolidated `try_wait` invocation per session, eliminating redundant duplicate `waitpid` syscalls and mutex locking in the render loop.
 - **Zero-Allocation VT Cell Rendering & High-Throughput Performance**:
@@ -298,6 +322,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Dynamic Viewport & Responsive Resizing**:
   - Automatically synchronizes PTY dimensions and VT virtual screen buffers to the host terminal viewport on initial startup, on window resize events (`Event::Resize`), and when creating or switching active project sessions.
   - Propagates window size changes (`SIGWINCH` / `ResizePseudoConsole`) so full-screen interactive agent CLIs (`agy`, `claude`, `aider`, etc.) dynamically re-render to the exact available terminal dimensions.
+  - **Non-Zero Dimension Boundary Invariant (`VtScreen`)**: `VtScreen::new` and `VtScreen::with_scrollback` clamp zero `cols` or `rows` dimensions to `1` (`NonZeroU16::MIN`), while `VtScreen::resize` treats zero-width or zero-height resizes as safe no-ops—staying synchronized with `PtySession::resize` (which rejects zero dimensions) and preventing panics when the host terminal viewport height or width collapses.
 - **Hardware Cursor Positioning & Visibility**:
   - Accurately tracks cursor coordinates and visibility state (`\x1b[?25h` / `\x1b[?25l`) from the active session's VT parser.
   - Positions the terminal hardware cursor directly at the active input position during interactive sessions, rendering the native block cursor where user input is focused when at live scrollback position.
@@ -318,6 +343,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     `modifier_code = 1 + (Shift ? 1 : 0) + (Alt ? 2 : 0) + (Ctrl ? 4 : 0) + (Super/Meta ? 8 : 0)`.
     - Handles progressive Kitty sub-parameters (`\x1b[<codepoint>:<shifted>;<modifiers>:<event_type>u`) and masks out lock keys (Caps Lock `64`, Num Lock `128`) to accurately detect modifiers under all keyboard states.
     - Buffers split escape sequences across chunk boundaries (including single `\x1b` byte splits) in `RawLeaderDecoder` symmetrically across inactive and active leader modes to prevent raw escape leakages.
+    - **CSI Sequence Boundaries in `parse_raw_events`**: The end of each CSI sequence is found per ECMA-48 (parameter bytes `0x30-0x3F`, intermediate bytes `0x20-0x2F`, one final byte `0x40-0x7E`). CSI-`~`, CSI-`u` and modified navigation (`\x1b[1;<mod>X`) are matched only on the current sequence's final byte, so a single read containing several sequences (e.g. `\x1b[1;5Au`, or `\x1b[1;5A` followed by a bracketed paste) yields one event per sequence. Codepoint `10` in CSI-u (`\x1b[10u`) and modifyOtherKeys (`\x1b[27;<mod>;10~`) maps to `KeyCode::Enter`, matching `is_shift_enter` / `is_unmodified_enter`; keypad Enter `57414` is recognized in CSI-u only.
     - Stream-demuxes mixed input buffers containing interleaved SGR mouse sequences (`\x1b[<...M/m`) and keystrokes, buffering incomplete cross-chunk SGR mouse prefixes without dropping trailing keys or leaking coordinates.
     - **SGR Mouse Prefix Disambiguation**:
       - Incomplete SGR mouse sequence detection (`is_incomplete_sgr_mouse`) strictly requires a `\x1b[<` prefix. Standalone `\x1b` or `\x1b[` bytes are never classified as incomplete SGR mouse sequences and are never trapped in `pending_raw_input`.
@@ -334,6 +360,9 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Unmodified Carriage Return (`KeyCode::Char('\r')` with no modifiers): `\r` (`0x0D`, CR).
     - Ctrl+J (`KeyCode::Char('j')` with Ctrl, or unmodified `\n`): `0x0A` (LF).
     - Modified Enter / Newlines (Shift, Alt, Ctrl, Super, etc. for `KeyCode::Enter`, `KeyCode::Char('\n')`, and `KeyCode::Char('\r')`): `\x1b[13;<mod>u` (e.g. `Alt+Enter` -> `\x1b[13;3u`; `Ctrl+Enter` -> `\x1b[13;5u`; `Ctrl+Shift+Enter` -> `\x1b[13;6u`; `Super+Enter` -> `\x1b[13;9u`).
+    - **CSI-u Unmodified Enter Normalization**:
+      - Terminals supporting Kitty keyboard protocol with `DISAMBIGUATE_ESCAPE_CODES` (such as iTerm2 3.7.2, Ghostty) send `\x1b[13u` or `\x1b[13;1u` for unmodified Enter instead of raw CR (`\r`).
+      - In `RawAction::Passthrough`, CSI-u unmodified Enter sequences (`\x1b[13u`, `\x1b[13;1u`, `\x1b[13;1:1u`, `\x1b[13:10u`, `\x1b[13:10;1u`, `\x1b[13:10;1:1u`, as well as `\x1b[10u`, `\x1b[10;1u`, and keypad Enter `\x1b[57414u`, `\x1b[57414;1u`) are normalized to `b"\r"` before writing to the child PTY. This ensures child shells and AI agent CLI processes receive standard carriage returns for command submission rather than unrecognized escape sequences. In addition, CSI-u unmodified Enter sequences dismiss active errored session banners.
     - **Seamless Agent-Aware Shift+Enter Multiline Routing**:
       - Inspects the active session (`active.project_session.agent`) when receiving raw Shift+Enter sequences (Kitty CSI-u `\x1b[13;<mod>u` with Shift bit, sub-parameters `\x1b[13;2:1u`, alternate codepoints `\x1b[13:10;2u`, or xterm modifyOtherKeys `\x1b[27;<mod>;13~`):
         - For `claude` (or non-Kitty agents): Sends `b"\n"` (`0x0A` / Line Feed) so Claude Code inserts a clean multiline newline instead of submitting.
@@ -385,16 +414,24 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Last / Only Session Scenario (Context-Aware Exit)**:
     - If `botai` was launched from the dashboard, terminating the last session automatically transitions back to the interactive project dashboard (with refreshed project directories).
     - If `botai` was launched directly via CLI (`botai create --attach` or `botai attach`), terminating the last session exits `botai` cleanly back to the host shell.
-  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed.
+  - **Error & Crash Retention**: If an agent process exits with an error or crash (non-zero exit code or abnormal termination), the session remains visible in the registry with the Error status (`●` in `status_error` color) and an inline prompt banner (e.g. `[Process exited with code X - Press Enter / Ctrl+Space w to dismiss]`), ensuring error outputs and logs are not lost until explicitly dismissed. Pressing Enter (including raw CR `\r`, LF `\n`, plain Space, or Kitty CSI-u unmodified Enter sequences such as `\x1b[13u`, `\x1b[13;1u`, and keypad Enter `\x1b[57414u`) or `Ctrl+Space w` dismisses the errored session tab.
 - **Child Process Lifecycle Management & Process Reaping (`PtySession`)**:
   - `PtySession` implements `Drop` to kill and reap child processes automatically when dropped (or when an active session, `SessionEntry`, or `SessionRegistry` is removed or dropped), preventing orphaned or zombie processes in the operating system process table.
   - `PtySession::kill()` explicitly terminates running processes and invokes `child.wait()` to reap process entries from the OS process table.
   - `PtySession::process_id()` exposes the underlying OS child process identifier (`Option<u32>`) when available.
+- **Zero-Allocation Session Registry Access**:
+  - `SessionRegistry` exposes direct slice accessors (`list(&self) -> &[SessionEntry]` and `list_mut(&mut self) -> &mut [SessionEntry]`) as well as `iter(&self)` and `iter_mut(&mut self)` slice iterators without allocating intermediate heap vectors (`Vec<&SessionEntry>`) on each query.
+  - Eliminates heap vector churn on every tick of the 30ms TUI event loop in `TuiApp` and during status bar frame rendering.
 - **Session Detachment & Background Persistence**:
   - Detaching from an active session (`Ctrl + Space` then `x`):
     - When launched from the dashboard, returns to the interactive project dashboard with refreshed project listings while leaving all background sessions and agent processes running. Users can re-attach to existing running sessions, switch between active sessions, or create/destroy other projects.
     - When launched directly from CLI (`botai create --attach` or `botai attach` without dashboard), detaching exits `botai` cleanly back to the host shell while leaving background sessions intact.
-- **Status Bar & Project Indicators**: An unobtrusive top/bottom status bar displaying active sessions, status badges, and streamlined key hints. Each session tab displays its index hotkey, template name in brackets, and project name: `● <Hotkey> [<Template>] <Project>` (or `● <Hotkey> <Project>` if template name is empty). In normal state, it displays a concise right-aligned `'Ctrl+Space: Actions'` hint (omitted gracefully on narrow viewports). When the leader key is triggered (`leader_active`), it displays the focused actionable commands menu `'[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]'` in high-contrast leader styling. When no active sessions exist, it displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'`, transitioning to the active leader menu when `Ctrl+Space` is pressed.
+- **Status Bar & Project Indicators**:
+  - **Tab Structure & Semantic Indicators**: Top/bottom status bar displaying active sessions, status badges, and streamlined key hints. Each session tab displays its leading semantic status symbol (`○` Initializing, `●` Busy, `?` Waiting, `✓` Done, `✗` Error, `—` Terminated), hotkey index (1..9), template name in brackets, and project name: `  <Symbol> <Hotkey> [<Template>] <Project>  ` (falling back to `  <Symbol> <Hotkey> <Project>  ` if template is blank).
+  - **Dynamic Title Truncation (`smart_truncate_tab_title`, `MAX_TAB_WIDTH = 32`)**: Gracefully truncates template names and project names to fit within `MAX_TAB_WIDTH` (32 columns) or when horizontal space is limited, shrinking or omitting the template name first so that the active tab's project identity remains clear and prominent while omitting brackets when template names are blank.
+  - **Overflow Arrow Reservation (`◀ ` and ` ▶`)**: In `compute_visible_tab_range`, reserves 4 columns for overflow arrows whenever tabs exceed available width, ensuring tabs never clip against the right edge. Symmetrically formats right overflow indicators as `" ▶"`.
+  - **Steady Tab Bar & Dedicated Leader Actions Overlay (`ActionsOverlay`)**: When leader mode is active (`leader_active`, via `Ctrl+Space`), the top status bar (row 0) remains completely steady and unchanged (preserving full-width tab windowing, right-aligned hints/update notice/status notifications, or `[No Active Sessions]`). Instead of squeezing row 0, `TuiApp::render_frame` renders `ActionsOverlay` as a dedicated 1-row overlay (`compute_actions_overlay_area`) immediately underneath the tabs at row 1 (over the top row of the terminal viewport without resizing child PTYs or VTs, falling back to row 0 on 1-row terminals). `ActionsOverlay` clears pre-existing cells across the full row width using `theme.leader_fg` and `theme.leader_bg`, displays the 86-character keymap menu (`LEADER_ACTIONS_MENU`: `[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]`), adds a right-aligned `'Esc: Cancel'` hint when width allows (`>= 101` columns: `1 + 86 + 2 + 11 + 1`), clips cleanly on narrow widths, and suppresses the child hardware cursor while leader mode is active so the cursor does not bleed onto the overlay.
+  - **Responsive Key Hints & Status Notifications**: Displays a concise right-aligned `'Ctrl+Space: Actions'` hint (preceded by any startup update notice when space allows) on row 0, cleanly omitting the hint on narrower viewports to maximize tab space. When an optional status notification is present (e.g., repository addition confirmation or error), it is displayed right-aligned on row 0 in place of the default key hint. When no active sessions exist, row 0 displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'` steadily in both normal and leader modes.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
     - `Ctrl + Space` then `1` .. `9`: Directly switch to project session 1 to 9.
@@ -412,6 +449,12 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ## 7. CLI Commands & Lifecycle Operations
 - **Default (No Arguments)**: Launching `botai` without arguments opens the interactive TUI project switcher / dashboard.
+- **Version Flag (`botai --version` / `botai -V`)**:
+  - Git tag is the **single source of truth** for runtime version reporting.
+  - Dynamically injected at compile time via a standalone build script (`build.rs`) using `git describe --tags --always --dirty`.
+  - Preserves the `v` tag prefix according to Git release tag conventions (e.g. `botai v0.1.0` on tagged release commits, `botai v0.1.0-4-ga490519` when commits exist ahead of the tag, and `botai v0.1.0-4-ga490519-dirty` when uncommitted working tree changes exist).
+  - In repositories without release tags, safely falls back to `botai <commit_sha>` (or `botai v0.0.0-<commit_sha>`); outside of git environments, falls back to `botai v0.0.0`.
+  - Fully decoupled from [Cargo.toml](Cargo.toml) manifest versioning.
 - **`botai create <template> <project> [--agent <agent> / -A <agent>] [--prompt <prompt> / -p <prompt>] [--include <repos>] [--exclude <repos>] [--all] [--attach / -a]`**:
   - Creates a new multi-repo workspace project under `CWD/<project>` from the specified template.
   - **Arguments & Flags**:
@@ -473,6 +516,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Execution & Lifecycle**:
     - Spawns the editor process with inherited standard I/O (stdin, stdout, stderr) and waits synchronously for the process to exit.
     - Exits `botai` with the editor process's exit status code (silent pass-through without blocking on syntax validation).
+- **`botai update [--check] [--version <TAG>] [--pre]`**:
+  - Replaces the running `botai` executable with a GitHub release binary. Full behaviour in section 16.
+  - Handled before configuration loading, so a broken `config.toml` cannot block an update.
+  - `--check`: Prints the current and latest version and exits `0` whether or not an update exists (non-zero is reserved for errors). Conflicts with `--version`.
+  - `--version <TAG>`: Installs a specific release tag (`v0.2.0` or `0.2.0`); downgrades are allowed.
+  - `--pre`: Includes prereleases when resolving the latest release.
+  - Prints `Updated botai vOLD -> vNEW` or `botai vX is already up to date.`
 - **`botai destroy <project-name> [--force]`**:
   - Validates all child worktrees for uncommitted changes upfront and refuses deletion unless `--force` is specified.
   - Executes configured template `pre_destroy` lifecycle hooks sequentially at the project root directory before unlinking worktrees, capturing command output and logging warnings on failures.
@@ -492,7 +542,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
     1. **Pre-Validation**: Multi-tier validation with `validate_fast` (immediate 0ms local validation of project name, template existence, empty selected repos, and CWD directory collision) and `check_branch_collisions` / `validate_detailed` (effective repository resolution and git branch collision verification strictly across effective repositories).
     2. **Repository Resolution & Cloning**: Resolves effective repositories (`resolve_effective_repos`), clones missing remote Git repositories into `repos_dir` and performs best-effort upstream fetch only for effective repositories.
     3. **Worktree Checkout**: Creates a git worktree checked out to branch `<project_name>` at `<project_dir>/<repo_name>` strictly for effective repositories.
-    4. **Per-Repository Setup Hooks Execution**: Concurrently executes configured repository `setup` commands in parallel across active effective worktrees (sequential command execution per worktree), capturing logs and proceeding under the Warn and Continue policy upon failures.
+    4. **Per-Repository Setup Hooks Execution**: Concurrently executes configured repository `setup` commands in parallel across active effective worktrees (at most 8 concurrently; sequential command execution per worktree), capturing logs and proceeding under the Warn and Continue policy upon failures.
     5. **Context Synthesis**: Synthesizes multi-repo context and template instructions into `<project_dir>/AGENTS.md` documenting only effective repositories in the Repository Layout table.
     6. **Workspace Post-Creation Hooks Execution**: Runs configured template `post_create` commands sequentially at the project root directory.
     7. **PTY Process Spawning**: Spawns the agent CLI process inside a master/slave pseudo-terminal attached to a virtual terminal screen buffer.
@@ -536,6 +586,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Two-Step Dialog Progression**:
     1. **Step 1: Searchable Template Selection (`CreationStep::SelectTemplate`)**:
        - **Top Filter Search Bar**: Real-time search filter powered by the reusable `TextInput` component (`Filter: <query>`), supporting in-line character cursor positioning, full readline editing keybindings (`Home`/`Ctrl+A`, `End`/`Ctrl+E`, `Left`/`Right`, `Ctrl+Left`/`Alt+B`, `Ctrl+Right`/`Alt+F`, `Backspace`, `Delete`, `Ctrl+U`, `Ctrl+K`, `Ctrl+W`), paste sanitization, and hardware terminal cursor synchronization.
+       - **Zero-Allocation In-Place Editing**: `TextInput` maintains the cursor as a 0-based Unicode character count for display rendering and test compatibility, while performing in-place `String` editing (`insert`, `remove`, `splice`) mapped via `.char_indices()`, eliminating intermediate `Vec<char>` and `String` heap allocations on every keypress and word navigation.
        - **Matching Criteria**: Strictly case-insensitive substring matching against template names only (descriptions and constituent repository names/sources are not matched).
        - **Selection Synchronization Rules**:
          - *Query Changes (typing, backspacing, pasting)*: If the currently selected template is still among the matching results, preserve its selection; otherwise reset selection to index 0 (top hit).
@@ -631,8 +682,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Structured Progress Events**: Emits sequential `ProjectDestroyEvent` events (`Step`, `Log`, `Success`, `Error`) over an `mpsc::channel` to drive the modal UI.
   - **Destruction Lifecycle Steps**:
     1. `Step [1/4]`: Executing template `pre_destroy` lifecycle hooks (streaming hook command output).
-    2. `Step [2/4]`: Validating worktrees and checking uncommitted changes (enforcing safety unless forced).
-    3. `Step [3/4]`: Removing git worktrees and pruning metadata across backing central repositories via `remove_worktree_auto`.
+    2. `Step [2/4]`: Validating worktrees and checking uncommitted changes across all child worktrees concurrently using a bounded scoped-thread worker pool (`std::thread::scope`, at most 8 concurrent checks). If any worktrees have uncommitted changes and `force` is false, aborts before any deletion and aggregates all dirty repository paths into a single descriptive error.
+    3. `Step [3/4]`: Concurrently removing git worktrees and pruning metadata across backing central repositories via `remove_worktree_auto` in parallel across distinct repositories (at most 8 concurrently; worktrees sharing a backing repository are removed sequentially).
     4. `Step [4/4]`: Recursively deleting the project workspace directory.
   - **Rich Modal Presentation**:
     - Centered floating dialog styled with active theme colors.
@@ -697,16 +748,16 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Defaults to `"tokyo-night"` if omitted or unrecognized.
   - Theme names are normalized case-insensitively and support aliases (e.g., `"catppuccin"` / `"catppuccin-mocha"`, `"gruvbox"` / `"gruvbox-dark"`, `"monochrome"` / `"slate"` / `"minimal"`, `"ansi"` / `"default"` / `"classic"`).
 - **Supported Built-in Palettes**:
-  - **`tokyo-night`** (Default): Modern deep slate/navy chrome (`#1a1b26`), electric cyan & blue tab highlights (`#7aa2f7`), vibrant purple borders (`#bb9af7`), and warm amber gold leader mode (`#e0af68`).
-  - **`catppuccin` / `catppuccin-mocha`**: Soothing dark pastel palette (`#1e1e2e`), mauve borders (`#cba6f7`), sky blue selections (`#89dceb`), peach input highlights (`#fab387`), and crust backgrounds.
-  - **`cyberpunk` / `synthwave`**: High-contrast dark cyber aesthetic (`#0a0a0f`), hot neon magenta (`#ff007f`), electric neon cyan (`#00f0ff`), and vivid acid yellow leader indicator (`#ffe600`).
+  - **`tokyo-night`** (Default): Modern deep slate/navy chrome (`#1a1b26`), electric cyan & blue tab highlights (`#7aa2f7`), vibrant purple borders (`#bb9af7`), warm amber gold leader mode (`#e0af68`), and warm peach/orange waiting indicator (`#ff9e64`) non-colliding with active tabs.
+  - **`catppuccin` / `catppuccin-mocha`**: Soothing dark pastel palette (`#1e1e2e`), mauve borders (`#cba6f7`), sky blue selections (`#89dceb`), peach input highlights and non-colliding waiting indicator (`#fab387`), and crust backgrounds.
+  - **`cyberpunk` / `synthwave`**: High-contrast dark cyber aesthetic (`#0a0a0f`), hot neon magenta (`#ff007f`), electric neon cyan (`#00f0ff`), and vivid acid yellow leader indicator and waiting status (`#ffe600`).
   - **`gruvbox` / `gruvbox-dark`**: Warm retro earthy palette (`#282828`), rust orange active tabs (`#fe8019`), warm cream text (`#ebdbb2`), forest green selections (`#b8bb26`), and bright yellow leader mode (`#fabd2f`).
-  - **`monochrome` / `slate`**: Minimalist zinc/slate dark tones (`#18181b` / `#27272a`), ice blue accents, crisp white active text and borders (`#f4f4f5`).
-  - **`ansi` / `default`**: Standard 16-color ANSI terminal fallback palette using native terminal cyan, yellow, green, red, dark gray, and white without 24-bit TrueColor RGB definitions.
+  - **`monochrome` / `slate`**: Minimalist zinc/slate dark tones (`#18181b` / `#27272a`), crisp white active text and borders (`#f4f4f5`), high-contrast sky blue waiting status (`#0284c7`), and balanced green done status (`#16a34a`).
+  - **`ansi` / `default`**: Standard 16-color ANSI terminal fallback palette using native terminal cyan, yellow, light yellow waiting indicator, green, red, dark gray, and white without 24-bit TrueColor RGB definitions.
 - **Complete TUI Element Coverage**:
-  - **Status Bar**: Background, default text, active session tab, inactive tabs, tab index numbers (1..9), leader mode indicator badge and hints.
-  - **Agent Status Indicators**: Distinct contextual theme colors applied to the leading round status dot (`●`) for Thinking / Busy (`status_busy`), Waiting for Input (`status_waiting`), Done / Idle (`status_done`), and Error / Interrupted (`status_error`), with Initializing and Terminated states rendered in `status_bar_fg`.
-  - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, and top header status bar key hints.
+  - **Status Bar & Leader Actions Overlay**: Background, default text, active session tab, inactive tabs, tab index numbers (1..9), normal-mode hints, and dedicated 1-row `ActionsOverlay` styled with `leader_bg` and `leader_fg`.
+  - **Agent Status Indicators**: Distinct contextual theme colors applied to semantic status glyphs (`○` Initializing, `●` Busy, `?` Waiting for Input, `✓` Done, `✗` Error, `—` Terminated), with Initializing and Terminated states rendered in `status_bar_fg`. Active tabs employ an automatic contrast guard fallback to `tab_active_fg` if the status indicator color matches `tab_active_bg`.
+  - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, top header status bar key hints, and live semantic status glyphs.
   - **Modals (Creation Modal, Setup Progress Modal & Destroy Modal)**: Dialog borders, focused input borders/prompts, placeholder text, field labels, and button/key hints.
   - **Exit & Crash Banners**: High-visibility error notification banners rendered across the bottom line upon non-zero process exits.
 
@@ -747,7 +798,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **4. Unsafe Code Audit Gate (`unsafe-audit`)**:
     - Runs on `ubuntu-latest`.
     - **Strict `#![forbid(unsafe_code)]` Enforcement**: Verifies that crate root headers (`src/lib.rs` and `src/main.rs`) explicitly mandate `#![forbid(unsafe_code)]`.
-    - **Zero Unsafe Usage Policy**: Scans all source files under `src/` to guarantee zero `unsafe` keyword blocks or invocations exist in the production codebase.
+    - **Zero Unsafe Usage Policy**: Scans all source files under `src/` for `unsafe` used as code (`unsafe {`, `unsafe fn`, `unsafe impl`, `unsafe trait`, `unsafe extern`, `#[unsafe(...)]`), so the word in comments or identifiers does not trip the gate.
     - **Compilation Verification**: Confirms clean `cargo check --all-targets --all-features` pass under the strict forbid lint constraint.
 
 ---
@@ -787,7 +838,86 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - Pre-release status: Evaluated from hybrid detection (checkbox or tag hyphen).
     - Attached assets: Linux `.tar.gz`, macOS `.tar.gz`, Windows `.zip`, and combined `SHA256SUMS`.
 
+---
 
+## 15. Open Source Community Standards, Packaging & CI Integrity
+- **Cargo Manifest Metadata (`Cargo.toml`)**:
+  - Full package metadata configured for repository distribution:
+    - `publish`: Set to `false` (`publish = false`) to explicitly prevent accidental publication to crates.io.
+    - `version`: Configured with the sentinel placeholder `"0.0.0"` accompanied by explicit documentation indicating that Git tags are the single source of truth and versioning is dynamically injected at compile time.
+    - `license`: Explicitly specifies `MIT`.
+    - `repository`: Points to GitHub source repository (`https://github.com/okunnig/botai`).
+    - `homepage`: Points to repository homepage (`https://github.com/okunnig/botai`).
+    - `readme`: Specifies `README.md`.
+    - `keywords`: Tagged with relevant keywords (`tui`, `multiplexer`, `git-worktree`, `developer-tools`, `ai-agents`).
+    - `categories`: Categorized under `["command-line-utilities", "development-tools"]`.
+- **Git Tag Single Source of Truth & Dynamic Versioning (`build.rs`)**:
+  - Employs zero-unsafe `build.rs` executing `git describe --tags --always --dirty` at compile time and passing the resulting version string via `cargo:rustc-env=BOTAI_VERSION=<version>`.
+  - Injects `env!("BOTAI_VERSION")` directly into clap's CLI definition (`Cli` struct in `src/cli/mod.rs`), preserving the `v` prefix (`vX.Y.Z`).
+  - **Worktree-Aware Cache Invalidation**: Resolves git directory paths whether running in a standard repository or a git worktree (`.git` file pointing to `gitdir: ...`). Emits `cargo:rerun-if-changed` directives for `HEAD`, branch refs, and `packed-refs` in both local and common git directories to guarantee automatic rebuilds when commits or tags change.
+  - **CI & Release Checkout Depth**: CI (`ci.yml`) and Release (`release.yml`) workflows configure `fetch-depth: 0` on checkout steps to ensure full git history and release tags are available for compile-time version resolution.
+- **License Uniformity**:
+  - `LICENSE` file contains the canonical MIT License text.
+  - `README.md` hero badges and documentation sections reference MIT licensing uniformly.
+- **Documentation & User Onboarding**:
+  - `README.md` includes CI status badge, verified platform support anchors, and installation options (Cargo git install, pre-built GitHub release binaries, and source build).
+- **Git & Build Reproducibility**:
+  - Binary applications commit `Cargo.lock` to guarantee deterministic builds across environments.
+  - `.gitignore` permits `Cargo.lock` tracking and omits `Cargo.lock` from ignore patterns.
+- **Continuous Integration (`.github/workflows/ci.yml`)**:
+  - Executes comprehensive test suites, clippy, formatting, and unsafe code audit on both pull requests targeting `main` and direct pushes to `main`.
+  - **Immutable Action Pinning**: Workflows pin all GitHub Action dependencies to full 40-character commit SHAs with human-readable version comments (e.g. `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`), ensuring supply chain security and reproducible builds while supported by automated Dependabot updates.
+- **Community Health & Vulnerability Reporting**:
+  - `CONTRIBUTING.md`: Development environment setup, formatting, clippy lint checks, unsafe code prohibition guidelines, and PR workflow.
+  - Security disclosures are handled via GitHub native Private Vulnerability Reporting.
+  - Issue & Pull Request Templates:
+    - `.github/ISSUE_TEMPLATE/bug_report.yml`
+    - `.github/ISSUE_TEMPLATE/feature_request.yml`
+    - `.github/pull_request_template.md`
 
+---
 
+## 16. Self Update
+- **Behaviour**:
 
+  | Trigger | Action |
+  |---|---|
+  | TUI launch (dashboard, `attach`, `create --attach`) | If the cached check is older than 24h, a background thread queries GitHub (5s timeout) and rewrites the cache. Never blocks or fails the launch. A fresh cache answers without network. |
+  | TUI | When a newer release is known, the dashboard top bar and the in-session status bar show `update vX.Y.Z available: botai update` (theme `status_waiting` colour). The notice is dropped before the key hints shrink when the bar is narrow. |
+  | Other CLI subcommands | No network. After a successful command, one stderr line is printed if the cache records a newer release. Suppressed when stderr is not a TTY, and for `update` and `init --stdout`. |
+  | `botai update` | Resolves the release, downloads the platform archive and `SHA256SUMS`, verifies, extracts, replaces the running executable, prints `vOLD -> vNEW` or "already up to date". |
+  | `botai update --check` | Prints current and latest version; exit `0` either way. |
+  | `botai update --version vX.Y.Z` | Installs that tag, downgrade allowed. Skipped only when the tag equals the running version exactly. After the optional `v` prefix is added, the tag must be non-empty, use only `[A-Za-z0-9._+-]` and contain no `..` (`.` alone is rejected too); otherwise it fails with "Invalid release tag" before any request. |
+  | `botai update --pre` | Resolves the highest non-draft release from the `/releases` list, prereleases included (`/releases/latest` excludes them). |
+
+- **Startup Check Opt-Outs**: The startup check and the CLI notice are skipped when any of these hold:
+  - `[update] check_on_startup = false`.
+  - `BOTAI_NO_UPDATE_CHECK` is set to a truthy value.
+  - `CI` is set to a truthy value.
+  - Both variables use one rule: unset, empty, `0`, `false`, `no` and `off` (case-insensitive, surrounding whitespace ignored) are false; any other value is true.
+  - The build is not a release build: `-dirty` suffix, `-N-g<sha>` suffix, exactly `v0.0.0`, or `v0.0.0-dev-*`. Semver prerelease tags such as `v0.2.0-rc.1` count as release builds.
+- **Version Comparison**: `-dirty` and `-N-g<sha>` are stripped before semver parsing, so `v0.0.1-4-gabc` compares equal to `v0.0.1` (not as a prerelease of it) and a release is offered only when strictly newer.
+- **Source Builds**: `botai update` works on non-release builds. Once a release to install has been resolved, and before the binary is replaced, it warns that it replaces a source build with the prebuilt release binary. No warning when it is already up to date.
+- **GitHub API**:
+  - `GET https://api.github.com/repos/okunnig/botai/releases/latest`, `/releases/tags/<tag>`, or `/releases?per_page=30` for `--pre` (drafts skipped).
+  - Headers: `User-Agent: botai/<version>`, `Accept: application/vnd.github+json`, and `Authorization: Bearer $GITHUB_TOKEN` when set (the anonymous limit is 60 requests/hour; the 24h cache keeps checks well under it). 429, and 403 with `x-ratelimit-remaining: 0` or a `retry-after` header (secondary rate limit), produce a rate limit error suggesting `GITHUB_TOKEN`. Any other non-2xx, non-404 status (including other 403s) produces `HTTP <status>`, followed by GitHub's JSON `message` when present. The token is sent to the API only, not to asset downloads.
+  - Proxies are honoured via `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`.
+  - Hidden `BOTAI_UPDATE_BASE_URL` overrides the API base URL in debug builds only (tests point it at a local fixture server); release builds always use `https://api.github.com`. Asset URLs come from each asset's `browser_download_url`.
+- **Cache**: `update-check.toml` in the platform cache directory (`<cache dir>/botai/`, e.g. `~/Library/Caches/botai/`, `~/.cache/botai/`, `%LOCALAPPDATA%\botai\`) with `last_checked` (unix seconds of the last attempt) and `latest_tag` (omitted until a check succeeds). Written via temp file and rename because two botai instances may write at once. A missing or corrupt cache counts as stale. A failed startup check (network error, HTTP error, rate limit) still rewrites `last_checked`, so failures also wait 24h before the next attempt; the previously known `latest_tag` is kept and still used for the notice.
+- **Install Procedure & Checksum Policy**:
+  - Download the platform archive and `SHA256SUMS`; the archive's line in `SHA256SUMS` must exist and match, otherwise the install fails without touching the binary.
+  - Extract only the `botai` / `botai.exe` entry at the archive root (a leading `./` is accepted). Entries with `..` components or absolute paths fail the install.
+  - Stage the new binary in a temp directory next to the current executable (same filesystem), `chmod 0o755` on unix, then swap it in with `self_replace`, which renames rather than overwrites: Windows locks a running exe, and macOS kills a signed binary overwritten in place. The staging directory is removed on success and on failure.
+  - Permission errors suggest re-running with `sudo` or reinstalling to a user-writable directory.
+- **Supported Platforms & Asset-Name Contract**: `botai update` maps the build target to the assets published by `release.yml`:
+
+  | Target | Asset |
+  |---|---|
+  | Linux x86_64 | `botai-<tag>-linux-x86_64.tar.gz` |
+  | macOS aarch64 | `botai-<tag>-macos-aarch64.tar.gz` |
+  | Windows x86_64 | `botai-<tag>-windows-x86_64.zip` |
+
+  Every release must also attach `SHA256SUMS`. Renaming or removing these assets breaks `botai update` for existing installs. Other targets (macOS x86_64, Linux aarch64, Windows aarch64) get an error pointing to `cargo install --git`.
+- **Known Limits**:
+  - `SHA256SUMS` comes from the same release as the archive, so it detects corrupt downloads, not a compromised release. Follow-up options: signed checksums (minisign) or GitHub artifact attestations in `release.yml`; the API's per-asset `digest` field could serve as an additional cross-check.
+  - `cargo install --git` builds carry no tag information: cargo's git checkout (`~/.cargo/git/checkouts/...`) contains no tags, even with `--tag` or `net.git-fetch-with-cli`, so `git describe` yields a bare SHA and `build.rs` reports `v0.0.0-dev-<sha>`. Such installs get no startup notice. `botai update` on them warns, then replaces `~/.cargo/bin/botai`, leaving cargo's install metadata (`~/.cargo/.crates.toml`) stale; a later `cargo install --git ... --force` restores a source build.

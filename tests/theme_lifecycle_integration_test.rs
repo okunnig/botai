@@ -70,7 +70,7 @@ repos = ["/tmp/repos/shop"]
     );
     let area = Rect::new(0, 0, 80, 20);
     let mut buf = Buffer::empty(area);
-    render_dashboard(&dashboard_state, area, &mut buf, &theme);
+    render_dashboard(&dashboard_state, area, &mut buf, &theme, None);
 
     // Verify top header status bar background matches cyberpunk status_bar_bg
     let header_cell = buf.cell((0, 0)).unwrap();
@@ -163,7 +163,7 @@ repos_dir = "/tmp/repos"
         terminal
             .draw(|f| {
                 let (status_area, _) = compute_layout(f.area());
-                let app_theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                let app_theme = app.config.theme();
                 f.render_widget(
                     StatusBar::new(&app.registry).with_theme(&app_theme),
                     status_area,

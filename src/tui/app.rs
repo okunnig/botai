@@ -31,6 +31,7 @@ use crate::notify::NotificationService;
 use crate::project::ProjectBuilder;
 use crate::session::{
     ProjectSession, PtyConfig, PtySession, PtyWaker, SessionRegistry, SessionStatus, VtScreen,
+    DEFAULT_VIEWPORT,
 };
 use crate::tui::add_repo_modal::{render_add_repo_modal, AddRepoModalAction, AddRepoModalState};
 use crate::tui::add_repo_progress_modal::{
@@ -44,13 +45,16 @@ use crate::tui::destroy_progress_modal::{
     render_destroy_progress_modal, DestroyProgressModalState,
 };
 use crate::tui::events::{
-    is_incomplete_sgr_mouse, is_shift_enter, parse_raw_events, parse_sgr_mouse,
-    translate_mouse_event, RawAction, RawLeaderDecoder,
+    is_incomplete_sgr_mouse, is_shift_enter, is_unmodified_enter, parse_raw_events,
+    parse_sgr_mouse, translate_mouse_event, RawAction, RawLeaderDecoder,
 };
 use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
-use crate::tui::status_bar::StatusBar;
+use crate::tui::status_bar::{ActionsOverlay, StatusBar};
 use crate::tui::theme::Theme;
-use crate::tui::ui::{compute_layout, TerminalView, STATUS_BAR_HEIGHT};
+use crate::tui::ui::{
+    compute_actions_overlay_area, compute_layout, TerminalView, STATUS_BAR_HEIGHT,
+};
+use crate::update::{self, UpdateStatus};
 
 /// Main application runner managing the TUI loop, PTY streaming, activity tracking, and rendering.
 pub struct TuiApp {
@@ -66,8 +70,8 @@ pub struct TuiApp {
     pub add_repo_modal: Option<AddRepoModalState>,
     pub add_repo_progress_modal: Option<AddRepoProgressModalState>,
     pub status_notification: Option<String>,
-    pub config: Option<Config>,
-    pub cwd: Option<PathBuf>,
+    pub config: Config,
+    pub cwd: PathBuf,
     pub viewport_size: Option<(u16, u16)>,
     pub leader_active: bool,
     pub showing_dashboard: bool,
@@ -76,6 +80,8 @@ pub struct TuiApp {
     pub config_path: Option<PathBuf>,
     pub config_last_modified: Option<std::time::SystemTime>,
     pub config_file_len: Option<u64>,
+    pub update_rx: Option<std::sync::mpsc::Receiver<UpdateStatus>>,
+    pub update_notice: Option<String>,
 }
 
 /// Whether botai pushed kitty keyboard flags, so exactly one matching pop is emitted.
@@ -286,8 +292,8 @@ impl TuiApp {
             add_repo_modal: None,
             add_repo_progress_modal: None,
             status_notification: None,
-            config: None,
-            cwd: None,
+            config: Config::default(),
+            cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             viewport_size: None,
             leader_active: false,
             showing_dashboard: false,
@@ -296,6 +302,36 @@ impl TuiApp {
             config_path: None,
             config_last_modified: None,
             config_file_len: None,
+            update_rx: None,
+            update_notice: None,
+        }
+    }
+
+    /// Attaches the receiver of a background update check started by `update::spawn_startup_check`.
+    pub fn with_update_check(
+        mut self,
+        rx: Option<std::sync::mpsc::Receiver<UpdateStatus>>,
+    ) -> Self {
+        self.update_rx = rx;
+        self
+    }
+
+    /// Picks up the startup update check result; returns true when the notice changed.
+    pub fn poll_update_check(&mut self) -> bool {
+        let Some(rx) = &self.update_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(status) => {
+                self.update_rx = None;
+                self.update_notice = Some(update::notice_text(&status.latest));
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.update_rx = None;
+                false
+            }
         }
     }
 
@@ -374,7 +410,7 @@ impl TuiApp {
 
     /// Sets the configuration on `TuiApp`.
     pub fn with_config(mut self, config: Config) -> Self {
-        self.config = Some(config);
+        self.config = config;
         self
     }
 
@@ -431,7 +467,7 @@ impl TuiApp {
                     dashboard.config_last_modified = curr_mtime;
                     dashboard.config_file_len = Some(curr_len);
                 }
-                self.config = Some(new_config);
+                self.config = new_config;
                 if self.config_path.is_none() {
                     self.config_path = Some(path);
                 }
@@ -443,8 +479,13 @@ impl TuiApp {
 
     /// Sets the working directory on `TuiApp`.
     pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
-        self.cwd = Some(cwd);
+        self.cwd = cwd;
         self
+    }
+
+    /// Returns the last known viewport size, or `DEFAULT_VIEWPORT` before the first draw.
+    fn viewport(&self) -> (u16, u16) {
+        self.viewport_size.unwrap_or(DEFAULT_VIEWPORT)
     }
 
     /// Resizes all registered sessions to the specified viewport column and row dimensions.
@@ -508,7 +549,6 @@ impl TuiApp {
     /// Extracts a map of project names to their current session status from the registry.
     pub fn running_sessions_map(&self) -> HashMap<String, SessionStatus> {
         self.registry
-            .list()
             .iter()
             .map(|s| (s.project_name().to_string(), s.status()))
             .collect()
@@ -541,6 +581,7 @@ impl TuiApp {
                             break;
                         }
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 }
             }
@@ -601,6 +642,9 @@ impl TuiApp {
             if self.poll_add_repo_progress() {
                 dirty = true;
             }
+            if self.poll_update_check() {
+                dirty = true;
+            }
             if let Some(dashboard) = &mut self.dashboard {
                 if dashboard.poll_validation() {
                     dirty = true;
@@ -627,88 +671,8 @@ impl TuiApp {
 
             // 3. Draw active frame conditionally
             if dirty {
-                let theme = self.config.as_ref().map(|c| c.theme()).unwrap_or_default();
                 terminal
-                    .draw(|f| {
-                        let (status_area, term_area) = compute_layout(f.area());
-
-                        if self.is_showing_dashboard() {
-                            if let Some(dashboard) = &self.dashboard {
-                                render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
-                                if let Some(pos) = dashboard.cursor_position(f.area()) {
-                                    f.set_cursor_position(pos);
-                                }
-                            }
-                        } else {
-                            f.render_widget(
-                                StatusBar::new(&self.registry)
-                                    .with_leader(self.leader_active)
-                                    .with_theme(&theme)
-                                    .with_notification(self.status_notification.as_deref()),
-                                status_area,
-                            );
-
-                            if let Some(active) = self.registry.active_session() {
-                                f.render_widget(TerminalView::new(active.vt()), term_area);
-
-                                if active.status() == SessionStatus::Error {
-                                    render_error_banner(
-                                        active.project_session.exit_code,
-                                        term_area,
-                                        f.buffer_mut(),
-                                        &theme,
-                                    );
-                                } else if !active.vt().hide_cursor()
-                                    && active.vt().scrollback() == 0
-                                {
-                                    let (col, row) = active.vt().cursor_position();
-                                    if col < term_area.width && row < term_area.height {
-                                        f.set_cursor_position(ratatui::layout::Position::new(
-                                            term_area.x + col,
-                                            term_area.y + row,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(modal) = &self.creation_modal {
-                            modal.render_modal(f.area(), f.buffer_mut(), &theme);
-                            if let Some(pos) = modal.cursor_position(f.area()) {
-                                f.set_cursor_position(pos);
-                            }
-                        }
-
-                        if let Some(setup_modal) = &self.setup_modal {
-                            render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
-                        }
-
-                        if let Some(destroy_modal) = &self.destroy_modal {
-                            render_destroy_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
-                        }
-
-                        if let Some(destroy_modal) = &self.destroy_progress_modal {
-                            render_destroy_progress_modal(
-                                destroy_modal,
-                                f.area(),
-                                f.buffer_mut(),
-                                &theme,
-                            );
-                        }
-
-                        if let Some(add_repo_modal) = &self.add_repo_modal {
-                            render_add_repo_modal(add_repo_modal, f.area(), f.buffer_mut(), &theme);
-                        }
-
-                        if let Some(add_repo_progress) = &self.add_repo_progress_modal {
-                            render_add_repo_progress_modal(
-                                add_repo_progress,
-                                f.area(),
-                                f.buffer_mut(),
-                                &theme,
-                            );
-                        }
-                    })
+                    .draw(|f| self.render_frame(f))
                     .map_err(|e| io::Error::other(e.to_string()))?;
 
                 dirty = false;
@@ -740,6 +704,92 @@ impl TuiApp {
         }
 
         Ok(())
+    }
+
+    /// Renders a single frame of the TUI, including the dashboard or active session, leader overlay, and modals.
+    pub fn render_frame(&self, f: &mut ratatui::Frame) {
+        let theme = self.config.theme();
+        let (status_area, term_area) = compute_layout(f.area());
+
+        if self.is_showing_dashboard() {
+            if let Some(dashboard) = &self.dashboard {
+                render_dashboard(
+                    dashboard,
+                    f.area(),
+                    f.buffer_mut(),
+                    &theme,
+                    self.update_notice.as_deref(),
+                );
+                if let Some(pos) = dashboard.cursor_position(f.area()) {
+                    f.set_cursor_position(pos);
+                }
+            }
+        } else {
+            f.render_widget(
+                StatusBar::new(&self.registry)
+                    .with_leader(self.leader_active)
+                    .with_update_notice(self.update_notice.as_deref())
+                    .with_notification(self.status_notification.as_deref())
+                    .with_theme(&theme),
+                status_area,
+            );
+
+            if let Some(active) = self.registry.active_session() {
+                f.render_widget(TerminalView::new(active.vt()), term_area);
+
+                if active.status() == SessionStatus::Error {
+                    render_error_banner(
+                        active.project_session.exit_code,
+                        term_area,
+                        f.buffer_mut(),
+                        &theme,
+                    );
+                } else if !self.leader_active
+                    && !active.vt().hide_cursor()
+                    && active.vt().scrollback() == 0
+                {
+                    let (col, row) = active.vt().cursor_position();
+                    if col < term_area.width && row < term_area.height {
+                        f.set_cursor_position(ratatui::layout::Position::new(
+                            term_area.x + col,
+                            term_area.y + row,
+                        ));
+                    }
+                }
+            }
+
+            if self.leader_active {
+                let overlay_area = compute_actions_overlay_area(f.area());
+                f.render_widget(ActionsOverlay::new().with_theme(&theme), overlay_area);
+            }
+        }
+
+        if let Some(modal) = &self.creation_modal {
+            modal.render_modal(f.area(), f.buffer_mut(), &theme);
+            if let Some(pos) = modal.cursor_position(f.area()) {
+                f.set_cursor_position(pos);
+            }
+        }
+
+        if let Some(setup_modal) = &self.setup_modal {
+            render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
+        }
+
+        if let Some(destroy_modal) = &self.destroy_modal {
+            render_destroy_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
+        }
+
+        if let Some(destroy_modal) = &self.destroy_progress_modal {
+            render_destroy_progress_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
+        }
+
+        if let Some(add_repo_modal) = &self.add_repo_modal {
+            render_add_repo_modal(add_repo_modal, f.area(), f.buffer_mut(), &theme);
+        }
+
+        if let Some(add_repo_progress) = &self.add_repo_progress_modal {
+            render_add_repo_progress_modal(add_repo_progress, f.area(), f.buffer_mut(), &theme);
+        }
     }
 
     /// Routes incoming raw input bytes either to active modal/dashboard event decoders or directly to PTY passthrough/leader decoder.
@@ -904,28 +954,7 @@ impl TuiApp {
     pub fn open_creation_modal(&mut self) {
         let _ = self.reload_config();
 
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        let modal = if let Some(cfg) = &self.config {
-            ProjectCreationModal::new(cfg, &cwd, None)
-        } else {
-            let fallback_cfg =
-                Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                    .unwrap_or_else(|_| Config {
-                        default_agent: "claude".to_string(),
-                        theme: "tokyo-night".to_string(),
-                        repos_dir: PathBuf::from(".botai_repos"),
-                        repos: HashMap::new(),
-                        agents: HashMap::new(),
-                        templates: HashMap::new(),
-                    });
-            ProjectCreationModal::new(&fallback_cfg, &cwd, None)
-        };
-        self.creation_modal = Some(modal);
+        self.creation_modal = Some(ProjectCreationModal::new(&self.config, &self.cwd, None));
     }
 
     /// Dispatches a key event to the creation modal and handles any triggered action.
@@ -967,27 +996,24 @@ impl TuiApp {
 
     /// Dispatches a key event to the dashboard and processes the resulting `DashboardAction`.
     pub fn handle_dashboard_key(&mut self, key: crossterm::event::KeyEvent) {
-        if let Some(mut dashboard) = self.dashboard.take() {
-            let action = dashboard.handle_key(key);
-            if self.config.as_ref() != Some(&dashboard.config) {
-                self.config = Some(dashboard.config.clone());
-                if self.config_path.is_none() && dashboard.config_path.is_some() {
-                    self.config_path = dashboard.config_path.clone();
-                }
-                self.config_last_modified = dashboard.config_last_modified;
-                self.config_file_len = dashboard.config_file_len;
-            }
-            self.dashboard = Some(dashboard);
-            self.handle_dashboard_action(action);
-        }
+        self.dispatch_to_dashboard(|dashboard| dashboard.handle_key(key));
     }
 
     /// Dispatches a mouse event to the dashboard and processes the resulting `DashboardAction`.
     pub fn handle_dashboard_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
+        self.dispatch_to_dashboard(|dashboard| dashboard.handle_mouse(mouse));
+    }
+
+    /// Runs `handler` on the dashboard, adopts any configuration it reloaded, then processes
+    /// the resulting `DashboardAction`.
+    fn dispatch_to_dashboard(
+        &mut self,
+        handler: impl FnOnce(&mut DashboardState) -> DashboardAction,
+    ) {
         if let Some(mut dashboard) = self.dashboard.take() {
-            let action = dashboard.handle_mouse(mouse);
-            if self.config.as_ref() != Some(&dashboard.config) {
-                self.config = Some(dashboard.config.clone());
+            let action = handler(&mut dashboard);
+            if self.config != dashboard.config {
+                self.config = dashboard.config.clone();
                 if self.config_path.is_none() && dashboard.config_path.is_some() {
                     self.config_path = dashboard.config_path.clone();
                 }
@@ -1008,7 +1034,6 @@ impl TuiApp {
             DashboardAction::Attach(project) => {
                 if let Some(pos) = self
                     .registry
-                    .list()
                     .iter()
                     .position(|s| s.project_name() == project)
                 {
@@ -1050,10 +1075,10 @@ impl TuiApp {
     pub fn poll_setup_progress(&mut self) -> bool {
         let mut changed = false;
         if let Some(modal) = &mut self.setup_modal {
-            let was_finished = modal.is_finished;
-            let old_logs = modal.logs.len();
-            let old_step = modal.current_step;
-            modal.tick();
+            let was_finished = modal.progress.is_finished;
+            let old_logs = modal.progress.logs.len();
+            let old_step = modal.progress.current_step;
+            modal.progress.tick();
             if !was_finished {
                 changed = true;
             }
@@ -1064,9 +1089,9 @@ impl TuiApp {
                 self.setup_modal = None;
                 self.showing_dashboard = false;
                 changed = true;
-            } else if modal.logs.len() != old_logs
-                || modal.current_step != old_step
-                || modal.is_finished != was_finished
+            } else if modal.progress.logs.len() != old_logs
+                || modal.progress.current_step != old_step
+                || modal.progress.is_finished != was_finished
             {
                 changed = true;
             }
@@ -1089,7 +1114,7 @@ impl TuiApp {
     /// Handles mouse events when the setup modal is active.
     pub fn handle_setup_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         if let Some(modal) = &mut self.setup_modal {
-            let _ = modal.handle_mouse(mouse);
+            let _ = modal.progress.handle_mouse(mouse);
         }
     }
 
@@ -1098,17 +1123,17 @@ impl TuiApp {
     pub fn poll_destroy_progress(&mut self) -> bool {
         let mut changed = false;
         if let Some(modal) = &mut self.destroy_progress_modal {
-            let was_finished = modal.is_finished;
-            let old_logs = modal.logs.len();
-            let old_step = modal.current_step;
-            modal.tick();
+            let was_finished = modal.progress.is_finished;
+            let old_logs = modal.progress.logs.len();
+            let old_step = modal.progress.current_step;
+            modal.progress.tick();
             if !was_finished {
                 changed = true;
             }
             modal.poll_events();
-            if modal.logs.len() != old_logs
-                || modal.current_step != old_step
-                || modal.is_finished != was_finished
+            if modal.progress.logs.len() != old_logs
+                || modal.progress.current_step != old_step
+                || modal.progress.is_finished != was_finished
             {
                 changed = true;
             }
@@ -1151,7 +1176,7 @@ impl TuiApp {
     /// Handles mouse events (such as scroll wheel) when the destruction progress modal is active.
     pub fn handle_destroy_progress_modal_mouse(&mut self, mouse: crossterm::event::MouseEvent) {
         if let Some(modal) = &mut self.destroy_progress_modal {
-            let _ = modal.handle_mouse(mouse);
+            let _ = modal.progress.handle_mouse(mouse);
         }
     }
 
@@ -1250,27 +1275,10 @@ impl TuiApp {
     /// Opens the Add Repository modal for an existing project directory.
     pub fn open_add_repo_modal_for_project(&mut self, project_name: &str) {
         let _ = self.reload_config();
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let project_dir = cwd.join(project_name);
+        let project_dir = self.cwd.join(project_name);
         let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
 
-        let default_config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    repos: HashMap::new(),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                });
-        let config = self.config.as_ref().unwrap_or(&default_config);
-
-        match AddRepoModalState::from_project(config, &project_dir) {
+        match AddRepoModalState::from_project(&self.config, &project_dir) {
             Ok(modal) => {
                 self.add_repo_modal = Some(modal);
             }
@@ -1289,25 +1297,9 @@ impl TuiApp {
         let modal = AddRepoProgressModalState::new(project_name, repos.clone(), rx);
         self.add_repo_progress_modal = Some(modal);
 
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let project_dir = cwd.join(project_name);
+        let project_dir = self.cwd.join(project_name);
         let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
-
-        let default_config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    repos: HashMap::new(),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                });
-        let config = self.config.clone().unwrap_or(default_config);
+        let config = self.config.clone();
 
         std::thread::spawn(move || {
             crate::tui::add_repo_progress_modal::run_add_repo_worker(
@@ -1332,11 +1324,7 @@ impl TuiApp {
         let modal = DestroyProgressModalState::new(project_name, rx);
         self.destroy_progress_modal = Some(modal);
 
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
+        let cwd = self.cwd.clone();
         let config = self.config.clone();
         let proj_name = project_name.to_string();
 
@@ -1371,13 +1359,9 @@ impl TuiApp {
             return;
         }
 
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
+        let cwd = self.cwd.clone();
         let config = self.config.clone();
-        let viewport_size = self.viewport_size.unwrap_or((100, 30));
+        let viewport_size = self.viewport();
         let tpl_name = template_name.to_string();
         let proj_name = project_name.to_string();
         let agent_owned = agent_override.map(String::from);
@@ -1402,7 +1386,6 @@ impl TuiApp {
     pub fn attach_project(&mut self, project_name: &str) -> anyhow::Result<()> {
         if let Some(pos) = self
             .registry
-            .list()
             .iter()
             .position(|s| s.project_name() == project_name)
         {
@@ -1410,44 +1393,17 @@ impl TuiApp {
             return Ok(());
         }
 
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let project_dir = cwd.join(project_name);
+        let project_dir = self.cwd.join(project_name);
 
         if !project_dir.exists() {
             anyhow::bail!("Project directory '{project_name}' does not exist in CWD");
         }
         let project_dir = dunce::canonicalize(&project_dir).unwrap_or(project_dir);
 
-        let default_config =
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .ok();
-        let config = self.config.as_ref().or(default_config.as_ref());
+        let agent_name = self.config.default_agent.as_str();
+        let (cmd, args, env_map) = self.config.agent_launch(agent_name);
 
-        let agent_name = config.map(|c| c.default_agent.as_str()).unwrap_or("claude");
-
-        let (cmd, args, env_map) = if let Some(cfg) = config {
-            if let Some(agent) = cfg.get_agent(agent_name) {
-                (agent.command.clone(), agent.args.clone(), agent.env.clone())
-            } else {
-                #[cfg(windows)]
-                let default_shell = "cmd.exe".to_string();
-                #[cfg(not(windows))]
-                let default_shell = "sh".to_string();
-                (default_shell, Vec::new(), HashMap::new())
-            }
-        } else {
-            #[cfg(windows)]
-            let default_shell = "cmd.exe".to_string();
-            #[cfg(not(windows))]
-            let default_shell = "sh".to_string();
-            (default_shell, Vec::new(), HashMap::new())
-        };
-
-        let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
+        let (cols, rows) = self.viewport();
 
         let mut pty_config = PtyConfig::new(&cmd, &project_dir)
             .with_args(args)
@@ -1473,23 +1429,9 @@ impl TuiApp {
         prompt: Option<&str>,
     ) -> anyhow::Result<()> {
         let _ = self.reload_config();
-        let config = self.config.clone().unwrap_or_else(|| {
-            Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                .unwrap_or_else(|_| Config {
-                    default_agent: "claude".to_string(),
-                    theme: "tokyo-night".to_string(),
-                    repos_dir: PathBuf::from(".botai_repos"),
-                    repos: HashMap::new(),
-                    agents: HashMap::new(),
-                    templates: HashMap::new(),
-                })
-        });
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-        let (cols, rows) = self.viewport_size.unwrap_or((100, 30));
+        let config = self.config.clone();
+        let cwd = self.cwd.clone();
+        let (cols, rows) = self.viewport();
 
         let mut builder = ProjectBuilder::new(config, template_name, project_name)
             .with_cwd(cwd)
@@ -1504,13 +1446,12 @@ impl TuiApp {
 
     /// Destroys a project directory and its worktrees, then refreshes the dashboard.
     pub fn destroy_project(&mut self, project_name: &str) -> anyhow::Result<()> {
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
-
-        crate::project::destroy_project_workspace(self.config.as_ref(), &cwd, project_name, true)?;
+        crate::project::destroy_project_workspace(
+            Some(&self.config),
+            &self.cwd,
+            project_name,
+            true,
+        )?;
 
         self.refresh_dashboard();
         Ok(())
@@ -1519,27 +1460,9 @@ impl TuiApp {
     /// Refreshes the local projects and templates list within the dashboard.
     pub fn refresh_dashboard(&mut self) {
         let _ = self.reload_config();
-        let cwd = self
-            .cwd
-            .clone()
-            .or_else(|| env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."));
         let running = self.running_sessions_map();
-        let mut new_dashboard = if let Some(cfg) = &self.config {
-            DashboardState::from_env(cfg, &cwd).with_running_sessions(running)
-        } else {
-            let default_cfg =
-                Config::load_from_str("default_agent = \"claude\"\nrepos_dir = \".botai_repos\"\n")
-                    .unwrap_or_else(|_| Config {
-                        default_agent: "claude".to_string(),
-                        theme: "tokyo-night".to_string(),
-                        repos_dir: PathBuf::from(".botai_repos"),
-                        repos: HashMap::new(),
-                        agents: HashMap::new(),
-                        templates: HashMap::new(),
-                    });
-            DashboardState::from_env(&default_cfg, &cwd).with_running_sessions(running)
-        };
+        let mut new_dashboard =
+            DashboardState::from_env(&self.config, &self.cwd).with_running_sessions(running);
         if let Some(ref path) = self.config_path {
             new_dashboard = new_dashboard.with_config_path(path.clone());
         }
@@ -1643,19 +1566,10 @@ impl TuiApp {
                 if let Some(active) = self.registry.active_session_mut() {
                     active.vt_mut().reset_scrollback();
 
-                    let bytes_to_write = if is_shift_enter(&bytes) {
-                        if active
-                            .project_session
-                            .agent_name
-                            .eq_ignore_ascii_case("agy")
-                        {
-                            b"\x1b[13;2u".to_vec()
-                        } else {
-                            b"\n".to_vec()
-                        }
-                    } else {
-                        bytes
-                    };
+                    let bytes_to_write = Self::translate_passthrough_bytes(
+                        &bytes,
+                        &active.project_session.agent_name,
+                    );
 
                     if active.pty_mut().write_all(&bytes_to_write).is_ok()
                         && active.status() != SessionStatus::Error
@@ -1665,6 +1579,24 @@ impl TuiApp {
                     }
                 }
             }
+        }
+    }
+
+    /// Translates raw passthrough bytes before writing to a child PTY.
+    ///
+    /// Normalizes Kitty CSI-u unmodified Enter sequences (\x1b[13u, \x1b[13;1u, etc.) to raw CR (`\r`).
+    /// For Shift+Enter sequences, routes multiline newline sequences appropriately based on agent name.
+    pub fn translate_passthrough_bytes(bytes: &[u8], agent_name: &str) -> Vec<u8> {
+        if is_unmodified_enter(bytes) {
+            b"\r".to_vec()
+        } else if is_shift_enter(bytes) {
+            if agent_name.eq_ignore_ascii_case("agy") {
+                b"\x1b[13;2u".to_vec()
+            } else {
+                b"\n".to_vec()
+            }
+        } else {
+            bytes.to_vec()
         }
     }
 
@@ -1683,9 +1615,10 @@ impl TuiApp {
 
         // If the active session is errored, dismiss it on Enter (\r, \n) or plain Space (when leader is inactive)
         if is_active_errored && !self.leader_active {
-            let is_dismiss = segment
-                .iter()
-                .any(|&b| b == b'\r' || b == b'\n' || b == b' ');
+            let is_dismiss = is_unmodified_enter(segment)
+                || segment
+                    .iter()
+                    .any(|&b| b == b'\r' || b == b'\n' || b == b' ');
             if is_dismiss {
                 if let Some(active) = self.registry.active_session() {
                     let id = active.id().to_string();
@@ -2109,7 +2042,7 @@ repos = []
         terminal
             .draw(|f| {
                 if let Some(modal) = &app.creation_modal {
-                    let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                    let theme = app.config.theme();
                     modal.render_modal(f.area(), f.buffer_mut(), &theme);
                     if let Some(pos) = modal.cursor_position(f.area()) {
                         f.set_cursor_position(pos);
@@ -2133,7 +2066,7 @@ repos = []
         terminal
             .draw(|f| {
                 if let Some(modal) = &app.creation_modal {
-                    let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                    let theme = app.config.theme();
                     modal.render_modal(f.area(), f.buffer_mut(), &theme);
                     if let Some(pos) = modal.cursor_position(f.area()) {
                         f.set_cursor_position(pos);
@@ -2741,7 +2674,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2899,7 +2832,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -2974,7 +2907,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -3039,7 +2972,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -3093,7 +3026,7 @@ repos = ['{}']
         while start.elapsed() < Duration::from_secs(5) {
             app.poll_destroy_progress();
             if let Some(modal) = &app.destroy_progress_modal {
-                if modal.is_finished {
+                if modal.progress.is_finished {
                     break;
                 }
             }
@@ -3259,8 +3192,8 @@ repos = ['{}']
         app.start_project_creation("ws", "active-proj", None, None, vec![]);
         assert!(app.setup_modal.is_some());
         let modal = app.setup_modal.as_ref().unwrap();
-        assert!(modal.error.is_some());
-        assert!(modal.is_finished);
+        assert!(modal.progress.error.is_some());
+        assert!(modal.progress.is_finished);
 
         // Key press other than Esc/Enter should keep modal open
         let dummy_key = crossterm::event::KeyEvent::new(
@@ -3562,7 +3495,7 @@ repos = ['{}']
         let (_tx, rx) = std::sync::mpsc::channel();
         let mut modal = SetupModalState::new("proj-modal", "tpl", None, rx);
         for i in 1..=10 {
-            modal.logs.push(format!("log {i}"));
+            modal.progress.logs.push(format!("log {i}"));
         }
         app.setup_modal = Some(modal);
 
@@ -3573,7 +3506,7 @@ repos = ['{}']
             modifiers: KeyModifiers::empty(),
         };
         app.handle_setup_modal_mouse(scroll_up);
-        assert_eq!(app.setup_modal.as_ref().unwrap().scroll_offset, 3);
+        assert_eq!(app.setup_modal.as_ref().unwrap().progress.scroll_offset, 3);
     }
 
     #[test]
@@ -3831,6 +3764,68 @@ repos = []
 
         // Send \r to dismiss
         app.handle_raw_bytes(b"\r");
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_errored_session_dismissal_csi_u_enter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 1"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 1"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-err-csiu", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
+        assert_eq!(app.registry.len(), 1);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Error
+        );
+
+        // CSI-u unmodified Enter (\x1b[13u) dismisses an active errored session
+        app.handle_raw_bytes(b"\x1b[13u");
+        assert_eq!(app.registry.len(), 0);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_tui_app_process_non_mouse_bytes_errored_session_dismissal_csi_u_enter() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "exit 1"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "exit 1"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let ps = ProjectSession::new("proj-err-pnm", "ws", "mock");
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        wait_for(&mut app, |a| {
+            a.registry
+                .active_session()
+                .is_some_and(|s| s.status() == SessionStatus::Error)
+        });
+        assert_eq!(app.registry.len(), 1);
+
+        // process_non_mouse_bytes returns true when dismissing active errored session with CSI-u Enter
+        assert!(app.process_non_mouse_bytes(b"\x1b[13u"));
         assert_eq!(app.registry.len(), 0);
         assert!(app.should_quit);
     }
@@ -4257,7 +4252,7 @@ repos = []
             dashboard.templates,
             vec!["added_template".to_string(), "initial_template".to_string()]
         );
-        let app_cfg = app.config.as_ref().expect("app config must exist");
+        let app_cfg = &app.config;
         assert!(app_cfg.templates.contains_key("added_template"));
         assert!(app_cfg.templates.contains_key("initial_template"));
     }
@@ -4539,5 +4534,205 @@ repos = ["repo-a", "repo-b"]
         // Dismiss notice with Enter
         app.handle_add_repo_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.add_repo_modal.is_none());
+    }
+
+    #[test]
+    fn test_translate_passthrough_bytes_unmodified_enter() {
+        // Kitty CSI-u unmodified Enter sequences normalized to \r
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;1:1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10;1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10;1:1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[10u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[10;1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[10;1:1u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;65u", "claude"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;129u", "claude"),
+            b"\r".to_vec()
+        );
+
+        // Same normalization regardless of agent
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13u", "agy"),
+            b"\r".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;1u", "agy"),
+            b"\r".to_vec()
+        );
+
+        // Raw CR remains \r
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\r", "claude"),
+            b"\r".to_vec()
+        );
+
+        // Regular commands / bytes passed through untouched
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"cargo test\r", "claude"),
+            b"cargo test\r".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_translate_passthrough_bytes_shift_enter() {
+        // Claude / default agents get \n
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;2u", "claude"),
+            b"\n".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10;2u", "claude"),
+            b"\n".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[27;2;13~", "claude"),
+            b"\n".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;2u", "copilot"),
+            b"\n".to_vec()
+        );
+
+        // Agy agent gets \x1b[13;2u
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13;2u", "agy"),
+            b"\x1b[13;2u".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[13:10;2u", "agy"),
+            b"\x1b[13;2u".to_vec()
+        );
+        assert_eq!(
+            TuiApp::translate_passthrough_bytes(b"\x1b[27;2;13~", "agy"),
+            b"\x1b[13;2u".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_tui_app_handle_raw_bytes_unmodified_enter_normalization() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let mut registry = SessionRegistry::new();
+        let config = PtyConfig::new(cmd, tmp.path()).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let mut ps = ProjectSession::new("test-unmodified-enter", "ws", "claude");
+        ps.set_status(SessionStatus::WaitingForInput);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+
+        // 1. \x1b[13u triggers passthrough and marks busy
+        app.handle_raw_bytes(b"\x1b[13u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 2. \x1b[13;1u triggers passthrough and marks busy
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(b"\x1b[13;1u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 3. \x1b[13:10;1u triggers passthrough and marks busy
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(b"\x1b[13:10;1u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+
+        // 4. \x1b[10u triggers passthrough and marks busy
+        app.registry
+            .active_session_mut()
+            .unwrap()
+            .project_session
+            .set_status(SessionStatus::WaitingForInput);
+        app.handle_raw_bytes(b"\x1b[10u");
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::Busy
+        );
+    }
+
+    #[test]
+    fn test_poll_update_check_sets_notice_once() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(Some(rx));
+
+        assert!(!app.poll_update_check());
+        assert!(app.update_rx.is_some());
+
+        tx.send(UpdateStatus {
+            current: "v0.1.0".into(),
+            latest: "v0.2.0".into(),
+        })
+        .unwrap();
+        assert!(app.poll_update_check());
+        assert_eq!(
+            app.update_notice.as_deref(),
+            Some("update v0.2.0 available: botai update")
+        );
+        assert!(app.update_rx.is_none());
+        assert!(!app.poll_update_check());
+    }
+
+    #[test]
+    fn test_poll_update_check_ignores_disconnect() {
+        let (tx, rx) = std::sync::mpsc::channel::<UpdateStatus>();
+        let mut app = TuiApp::new(SessionRegistry::new()).with_update_check(Some(rx));
+        drop(tx);
+        assert!(!app.poll_update_check());
+        assert!(app.update_rx.is_none());
+        assert!(app.update_notice.is_none());
     }
 }

@@ -62,6 +62,28 @@ pub fn compute_layout(area: Rect) -> (Rect, Rect) {
     (status_area, terminal_area)
 }
 
+/// Computes the 1-row overlay area immediately underneath the status bar for leader actions.
+///
+/// Falls back to row 0 when the terminal has only 1 row, and returns `Rect::default()` for zero-sized areas.
+pub fn compute_actions_overlay_area(area: Rect) -> Rect {
+    if area.height == 0 || area.width == 0 {
+        return Rect::default();
+    }
+
+    let y = if area.height > STATUS_BAR_HEIGHT {
+        area.y.saturating_add(STATUS_BAR_HEIGHT)
+    } else {
+        area.y
+    };
+
+    Rect {
+        x: area.x,
+        y,
+        width: area.width,
+        height: 1,
+    }
+}
+
 /// A Ratatui widget that renders a `VtScreen` grid into the terminal buffer.
 pub struct TerminalView<'a> {
     vt: &'a VtScreen,
@@ -184,6 +206,38 @@ mod tests {
         let (zero_status, zero_term) = compute_layout(Rect::new(0, 0, 0, 0));
         assert_eq!(zero_status, Rect::default());
         assert_eq!(zero_term, Rect::default());
+    }
+
+    #[test]
+    fn test_compute_actions_overlay_area() {
+        // Standard terminal: row 1 immediately below row 0 status bar
+        assert_eq!(
+            compute_actions_overlay_area(Rect::new(0, 0, 80, 24)),
+            Rect::new(0, 1, 80, 1)
+        );
+        // Non-zero origin offset
+        assert_eq!(
+            compute_actions_overlay_area(Rect::new(4, 2, 60, 10)),
+            Rect::new(4, 3, 60, 1)
+        );
+        // 1-row terminal fallback: overlays row 0
+        assert_eq!(
+            compute_actions_overlay_area(Rect::new(0, 0, 80, 1)),
+            Rect::new(0, 0, 80, 1)
+        );
+        // Zero-size guards
+        assert_eq!(
+            compute_actions_overlay_area(Rect::new(0, 0, 0, 0)),
+            Rect::default()
+        );
+        assert_eq!(
+            compute_actions_overlay_area(Rect::new(0, 0, 80, 0)),
+            Rect::default()
+        );
+        assert_eq!(
+            compute_actions_overlay_area(Rect::new(0, 0, 0, 24)),
+            Rect::default()
+        );
     }
 
     #[test]

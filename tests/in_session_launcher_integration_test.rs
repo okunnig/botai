@@ -115,7 +115,7 @@ repos = ['{repo_path_str}']
     terminal
         .draw(|f| {
             if let Some(m) = &app.creation_modal {
-                let theme = app.config.as_ref().map(|c| c.theme()).unwrap_or_default();
+                let theme = app.config.theme();
                 m.render_modal(f.area(), f.buffer_mut(), &theme);
             }
         })
