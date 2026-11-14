@@ -313,6 +313,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Dynamic Viewport & Responsive Resizing**:
   - Automatically synchronizes PTY dimensions and VT virtual screen buffers to the host terminal viewport on initial startup, on window resize events (`Event::Resize`), and when creating or switching active project sessions.
   - Propagates window size changes (`SIGWINCH` / `ResizePseudoConsole`) so full-screen interactive agent CLIs (`agy`, `claude`, `aider`, etc.) dynamically re-render to the exact available terminal dimensions.
+  - **Non-Zero Dimension Boundary Invariant (`VtScreen`)**: `VtScreen::new` and `VtScreen::with_scrollback` clamp zero `cols` or `rows` dimensions to `1` (`NonZeroU16::MIN`), while `VtScreen::resize` treats zero-width or zero-height resizes as safe no-ops—staying synchronized with `PtySession::resize` (which rejects zero dimensions) and preventing panics when the host terminal viewport height or width collapses.
 - **Hardware Cursor Positioning & Visibility**:
   - Accurately tracks cursor coordinates and visibility state (`\x1b[?25h` / `\x1b[?25l`) from the active session's VT parser.
   - Positions the terminal hardware cursor directly at the active input position during interactive sessions, rendering the native block cursor where user input is focused when at live scrollback position.
