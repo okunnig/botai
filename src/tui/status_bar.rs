@@ -238,10 +238,49 @@ pub fn compute_visible_tab_range(
     (start, end)
 }
 
+/// Picks the right-hand content of a bar: `notice | hints[0]` first, then each of `hints` alone,
+/// returning the first that fits beside `left_width` columns, with its width.
+///
+/// The notice is dropped before the hints shrink.
+pub(crate) fn fit_hints<'a>(
+    notice: Option<&'a str>,
+    hints: &[&'a str],
+    left_width: u16,
+    width: u16,
+    theme: &Theme,
+) -> Option<(Line<'a>, u16)> {
+    const SEP: &str = " | ";
+    let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
+    let fits = |w: usize| usize::from(left_width) + w + 2 <= usize::from(width);
+    let text_width = |s: &str| s.chars().count();
+
+    if let (Some(notice), Some(first)) = (notice, hints.first()) {
+        let w = text_width(notice) + SEP.len() + text_width(first);
+        if fits(w) {
+            let notice_style = Style::default()
+                .fg(theme.status_waiting)
+                .bg(theme.status_bar_bg)
+                .add_modifier(Modifier::BOLD);
+            let line = Line::from(vec![
+                Span::styled(notice, notice_style),
+                Span::styled(SEP, hint_style),
+                Span::styled(*first, hint_style),
+            ]);
+            return Some((line, w as u16));
+        }
+    }
+    hints
+        .iter()
+        .map(|h| (*h, text_width(h)))
+        .find(|(_, w)| fits(*w))
+        .map(|(h, w)| (Line::from(Span::styled(h, hint_style)), w as u16))
+}
+
 /// Status bar widget displaying active project tabs, agent status badges, and multiplexer hotkeys.
 pub struct StatusBar<'a> {
     registry: &'a SessionRegistry,
     leader_active: bool,
+    update_notice: Option<&'a str>,
     theme: Option<&'a Theme>,
 }
 
@@ -251,8 +290,15 @@ impl<'a> StatusBar<'a> {
         Self {
             registry,
             leader_active: false,
+            update_notice: None,
             theme: None,
         }
+    }
+
+    /// Configures the update notice shown before the hint when there is room.
+    pub fn with_update_notice(mut self, notice: Option<&'a str>) -> Self {
+        self.update_notice = notice;
+        self
     }
 
     /// Configures whether leader mode is actively displayed on the status bar.
@@ -431,6 +477,18 @@ impl<'a> StatusBar<'a> {
         area: Rect,
         buf: &mut Buffer,
     ) {
+        Self::render_with_notice(registry, leader_active, None, theme, area, buf);
+    }
+
+    /// Renders the status bar, showing `update_notice` beside the hint when it fits.
+    fn render_with_notice(
+        registry: &SessionRegistry,
+        leader_active: bool,
+        update_notice: Option<&str>,
+        theme: &Theme,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -493,24 +551,21 @@ impl<'a> StatusBar<'a> {
 
             top_bar.render_to_buffer(area, buf);
         } else {
-            let hint = "Ctrl+Space: Actions";
-            let hint_len = hint.chars().count() as u16;
-            let needed_hint_width = hint_len + 1;
-
             let full_tabs_line = Self::build_tabs_line(sessions, active_idx, area.width, theme);
             let full_tabs_width = full_tabs_line.width() as u16;
+            let right = fit_hints(
+                update_notice,
+                &["Ctrl+Space: Actions"],
+                full_tabs_width,
+                area.width,
+                theme,
+            );
 
-            if area.width > full_tabs_width + needed_hint_width {
-                let hint_style = Style::default().fg(theme.key_hint).bg(theme.status_bar_bg);
-                let hint_line = Line::from(Span::styled(hint, hint_style));
-                let top_bar = TopBar::new(full_tabs_line)
-                    .with_theme(theme)
-                    .with_right_and_padding(hint_line, hint_len, true);
-                top_bar.render_to_buffer(area, buf);
-            } else {
-                let top_bar = TopBar::new(full_tabs_line).with_theme(theme);
-                top_bar.render_to_buffer(area, buf);
+            let mut top_bar = TopBar::new(full_tabs_line).with_theme(theme);
+            if let Some((line, len)) = right {
+                top_bar = top_bar.with_right_and_padding(line, len, true);
             }
+            top_bar.render_to_buffer(area, buf);
         }
     }
 }
@@ -519,7 +574,14 @@ impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        Self::render_to_buffer_with_theme(self.registry, self.leader_active, theme, area, buf);
+        Self::render_with_notice(
+            self.registry,
+            self.leader_active,
+            self.update_notice,
+            theme,
+            area,
+            buf,
+        );
     }
 }
 
@@ -527,7 +589,14 @@ impl<'a> Widget for &StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        StatusBar::render_to_buffer_with_theme(self.registry, self.leader_active, theme, area, buf);
+        StatusBar::render_with_notice(
+            self.registry,
+            self.leader_active,
+            self.update_notice,
+            theme,
+            area,
+            buf,
+        );
     }
 }
 
@@ -1264,5 +1333,37 @@ mod tests {
         assert!(no_tpl_tab.chars().count() <= MAX_TAB_WIDTH);
         assert!(!no_tpl_tab.contains('[') && !no_tpl_tab.contains(']'));
         assert!(no_tpl_tab.contains('…'));
+    }
+
+    #[test]
+    fn test_status_bar_update_notice_shown_when_it_fits() {
+        let mut registry = SessionRegistry::new();
+        let (ps, pty, vt) =
+            create_test_session_with_status("proj", "tpl", "claude", SessionStatus::Busy);
+        registry.add(ps, pty, vt).unwrap();
+        let theme = Theme::tokyo_night();
+        let notice = "update v9.0.0 available: botai update";
+
+        let render = |width: u16| {
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            StatusBar::new(&registry)
+                .with_update_notice(Some(notice))
+                .with_theme(&theme)
+                .render(area, &mut buffer);
+            buffer
+                .content()
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        };
+
+        let wide = render(120);
+        assert!(wide.contains(notice), "{wide}");
+        assert!(wide.contains("Ctrl+Space: Actions"), "{wide}");
+
+        let narrow = render(50);
+        assert!(!narrow.contains("update v9.0.0"), "{narrow}");
+        assert!(narrow.contains("Ctrl+Space: Actions"), "{narrow}");
     }
 }

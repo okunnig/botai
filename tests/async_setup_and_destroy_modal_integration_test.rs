@@ -73,7 +73,7 @@ fn test_integration_destroy_confirmation_modal_lifecycle() {
     let area = Rect::new(0, 0, 100, 30);
     let mut buf = Buffer::empty(area);
     let theme = Theme::default();
-    botai::tui::render_dashboard(&state, area, &mut buf, &theme);
+    botai::tui::render_dashboard(&state, area, &mut buf, &theme, None);
     let rendered = buf
         .content()
         .iter()

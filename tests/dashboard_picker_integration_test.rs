@@ -184,7 +184,7 @@ repos = ["/repos/spark-jobs", "/repos/kafka-streams"]
     let theme = config.theme();
     terminal
         .draw(|f| {
-            render_dashboard(&state, f.area(), f.buffer_mut(), &theme);
+            render_dashboard(&state, f.area(), f.buffer_mut(), &theme, None);
         })
         .expect("Failed to draw frame with modal");
 
@@ -470,7 +470,7 @@ repos = []
 
     terminal
         .draw(|f| {
-            render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme);
+            render_dashboard(dashboard, f.area(), f.buffer_mut(), &theme, None);
         })
         .unwrap();
 

@@ -3,36 +3,55 @@
 use anyhow::{bail, Context, Result};
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 
 use botai::cli::{resolve_cli_selected_repos, Cli, Commands};
-use botai::config::Config;
+use botai::config::{Config, UpdateConfig};
 use botai::project::{ProjectBuilder, ProjectSetupEvent};
 use botai::session::{
     ProjectSession, PtyConfig, PtySession, SessionRegistry, VtScreen, DEFAULT_VIEWPORT,
 };
 use botai::tui::{DashboardState, TuiApp};
 
+const NO_CONFIG_DIR: &str =
+    "Could not determine default configuration directory. Please specify --config <FILE>.";
+
 fn main() -> Result<()> {
     botai::tui::install_panic_hook();
     let cli = Cli::parse_args();
+    let show_notice = cli
+        .command
+        .as_ref()
+        .is_some_and(Commands::shows_cli_update_notice);
+    let config_override = cli.config.clone();
 
-    if let Some(Commands::Init { force, stdout }) = cli.command {
-        return cmd_init(cli.config.as_deref(), force, stdout);
+    let loaded = run(cli)?;
+    if show_notice {
+        print_cached_update_notice(loaded, config_override.as_deref());
     }
+    Ok(())
+}
 
-    if let Some(Commands::Edit { editor }) = cli.command {
-        return cmd_edit(cli.config.as_deref(), editor.as_deref());
-    }
-
-    let config_path = match cli.config {
-        Some(path) => path,
-        None => Config::default_path().context(
-            "Could not determine default configuration directory. Please specify --config <FILE>.",
-        )?,
+/// Dispatches the parsed command, returning the `[update]` settings when the config was loaded.
+fn run(cli: Cli) -> Result<Option<UpdateConfig>> {
+    let command = match cli.command {
+        Some(Commands::Init { force, stdout }) => {
+            return cmd_init(cli.config.as_deref(), force, stdout).map(|()| None)
+        }
+        Some(Commands::Edit { editor }) => {
+            return cmd_edit(cli.config.as_deref(), editor.as_deref()).map(|()| None)
+        }
+        // Before config load so a broken config cannot block an update.
+        Some(Commands::Update {
+            check,
+            version,
+            pre,
+        }) => return cmd_update(check, version, pre).map(|()| None),
+        other => other,
     };
 
+    let config_path = Config::resolve_path(cli.config.as_deref()).context(NO_CONFIG_DIR)?;
     let config = if config_path.exists() {
         Config::load_from_file(&config_path)
             .with_context(|| format!("Failed to load configuration from {config_path:?}"))?
@@ -40,9 +59,11 @@ fn main() -> Result<()> {
         Config::default()
     };
 
-    match cli.command {
+    let result = match command {
         None => run_default_dashboard(&config, &config_path),
-        Some(Commands::Init { .. }) | Some(Commands::Edit { .. }) => unreachable!(),
+        Some(Commands::Init { .. })
+        | Some(Commands::Edit { .. })
+        | Some(Commands::Update { .. }) => unreachable!(),
         Some(Commands::Create {
             template,
             project,
@@ -74,6 +95,36 @@ fn main() -> Result<()> {
         Some(Commands::Attach { project }) => cmd_attach(&config, &project),
         Some(Commands::List) => cmd_list(&config),
         Some(Commands::Destroy { project, force }) => cmd_destroy(Some(&config), &project, force),
+    };
+    result.map(|()| Some(config.update))
+}
+
+/// Prints one stderr line when the cached startup check knows of a newer release.
+///
+/// Never touches the network: a background check would be killed when a short command exits.
+/// `loaded` is `None` for commands that run before config load; the config is then read
+/// best-effort, and only after the stderr check passes.
+fn print_cached_update_notice(loaded: Option<UpdateConfig>, config_override: Option<&Path>) {
+    use botai::update::{self, cache, version};
+
+    if !io::stderr().is_terminal() {
+        return;
+    }
+    let config = loaded.unwrap_or_else(|| {
+        Config::resolve_path(config_override)
+            .and_then(|path| Config::load_from_file(path).ok())
+            .map(|config| config.update)
+            .unwrap_or_default()
+    });
+    let current = version::current();
+    if !update::startup_check_enabled(current, &config, |k| env::var(k).ok()) {
+        return;
+    }
+    let Some(path) = cache::default_path() else {
+        return;
+    };
+    if let Some(status) = update::cached_update(current, cache::read(&path).as_ref()) {
+        eprintln!("{}", update::cli_notice_text(&status));
     }
 }
 
@@ -84,12 +135,7 @@ fn cmd_init(config_override: Option<&Path>, force: bool, stdout: bool) -> Result
         return Ok(());
     }
 
-    let target_path = match config_override {
-        Some(path) => path.to_path_buf(),
-        None => Config::default_path().context(
-            "Could not determine default configuration directory. Please specify --config <FILE>.",
-        )?,
-    };
+    let target_path = Config::resolve_path(config_override).context(NO_CONFIG_DIR)?;
 
     Config::init_file(&target_path, force)
         .with_context(|| format!("Failed to initialize configuration at {target_path:?}"))?;
@@ -100,12 +146,7 @@ fn cmd_init(config_override: Option<&Path>, force: bool, stdout: bool) -> Result
 
 /// `botai edit [--editor <cmd>]`
 fn cmd_edit(config_override: Option<&Path>, editor_override: Option<&str>) -> Result<()> {
-    let target_path = match config_override {
-        Some(path) => path.to_path_buf(),
-        None => Config::default_path().context(
-            "Could not determine default configuration directory. Please specify --config <FILE>.",
-        )?,
-    };
+    let target_path = Config::resolve_path(config_override).context(NO_CONFIG_DIR)?;
 
     if !target_path.exists() {
         Config::init_file(&target_path, false)
@@ -122,6 +163,45 @@ fn cmd_edit(config_override: Option<&Path>, editor_override: Option<&str>) -> Re
         std::process::exit(exit_code);
     }
 
+    Ok(())
+}
+
+/// `botai update [--check] [--version <TAG>] [--pre]`
+fn cmd_update(check: bool, tag: Option<String>, pre: bool) -> Result<()> {
+    use botai::update::{self, version, Client, ReleaseQuery};
+
+    let current = version::current();
+    let client = Client::from_env(update::UPDATE_COMMAND_TIMEOUT);
+    let query = match (tag, pre) {
+        (Some(tag), _) => ReleaseQuery::Tag(tag),
+        (None, true) => ReleaseQuery::LatestIncludingPrerelease,
+        (None, false) => ReleaseQuery::Latest,
+    };
+
+    if check {
+        let status = update::check_latest(&client, &query, current)?;
+        println!("Current version: {current}");
+        println!("Latest version:  {}", status.latest);
+        if status.update_available() {
+            println!("Update available. Run `botai update` to install it.");
+        } else {
+            println!("botai is up to date.");
+        }
+        return Ok(());
+    }
+
+    let target = update::install::current_exe()?;
+    let Some(release) = update::release_to_install(&client, &query, current)? else {
+        println!("botai {current} is already up to date.");
+        return Ok(());
+    };
+    if !version::is_release_build(current) {
+        eprintln!(
+            "warning: botai {current} is a source build; `botai update` replaces it with the prebuilt release binary."
+        );
+    }
+    let to = update::install_release(&client, release, &target)?;
+    println!("Updated botai {current} -> {to}");
     Ok(())
 }
 
@@ -191,7 +271,8 @@ fn run_default_dashboard(config: &Config, config_path: &Path) -> Result<()> {
         .with_dashboard(dashboard)
         .with_config(config.clone())
         .with_config_path(config_path)
-        .with_cwd(cwd);
+        .with_cwd(cwd)
+        .with_update_check(botai::update::spawn_startup_check(&config.update));
     let mut stdout = io::stdout();
     app.run(&mut stdout)?;
     Ok(())
@@ -345,7 +426,8 @@ fn run_tui(
 
     let mut app = TuiApp::new(registry)
         .with_config(config.clone())
-        .with_cwd(cwd);
+        .with_cwd(cwd)
+        .with_update_check(botai::update::spawn_startup_check(&config.update));
     let mut stdout = io::stdout();
     app.run(&mut stdout)?;
 
