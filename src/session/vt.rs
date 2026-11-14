@@ -1,3 +1,4 @@
+use std::num::NonZeroU16;
 use vt100::Parser;
 
 /// Device Status Report queries and their replies.
@@ -85,6 +86,11 @@ pub struct VtCell {
     pub inverse: bool,
 }
 
+/// Clamps a terminal dimension (`cols` or `rows`) to at least `1` for `vt100` `NonZeroU16` invariants.
+fn clamp_dim(dim: u16) -> NonZeroU16 {
+    NonZeroU16::new(dim).unwrap_or(NonZeroU16::MIN)
+}
+
 /// An in-memory virtual terminal screen backed by a VT100 / ANSI escape sequence parser.
 pub struct VtScreen {
     parser: Parser,
@@ -94,17 +100,15 @@ impl VtScreen {
     /// Default scrollback buffer length (in lines).
     pub const DEFAULT_SCROLLBACK: usize = 1000;
 
-    /// Creates a new virtual screen with the specified column and row dimensions.
+    /// Creates a new virtual screen with the specified column and row dimensions (clamping `0` to `1`).
     pub fn new(cols: u16, rows: u16) -> Self {
-        Self {
-            parser: Parser::new(rows, cols, Self::DEFAULT_SCROLLBACK),
-        }
+        Self::with_scrollback(cols, rows, Self::DEFAULT_SCROLLBACK)
     }
 
-    /// Creates a new virtual screen with custom scrollback history length.
+    /// Creates a new virtual screen with custom scrollback history length (clamping `0` dimensions to `1`).
     pub fn with_scrollback(cols: u16, rows: u16, scrollback: usize) -> Self {
         Self {
-            parser: Parser::new(rows, cols, scrollback),
+            parser: Parser::new(clamp_dim(rows), clamp_dim(cols), scrollback),
         }
     }
 
@@ -114,8 +118,13 @@ impl VtScreen {
     }
 
     /// Resizes the virtual terminal grid to the new column and row dimensions.
+    ///
+    /// Ignores zero-width or zero-height requests as a safe no-op.
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.parser.screen_mut().set_size(rows, cols);
+        let (Some(rows), Some(cols)) = (NonZeroU16::new(rows), NonZeroU16::new(cols)) else {
+            return;
+        };
+        self.parser.set_size(rows, cols);
     }
 
     /// Returns the plain text contents of the screen grid, with trailing whitespace trimmed per row.
@@ -125,7 +134,7 @@ impl VtScreen {
 
     /// Returns formatted contents including ANSI formatting sequences.
     pub fn contents_formatted(&self) -> String {
-        String::from_utf8_lossy(&self.parser.screen().contents_formatted()).to_string()
+        self.parser.screen().contents_formatted()
     }
 
     /// Returns the current cursor position as `(col, row)` (0-indexed).
@@ -142,17 +151,17 @@ impl VtScreen {
     /// Returns the screen dimensions as `(cols, rows)`.
     pub fn size(&self) -> (u16, u16) {
         let (rows, cols) = self.parser.screen().size();
-        (cols, rows)
+        (cols.get(), rows.get())
     }
 
     /// Returns the number of columns in the screen grid.
     pub fn cols(&self) -> u16 {
-        self.parser.screen().size().1
+        self.parser.screen().size().1.get()
     }
 
     /// Returns the number of rows in the screen grid.
     pub fn rows(&self) -> u16 {
-        self.parser.screen().size().0
+        self.parser.screen().size().0.get()
     }
 
     /// Returns a reference to the underlying `vt100::Screen` for zero-allocation rendering and inspection.
@@ -311,9 +320,121 @@ mod tests {
         let mut screen = VtScreen::new(80, 24);
         screen.process(b"ZeroAlloc");
         let vt100_screen = screen.screen();
-        assert_eq!(vt100_screen.size(), (24, 80));
+        assert_eq!(
+            vt100_screen.size(),
+            (
+                NonZeroU16::new(24).expect("24 is non-zero"),
+                NonZeroU16::new(80).expect("80 is non-zero"),
+            )
+        );
         let cell = vt100_screen.cell(0, 0).expect("Expected cell at 0,0");
         assert_eq!(cell.contents(), "Z");
+    }
+
+    #[test]
+    fn test_vt_screen_zero_dimension_construction_clamps_to_one() {
+        let s00 = VtScreen::new(0, 0);
+        assert_eq!(s00.size(), (1, 1));
+        assert_eq!(s00.cols(), 1);
+        assert_eq!(s00.rows(), 1);
+
+        let s0_24 = VtScreen::new(0, 24);
+        assert_eq!(s0_24.size(), (1, 24));
+        assert_eq!(s0_24.cols(), 1);
+        assert_eq!(s0_24.rows(), 24);
+
+        let s80_0 = VtScreen::new(80, 0);
+        assert_eq!(s80_0.size(), (80, 1));
+        assert_eq!(s80_0.cols(), 80);
+        assert_eq!(s80_0.rows(), 1);
+
+        let mut s_sb = VtScreen::with_scrollback(0, 0, 10);
+        assert_eq!(s_sb.size(), (1, 1));
+        s_sb.process(b"A");
+        assert_eq!(s_sb.contents(), "A");
+    }
+
+    #[test]
+    fn test_vt_screen_zero_dimension_resize_is_noop() {
+        let mut screen = VtScreen::new(80, 24);
+        screen.process(b"Preserved output");
+
+        screen.resize(0, 24);
+        assert_eq!(screen.size(), (80, 24));
+        assert!(screen.contents().contains("Preserved output"));
+
+        screen.resize(80, 0);
+        assert_eq!(screen.size(), (80, 24));
+        assert!(screen.contents().contains("Preserved output"));
+
+        screen.resize(0, 0);
+        assert_eq!(screen.size(), (80, 24));
+        assert!(screen.contents().contains("Preserved output"));
+    }
+
+    #[test]
+    fn test_vt_screen_contents_formatted_contains_ansi_styling_and_text() {
+        let mut screen = VtScreen::new(80, 24);
+        screen.process(b"\x1b[1;31mBoldRed\x1b[0m Plain");
+
+        let formatted: String = screen.contents_formatted();
+        assert!(!formatted.is_empty());
+        assert!(
+            formatted.contains("\x1b["),
+            "Expected ANSI CSI sequence in formatted output: {formatted:?}"
+        );
+        assert!(
+            formatted.contains("31"),
+            "Expected red foreground SGR parameter in formatted output: {formatted:?}"
+        );
+        assert!(
+            formatted.contains("BoldRed"),
+            "Expected styled text in formatted output: {formatted:?}"
+        );
+        assert!(
+            formatted.contains("Plain"),
+            "Expected plain text in formatted output: {formatted:?}"
+        );
+    }
+
+    #[test]
+    fn test_vt_screen_resize_preserves_scrollback_and_grid_integrity() {
+        let mut screen = VtScreen::with_scrollback(80, 10, 100);
+        for i in 1..10 {
+            screen.process(format!("Line {i}\r\n").as_bytes());
+        }
+        screen.process(b"Line 10");
+
+        assert!(screen.contents().contains("Line 1"));
+        assert!(screen.contents().contains("Line 10"));
+
+        // Shrink height: top rows should move into scrollback while bottom stays visible.
+        screen.resize(80, 5);
+        assert_eq!(screen.size(), (80, 5));
+        let shrunk = screen.contents();
+        assert!(shrunk.contains("Line 6"), "shrunk view: {shrunk:?}");
+        assert!(shrunk.contains("Line 10"), "shrunk view: {shrunk:?}");
+        assert!(!shrunk.contains("Line 1\n"), "shrunk view: {shrunk:?}");
+
+        screen.scroll_up(5);
+        assert_eq!(screen.scrollback(), 5);
+        assert!(screen.contents().contains("Line 1"));
+        screen.reset_scrollback();
+        assert_eq!(screen.scrollback(), 0);
+
+        // Grow height back: scrollback rows are pulled back into the active grid.
+        screen.resize(80, 10);
+        assert_eq!(screen.size(), (80, 10));
+        let grown = screen.contents();
+        assert!(grown.contains("Line 1"), "grown view: {grown:?}");
+        assert!(grown.contains("Line 10"), "grown view: {grown:?}");
+
+        // Grow beyond original height: grid stays intact without losing rows.
+        screen.resize(80, 15);
+        assert_eq!(screen.size(), (80, 15));
+        let taller = screen.contents();
+        assert!(taller.contains("Line 1"), "taller view: {taller:?}");
+        assert!(taller.contains("Line 10"), "taller view: {taller:?}");
     }
 
     #[test]
