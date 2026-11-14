@@ -354,7 +354,7 @@ fn is_enter_codepoint(param: Option<&str>) -> bool {
 
 fn codepoint_to_keycode(cp: u32, modifiers: KeyModifiers) -> KeyCode {
     match cp {
-        13 => KeyCode::Enter,
+        10 | 13 => KeyCode::Enter,
         9 => {
             if modifiers.contains(KeyModifiers::SHIFT) {
                 KeyCode::BackTab
@@ -473,6 +473,24 @@ pub fn is_incomplete_sgr_mouse(bytes: &[u8]) -> bool {
     rest.iter().all(|&b| b.is_ascii_digit() || b == b';')
 }
 
+/// Returns the index of the CSI final byte in `rest` (the bytes after `\x1b[`), per ECMA-48:
+/// parameter bytes 0x30-0x3F, then intermediate bytes 0x20-0x2F, then one final byte 0x40-0x7E.
+/// Returns `None` if the sequence is incomplete or malformed.
+fn csi_final_byte_pos(rest: &[u8]) -> Option<usize> {
+    let params = rest
+        .iter()
+        .take_while(|b| (0x30..=0x3f).contains(*b))
+        .count();
+    let intermediates = rest[params..]
+        .iter()
+        .take_while(|b| (0x20..=0x2f).contains(*b))
+        .count();
+    let pos = params + intermediates;
+    rest.get(pos)
+        .filter(|b| (0x40..=0x7e).contains(*b))
+        .map(|_| pos)
+}
+
 /// Decodes raw input bytes into a sequence of crossterm `Event`s (Key, Paste, Mouse)
 /// for consumption by modal dialogues and the dashboard.
 pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
@@ -505,6 +523,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
         // 3. CSI sequences starting with \x1b[
         if bytes[i..].starts_with(b"\x1b[") {
             let rest = &bytes[i + 2..];
+            let final_pos = csi_final_byte_pos(rest);
 
             // BackTab: \x1b[Z
             if rest.starts_with(b"Z") {
@@ -523,7 +542,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             // \x1b[5~ (PageUp), \x1b[6~ (PageDown), \x1b[7~ (Home), \x1b[8~ (End),
             // \x1b[15~ (F5), \x1b[17~ (F6), \x1b[18~ (F7), \x1b[19~ (F8), \x1b[20~ (F9), \x1b[21~ (F10), \x1b[23~ (F11), \x1b[24~ (F12)
             // modifyOtherKeys format: \x1b[27;<mod>;<codepoint>~
-            if let Some(tilde_pos) = rest.iter().position(|&b| b == b'~') {
+            if let Some(tilde_pos) = final_pos.filter(|&p| rest[p] == b'~') {
                 if let Some(parts) = csi_split(&rest[..tilde_pos]) {
                     if parts.len() == 3 && csi_param(&parts, 0) == Some("27") {
                         let modifiers = csi_modifiers(&parts, 1);
@@ -566,7 +585,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             }
 
             // CSI-u modified key format: \x1b[<codepoint>;<mod>u or \x1b[<codepoint>u
-            if let Some(u_pos) = rest.iter().position(|&b| b == b'u') {
+            if let Some(u_pos) = final_pos.filter(|&p| rest[p] == b'u') {
                 if let Some(parts) = csi_split(&rest[..u_pos]) {
                     let modifiers = csi_modifiers(&parts, 1);
 
@@ -587,7 +606,7 @@ pub fn parse_raw_events(bytes: &[u8]) -> Vec<Event> {
             // Modified arrow / nav keys: \x1b[1;<mod>A, \x1b[1;<mod>B, \x1b[1;<mod>C, \x1b[1;<mod>D, etc.
             if rest.starts_with(b"1;") {
                 let after = &rest[2..];
-                if let Some(end_idx) = after.iter().position(|&b| b.is_ascii_alphabetic()) {
+                if let Some(end_idx) = final_pos.map(|p| p - 2) {
                     let term = after[end_idx];
                     let mod_str = std::str::from_utf8(&after[..end_idx]).unwrap_or("");
                     let modifiers = csi_modifiers(&[mod_str], 0);
@@ -1770,5 +1789,97 @@ mod tests {
             modifiers: KeyModifiers::empty(),
         };
         assert_eq!(translate_mouse_event(mouse_far, 1, 24), None);
+    }
+
+    #[test]
+    fn test_parse_raw_events_csi_u_search_does_not_cross_sequence_boundary() {
+        assert_eq!(
+            parse_raw_events(b"\x1b[1;5Au"),
+            vec![
+                make_key_event(KeyCode::Up, KeyModifiers::CONTROL),
+                make_key_event(KeyCode::Char('u'), KeyModifiers::empty()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_raw_events_csi_tilde_search_does_not_cross_sequence_boundary() {
+        assert_eq!(
+            parse_raw_events(b"\x1b[1;5A\x1b[200~hello\x1b[201~"),
+            vec![
+                make_key_event(KeyCode::Up, KeyModifiers::CONTROL),
+                Event::Paste("hello".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_raw_events_codepoint_10_maps_to_enter() {
+        assert_eq!(
+            parse_raw_events(b"\x1b[10u"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[10;2u"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::SHIFT)]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[27;2;10~"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::SHIFT)]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[57414u"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::empty())]
+        );
+    }
+
+    #[test]
+    fn test_parse_raw_events_lone_sequences_unchanged() {
+        assert_eq!(
+            parse_raw_events(b"\x1b[1;5A"),
+            vec![make_key_event(KeyCode::Up, KeyModifiers::CONTROL)]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[13;2u"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::SHIFT)]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[27;5;13~"),
+            vec![make_key_event(KeyCode::Enter, KeyModifiers::CONTROL)]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[3~"),
+            vec![make_key_event(KeyCode::Delete, KeyModifiers::empty())]
+        );
+        assert_eq!(
+            parse_raw_events(b"\x1b[200~hello\x1b[201~"),
+            vec![Event::Paste("hello".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_raw_events_modified_nav_search_does_not_cross_sequence_boundary() {
+        let events = parse_raw_events(b"\x1b[1;\x1b[A");
+        assert_eq!(
+            events.last(),
+            Some(&make_key_event(KeyCode::Up, KeyModifiers::empty()))
+        );
+        assert_eq!(
+            events.first(),
+            Some(&make_key_event(KeyCode::Esc, KeyModifiers::empty()))
+        );
+    }
+
+    #[test]
+    fn test_parse_raw_events_back_to_back_csi_sequences() {
+        assert_eq!(
+            parse_raw_events(b"\x1b[3~\x1b[13;2u\x1b[1;2Bx"),
+            vec![
+                make_key_event(KeyCode::Delete, KeyModifiers::empty()),
+                make_key_event(KeyCode::Enter, KeyModifiers::SHIFT),
+                make_key_event(KeyCode::Down, KeyModifiers::SHIFT),
+                make_key_event(KeyCode::Char('x'), KeyModifiers::empty()),
+            ]
+        );
     }
 }
