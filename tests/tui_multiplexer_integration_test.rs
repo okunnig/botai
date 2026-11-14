@@ -1348,9 +1348,9 @@ fn test_integration_actions_overlay_keeps_tabs_steady_and_preserves_pty_size() {
     for (idx, &name) in ["alpha-api", "beta-web", "gamma-worker"].iter().enumerate() {
         let config = PtyConfig::new(cmd, tmp.path())
             .with_args(args.clone())
-            .with_dimensions(100, 23);
+            .with_dimensions(110, 23);
         let pty = PtySession::spawn(config).unwrap();
-        let mut vt = VtScreen::new(100, 23);
+        let mut vt = VtScreen::new(110, 23);
         let mut ps = ProjectSession::new(name, "ws", "claude");
         ps.set_status(SessionStatus::Busy);
         if idx == 0 {
@@ -1365,7 +1365,7 @@ fn test_integration_actions_overlay_keeps_tabs_steady_and_preserves_pty_size() {
 
     let mut app = TuiApp::new(registry);
     let theme = app.config.theme();
-    let backend = TestBackend::new(100, 24);
+    let backend = TestBackend::new(110, 24);
     let mut terminal = Terminal::new(backend).unwrap();
 
     let row_cells = |buf: &Buffer, y: u16| -> Vec<_> {
@@ -1407,7 +1407,7 @@ fn test_integration_actions_overlay_keeps_tabs_steady_and_preserves_pty_size() {
     assert!(row1_leader.contains(LEADER_ACTIONS_MENU), "{row1_leader}");
     assert!(row1_leader.contains("Esc: Cancel"), "{row1_leader}");
     assert!(!row1_leader.contains("ROW_ZERO_CHILD_PROMPT_DATA"));
-    for x in 0..100 {
+    for x in 0..110 {
         let cell = buf_leader.cell((x, 1)).unwrap();
         assert_eq!(cell.fg, theme.leader_fg);
         assert_eq!(cell.bg, theme.leader_bg);
@@ -1422,7 +1422,7 @@ fn test_integration_actions_overlay_keeps_tabs_steady_and_preserves_pty_size() {
 
     // Child PTY/VT dimensions remain completely untouched
     for session in app.registry.list() {
-        assert_eq!(session.vt().size(), (100, 23));
+        assert_eq!(session.vt().size(), (110, 23));
     }
 
     // 3. Cancel leader mode via Esc + flush_pending_input -> restores row 0 of TerminalView
@@ -1514,7 +1514,7 @@ fn test_integration_actions_overlay_empty_registry_and_narrow_width() {
     // 1. Empty registry keeps [No Active Sessions] steady on row 0 and shows overlay on row 1
     let mut empty_app = TuiApp::new(SessionRegistry::new());
     let theme = empty_app.config.theme();
-    let mut empty_term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut empty_term = Terminal::new(TestBackend::new(110, 24)).unwrap();
 
     empty_term.draw(|f| empty_app.render_frame(f)).unwrap();
     let empty_row0_before = row_cells(empty_term.backend().buffer(), 0);
@@ -1531,7 +1531,7 @@ fn test_integration_actions_overlay_empty_registry_and_narrow_width() {
     let empty_row1 = row_string(empty_term.backend().buffer(), 1);
     assert!(empty_row1.contains(LEADER_ACTIONS_MENU), "{empty_row1}");
     assert!(empty_row1.contains("Esc: Cancel"), "{empty_row1}");
-    for x in 0..100 {
+    for x in 0..110 {
         let cell = empty_term.backend().buffer().cell((x, 1)).unwrap();
         assert_eq!(cell.fg, theme.leader_fg);
         assert_eq!(cell.bg, theme.leader_bg);
@@ -1580,7 +1580,7 @@ fn test_integration_actions_overlay_empty_registry_and_narrow_width() {
     }
 
     // 3. 1-row terminal fallback renders overlay onto row 0 cleanly without panic
-    let mut one_row_term = Terminal::new(TestBackend::new(80, 1)).unwrap();
+    let mut one_row_term = Terminal::new(TestBackend::new(100, 1)).unwrap();
     one_row_term.draw(|f| narrow_app.render_frame(f)).unwrap();
     let one_row_text = row_string(one_row_term.backend().buffer(), 0);
     assert!(one_row_text.contains(LEADER_ACTIONS_MENU), "{one_row_text}");

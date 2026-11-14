@@ -226,6 +226,15 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Backing Repository Auto-Discovery (`resolve_main_repo`)**: Resolves the main cached repository from any worktree directory using `git rev-parse --git-common-dir` and `.git` file (`gitdir: <path>`) fallback traversal.
   - **Clean Destruction & Metadata Pruning (`remove_worktree_auto`)**: Validates uncommitted changes (guarded unless forced) with a single deduplicated dirty check per worktree, removes worktrees directly from backing central repositories, and executes `git worktree prune` so stale `.git/worktrees/<name>` metadata entries are eliminated while preserving git branch history.
 - **Agent Execution**: Spawns a single agent CLI instance at the project root (`CWD/<project_name>`), providing access to all worktree subdirectories.
+- **Dynamic Repository Worktree Addition to Existing Projects**:
+  - **Selective Expansion**: Allows adding additional git repository worktrees to an already created project workspace without recreating the project or losing uncommitted work or running sessions.
+  - **Candidate Repository Resolution**: Candidate repositories for addition are dynamically derived from the project's associated template (discovered via `extract_template_name_from_agents_md`), filtering out repositories that are already checked out as worktrees in the project workspace.
+  - **Automatic On-Demand Cloning & Upstream Fetching**: Missing candidate repositories in `repos_dir` are cloned automatically into `repos_dir`, followed by best-effort upstream fetch before worktree creation.
+  - **Strict Branch Collision Check**: Verifies that branch `<project_name>` does not already exist in the candidate repository. If the branch already exists, worktree addition fails with an explicit error (`GitError::BranchAlreadyExists`).
+  - **Worktree Provisioning**: Creates a git worktree checked out to branch `<project_name>` inside `<project_dir>/<repo_name>`.
+  - **Per-Repository Setup Hooks**: Executes configured repository lifecycle `setup` hooks in the newly created worktree directory using the Warn-and-Continue policy. Template `post_create` hooks are not re-executed.
+  - **Context Orientation Synchronization**: Fully re-synthesizes `<project_dir>/AGENTS.md` using `ProjectContext::synthesize` to incorporate the updated set of all effective repositories (existing + newly added) in the Repository Layout table.
+  - **Best-Effort Partial Addition**: When adding multiple repositories, if one repository fails during clone or worktree creation, previously succeeded worktrees are preserved, failed repositories report errors in logs, and `AGENTS.md` is updated to include all successfully checked out repositories.
 
 ---
 
@@ -421,12 +430,13 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Tab Structure & Semantic Indicators**: Top/bottom status bar displaying active sessions, status badges, and streamlined key hints. Each session tab displays its leading semantic status symbol (`○` Initializing, `●` Busy, `?` Waiting, `✓` Done, `✗` Error, `—` Terminated), hotkey index (1..9), template name in brackets, and project name: `  <Symbol> <Hotkey> [<Template>] <Project>  ` (falling back to `  <Symbol> <Hotkey> <Project>  ` if template is blank).
   - **Dynamic Title Truncation (`smart_truncate_tab_title`, `MAX_TAB_WIDTH = 32`)**: Gracefully truncates template names and project names to fit within `MAX_TAB_WIDTH` (32 columns) or when horizontal space is limited, shrinking or omitting the template name first so that the active tab's project identity remains clear and prominent while omitting brackets when template names are blank.
   - **Overflow Arrow Reservation (`◀ ` and ` ▶`)**: In `compute_visible_tab_range`, reserves 4 columns for overflow arrows whenever tabs exceed available width, ensuring tabs never clip against the right edge. Symmetrically formats right overflow indicators as `" ▶"`.
-  - **Steady Tab Bar & Dedicated Leader Actions Overlay (`ActionsOverlay`)**: When leader mode is active (`leader_active`, via `Ctrl+Space`), the top status bar (row 0) remains completely steady and unchanged (preserving full-width tab windowing, right-aligned hints/update notice, or `[No Active Sessions]`). Instead of squeezing row 0, `TuiApp::render_frame` renders `ActionsOverlay` as a dedicated 1-row overlay (`compute_actions_overlay_area`) immediately underneath the tabs at row 1 (over the top row of the terminal viewport without resizing child PTYs or VTs, falling back to row 0 on 1-row terminals). `ActionsOverlay` clears pre-existing cells across the full row width using `theme.leader_fg` and `theme.leader_bg`, displays the 73-character keymap menu (`LEADER_ACTIONS_MENU`: `[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]`), adds a right-aligned `'Esc: Cancel'` hint when width allows (`>= 88` columns), clips cleanly on narrow widths, and suppresses the child hardware cursor while leader mode is active so the cursor does not bleed onto the overlay.
-  - **Responsive Key Hints**: Displays a concise right-aligned `'Ctrl+Space: Actions'` hint (preceded by any startup update notice when space allows) on row 0, cleanly omitting the hint on narrower viewports to maximize tab space. When no active sessions exist, row 0 displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'` steadily in both normal and leader modes.
+  - **Steady Tab Bar & Dedicated Leader Actions Overlay (`ActionsOverlay`)**: When leader mode is active (`leader_active`, via `Ctrl+Space`), the top status bar (row 0) remains completely steady and unchanged (preserving full-width tab windowing, right-aligned hints/update notice/status notifications, or `[No Active Sessions]`). Instead of squeezing row 0, `TuiApp::render_frame` renders `ActionsOverlay` as a dedicated 1-row overlay (`compute_actions_overlay_area`) immediately underneath the tabs at row 1 (over the top row of the terminal viewport without resizing child PTYs or VTs, falling back to row 0 on 1-row terminals). `ActionsOverlay` clears pre-existing cells across the full row width using `theme.leader_fg` and `theme.leader_bg`, displays the 86-character keymap menu (`LEADER_ACTIONS_MENU`: `[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]`), adds a right-aligned `'Esc: Cancel'` hint when width allows (`>= 101` columns: `1 + 86 + 2 + 11 + 1`), clips cleanly on narrow widths, and suppresses the child hardware cursor while leader mode is active so the cursor does not bleed onto the overlay.
+  - **Responsive Key Hints & Status Notifications**: Displays a concise right-aligned `'Ctrl+Space: Actions'` hint (preceded by any startup update notice when space allows) on row 0, cleanly omitting the hint on narrower viewports to maximize tab space. When an optional status notification is present (e.g., repository addition confirmation or error), it is displayed right-aligned on row 0 in place of the default key hint. When no active sessions exist, row 0 displays `'[No Active Sessions] - Press Ctrl+Space then q to quit'` steadily in both normal and leader modes.
 - **Leader Key Architecture (`Ctrl + Space`)**:
   - Global multiplexer actions are invoked via the leader prefix `Ctrl + Space`, followed by a command key:
     - `Ctrl + Space` then `1` .. `9`: Directly switch to project session 1 to 9.
     - `Ctrl + Space` then `c`: Open the unified project creation modal (`ProjectCreationModal`).
+    - `Ctrl + Space` then `a`: Open the Add Repository modal (`AddRepoModal`) to add more template worktrees to the active project session.
     - `Ctrl + Space` then `n` / `p`: Switch to Next / Previous active project session.
     - `Ctrl + Space` then `w`: Close / terminate active project session.
     - `Ctrl + Space` then `x`: Detach from active session (returns to dashboard when dashboard is present, or exits to host shell when running in standalone CLI mode).
@@ -653,8 +663,8 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - Filled with `theme.status_bar_bg` and `theme.status_bar_fg`.
   - Displays brand title ` botai ` on the left styled with `theme.modal_title` and bold formatting.
   - Displays right-aligned key navigation hints styled with `theme.key_hint`:
-    - Full hints: `"↑/↓: Navigate | Enter: Attach | n/c: New Project | d: Destroy | q: Quit"`
-    - Compact fallback: `"Enter: Attach | n: New | d: Destroy | q: Quit"`
+    - Full hints: `"↑/↓: Navigate | Enter: Attach | n/c: New Project | a: Add Repo | d: Destroy | q: Quit"`
+    - Compact fallback: `"Enter: Attach | n: New | a: Add Repo | d: Destroy | q: Quit"`
 - **Full-Width Local Projects Dashboard**:
   - Clean, full-width single-panel interface listing all local project directories found in CWD (directories containing `AGENTS.md`).
   - **Live Session Indicators**: Running project sessions are distinguished with a leading colored status dot indicator (`●` U+25CF) reflecting live states (`Busy`, `Waiting`, `Done`, `Error`), while inactive/stopped projects display subtle spacing or inactive badges (`○` / `[Inactive]`).
@@ -664,6 +674,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
 - **Project Selection & Actions**:
   - `Up` / `Down` / `j` / `k` (or mouse wheel scroll): Navigate between local projects in the list.
   - `Enter`: Attach/resume focus on the selected project session.
+  - `a`: Open the Add Repository modal (`AddRepoModal`) for the selected project to add not-yet-included template repositories.
   - `d`: Open the confirmation modal (` Confirm Destroy Project `) for clean worktree removal and directory deletion.
 - **Asynchronous Live Project Destruction Progress & Log Modal (`DestroyProgressModalState`)**:
   - **Non-Blocking Background Worker**: Upon confirming destruction with `y` or `Enter`, `botai` does NOT block or freeze the TUI event loop; it launches the destruction pipeline inside a dedicated background worker thread (`std::thread::spawn`).
@@ -687,12 +698,37 @@ env = { PORT = "8080", NODE_ENV = "development" }
 
 ---
 
-## 10. In-Session Project Creation & Navigation
+## 10. In-Session Project Creation, Worktree Addition & Navigation
 - **In-Session Project Creation (`Ctrl + Space` then `c`)**:
   - Can be invoked at any time while working inside an active terminal session.
   - Opens the unified two-step `ProjectCreationModal` floating dialog directly (identical workflow and presentation as the overview dashboard):
     - **Step 1 (`CreationStep::SelectTemplate`)**: Searchable template list with real-time text input filter, matching count, and full template preview pane. Defaults to the global default template from `config.toml`. `Enter` advances to Step 2, `Esc` dismisses the modal and returns focus to the active session.
     - **Step 2 (`CreationStep::ConfigureDetails`)**: Editable project name with readline editing and real-time pre-validation badges, interactive Agent CLI selector, and multiline word-wrapped initial prompt box. `Enter` validates inputs, dismisses the modal, and transitions directly into the Asynchronous Live Setup Modal. `Esc` returns to Step 1.
+- **In-Session & Dashboard Dynamic Repository Addition (`Ctrl + Space` then `a` / Dashboard `a`)**:
+  - Adds not-yet-included template repositories to an existing project without destroying or recreating the workspace.
+  - **Template & Worktree Inspection**:
+    - Discovers the project's template name from `<project_dir>/AGENTS.md` via `extract_template_name_from_agents_md`.
+    - Resolves all declared repositories for that template from `config.toml`.
+    - Detects which repositories are already checked out in `<project_dir>` (subdirectories containing `.git`).
+  - **All Repositories Included Notice**:
+    - When all repositories declared in the template are already checked out, displays a modal notice: `"All repositories defined in template '<template>' are already included in project '<project>'."` Dismissed with `Enter` or `Esc`.
+  - **Multi-Selection Checklist Modal (`AddRepoModalState`)**:
+    - Renders the list of not-yet-included repositories with checkbox indicators (`[ ]` / `[x]`).
+    - `Space`: Toggle repository selection.
+    - `Up` / `Down` / `k` / `j`: Move selection highlight.
+    - `Enter`: Submit selection and proceed with addition. Requires at least one repository checked.
+    - `Esc`: Cancel and dismiss modal without making changes.
+  - **Asynchronous Live Addition Progress Modal (`AddRepoProgressModalState`)**:
+    - Executes the addition pipeline in a dedicated background thread emitting structured events (`Step`, `Log`, `Success`, `Error`).
+    - Steps:
+      1. `Step [1/4]`: Auto-cloning missing repositories into `repos_dir` and fetching updates.
+      2. `Step [2/4]`: Checking out git worktrees to branch `<project_name>` inside `<project_dir>/<repo_name>`.
+      3. `Step [3/4]`: Executing configured per-repository `setup` hooks in parallel (Warn-and-Continue).
+      4. `Step [4/4]`: Synchronizing and re-generating `<project_dir>/AGENTS.md` orientation context.
+    - **Best-Effort Partial Addition**: If a repository fails during clone or worktree creation (e.g. branch `<project_name>` already exists), existing and successfully checked-out worktrees are retained, errors are displayed in the progress log, and `AGENTS.md` is re-synthesized to reflect all successfully provisioned worktrees.
+    - **Session Continuity & Status Feedback**:
+      - For in-session additions, upon completion or dismissal, focus returns smoothly to the active agent PTY session and displays a non-intrusive success notification banner in the status bar (e.g. `✓ Added repository '<repo>' to project '<project>'`), without injecting input into the agent process.
+      - For dashboard additions, refreshes the project list upon completion and returns to the dashboard.
 - **In-Session Project Destruction (`Ctrl + Space` then `d`)**:
   - Can be invoked while inside an active terminal session to destroy the current project immediately without first having to detach or close it.
   - Prompts the user with a confirmation dialog: `Confirm Destroy Project: <name>` (`[y] / [Enter] Confirm | [n] / [Esc] Cancel`).

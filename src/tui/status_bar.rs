@@ -278,7 +278,7 @@ pub(crate) fn fit_hints<'a>(
 
 /// Keymap menu text displayed inside the leader actions overlay.
 pub const LEADER_ACTIONS_MENU: &str =
-    "[1..9 Switch | c New | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
+    "[1..9 Switch | c New | a Add Repo | n/p Nav | w Close | x Detach | d Destroy | q Quit]";
 
 /// Dedicated 1-row overlay displaying global multiplexer keybindings when leader mode is active.
 #[derive(Debug, Clone, Default)]
@@ -371,6 +371,7 @@ pub struct StatusBar<'a> {
     leader_active: bool,
     update_notice: Option<&'a str>,
     theme: Option<&'a Theme>,
+    notification: Option<&'a str>,
 }
 
 impl<'a> StatusBar<'a> {
@@ -381,6 +382,7 @@ impl<'a> StatusBar<'a> {
             leader_active: false,
             update_notice: None,
             theme: None,
+            notification: None,
         }
     }
 
@@ -393,6 +395,12 @@ impl<'a> StatusBar<'a> {
     /// Configures whether leader mode is actively displayed on the status bar.
     pub fn with_leader(mut self, leader_active: bool) -> Self {
         self.leader_active = leader_active;
+        self
+    }
+
+    /// Configures an optional status notification banner displayed on the status bar.
+    pub fn with_notification(mut self, notification: Option<&'a str>) -> Self {
+        self.notification = notification;
         self
     }
 
@@ -566,14 +574,35 @@ impl<'a> StatusBar<'a> {
         area: Rect,
         buf: &mut Buffer,
     ) {
-        Self::render_with_notice(registry, leader_active, None, theme, area, buf);
+        Self::render_with_options(registry, leader_active, None, None, theme, area, buf);
     }
 
-    /// Renders the status bar, showing `update_notice` beside the hint when it fits.
-    fn render_with_notice(
+    /// Renders the status bar directly into a Ratatui `Buffer` with an optional notification banner.
+    pub fn render_to_buffer_with_theme_and_notification(
+        registry: &SessionRegistry,
+        leader_active: bool,
+        notification: Option<&str>,
+        theme: &Theme,
+        area: Rect,
+        buf: &mut Buffer,
+    ) {
+        Self::render_with_options(
+            registry,
+            leader_active,
+            None,
+            notification,
+            theme,
+            area,
+            buf,
+        );
+    }
+
+    /// Renders the status bar with optional update notice and status notification.
+    fn render_with_options(
         registry: &SessionRegistry,
         _leader_active: bool,
         update_notice: Option<&str>,
+        notification: Option<&str>,
         theme: &Theme,
         area: Rect,
         buf: &mut Buffer,
@@ -601,18 +630,31 @@ impl<'a> StatusBar<'a> {
         let sessions = registry.list();
         let full_tabs_line = Self::build_tabs_line(sessions, active_idx, area.width, theme);
         let full_tabs_width = full_tabs_line.width() as u16;
-        let right = fit_hints(
+        let mut top_bar = TopBar::new(full_tabs_line).with_theme(theme);
+
+        if let Some(notif) = notification {
+            let notif_len = notif.chars().count() as u16;
+            let notif_style = Style::default()
+                .fg(theme.status_done)
+                .bg(theme.status_bar_bg)
+                .add_modifier(Modifier::BOLD);
+            if area.width >= full_tabs_width + notif_len + 2 {
+                let notif_line = Line::from(Span::styled(notif, notif_style));
+                top_bar = top_bar.with_right_and_padding(notif_line, notif_len, true);
+            } else if area.width >= notif_len {
+                let notif_line = Line::from(Span::styled(notif, notif_style));
+                top_bar = top_bar.with_right_and_padding(notif_line, notif_len, false);
+            }
+        } else if let Some((line, len)) = fit_hints(
             update_notice,
             &["Ctrl+Space: Actions"],
             full_tabs_width,
             area.width,
             theme,
-        );
-
-        let mut top_bar = TopBar::new(full_tabs_line).with_theme(theme);
-        if let Some((line, len)) = right {
+        ) {
             top_bar = top_bar.with_right_and_padding(line, len, true);
         }
+
         top_bar.render_to_buffer(area, buf);
     }
 }
@@ -621,10 +663,11 @@ impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        Self::render_with_notice(
+        Self::render_with_options(
             self.registry,
             self.leader_active,
             self.update_notice,
+            self.notification,
             theme,
             area,
             buf,
@@ -636,10 +679,11 @@ impl<'a> Widget for &StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let default_theme = Theme::default();
         let theme = self.theme.unwrap_or(&default_theme);
-        StatusBar::render_with_notice(
+        StatusBar::render_with_options(
             self.registry,
             self.leader_active,
             self.update_notice,
+            self.notification,
             theme,
             area,
             buf,
@@ -1296,6 +1340,32 @@ mod tests {
     }
 
     #[test]
+    fn test_status_bar_with_notification() {
+        let mut registry = SessionRegistry::new();
+        let (ps, pty, vt) =
+            create_test_session_with_status("p1", "ws", "claude", SessionStatus::Done);
+        registry.add(ps, pty, vt).unwrap();
+
+        let area = Rect::new(0, 0, 100, 1);
+        let mut buf = Buffer::empty(area);
+        let theme = Theme::default();
+
+        let status_bar = StatusBar::new(&registry)
+            .with_theme(&theme)
+            .with_notification(Some("✓ Added repository 'docs' to project 'p1'"));
+
+        status_bar.render(area, &mut buf);
+
+        let rendered = buf
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("✓ Added repository 'docs' to project 'p1'"));
+    }
+
+    #[test]
     fn test_status_bar_build_tabs_line_slice_input() {
         let theme = Theme::tokyo_night();
         let mut registry = SessionRegistry::new();
@@ -1440,11 +1510,11 @@ mod tests {
         use ratatui::style::Color;
 
         let theme = Theme::tokyo_night();
-        let area = Rect::new(0, 0, 100, 1);
+        let area = Rect::new(0, 0, 110, 1);
         let mut buf = Buffer::empty(area);
 
         // Pre-populate buffer with styled terminal cells to ensure no bleed-through
-        for x in 0..100 {
+        for x in 0..110 {
             let cell = buf.cell_mut((x, 0)).unwrap();
             cell.set_char('X').set_style(
                 Style::default()
@@ -1472,18 +1542,18 @@ mod tests {
         assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "[");
         assert!(buf.cell((1, 0)).unwrap().modifier.contains(Modifier::BOLD));
 
-        // "Esc: Cancel" right-aligned 1 col before area.right() (cols 88..99)
-        let cancel: String = (88..99)
+        // "Esc: Cancel" right-aligned 1 col before area.right() (cols 98..109)
+        let cancel: String = (98..109)
             .map(|x| buf.cell((x, 0)).unwrap().symbol())
             .collect();
         assert_eq!(cancel, "Esc: Cancel");
-        assert_eq!(buf.cell((99, 0)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((88, 0)).unwrap().fg, theme.leader_fg);
-        assert_eq!(buf.cell((88, 0)).unwrap().bg, theme.leader_bg);
-        assert!(!buf.cell((88, 0)).unwrap().modifier.contains(Modifier::BOLD));
+        assert_eq!(buf.cell((109, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((98, 0)).unwrap().fg, theme.leader_fg);
+        assert_eq!(buf.cell((98, 0)).unwrap().bg, theme.leader_bg);
+        assert!(!buf.cell((98, 0)).unwrap().modifier.contains(Modifier::BOLD));
 
         // Entire row uses leader palette and cleared underlying modifiers
-        for x in 0..100 {
+        for x in 0..110 {
             let cell = buf.cell((x, 0)).unwrap();
             assert_eq!(cell.fg, theme.leader_fg, "fg mismatch at col {x}");
             assert_eq!(cell.bg, theme.leader_bg, "bg mismatch at col {x}");
@@ -1492,26 +1562,26 @@ mod tests {
             assert!(!cell.modifier.contains(Modifier::REVERSED));
         }
 
-        // Boundary width 88 shows both menu and right-aligned "Esc: Cancel"
-        let area88 = Rect::new(0, 0, 88, 1);
-        let mut buf88 = Buffer::empty(area88);
+        // Boundary width 101 (1 + 86 + 2 + 11 + 1) shows both menu and right-aligned "Esc: Cancel"
+        let area101 = Rect::new(0, 0, 101, 1);
+        let mut buf101 = Buffer::empty(area101);
         ActionsOverlay::new()
             .with_theme(&theme)
-            .render(area88, &mut buf88);
-        let rendered88: String = buf88
+            .render(area101, &mut buf101);
+        let rendered101: String = buf101
             .content()
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert!(rendered88.contains(LEADER_ACTIONS_MENU), "{rendered88}");
-        assert!(rendered88.contains("Esc: Cancel"), "{rendered88}");
-        assert_eq!(buf88.cell((74, 0)).unwrap().symbol(), " ");
-        assert_eq!(buf88.cell((75, 0)).unwrap().symbol(), " ");
-        assert_eq!(buf88.cell((76, 0)).unwrap().symbol(), "E");
-        assert_eq!(buf88.cell((87, 0)).unwrap().symbol(), " ");
+        assert!(rendered101.contains(LEADER_ACTIONS_MENU), "{rendered101}");
+        assert!(rendered101.contains("Esc: Cancel"), "{rendered101}");
+        assert_eq!(buf101.cell((87, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf101.cell((88, 0)).unwrap().symbol(), " ");
+        assert_eq!(buf101.cell((89, 0)).unwrap().symbol(), "E");
+        assert_eq!(buf101.cell((100, 0)).unwrap().symbol(), " ");
 
-        // Width 87 and 80 render menu with leading space and omit "Esc: Cancel"
-        for width in [80_u16, 87] {
+        // Width 100 and 90 render menu with leading space and omit "Esc: Cancel"
+        for width in [90_u16, 100] {
             let w_area = Rect::new(0, 0, width, 1);
             let mut w_buf = Buffer::empty(w_area);
             ActionsOverlay::new()
@@ -1531,18 +1601,18 @@ mod tests {
     fn test_actions_overlay_narrow_widths() {
         let theme = Theme::tokyo_night();
 
-        // Exact menu width 73: draws menu flush at col 0 without leading space
-        let area73 = Rect::new(0, 0, 73, 1);
-        let mut buf73 = Buffer::empty(area73);
+        // Exact menu width 86: draws menu flush at col 0 without leading space
+        let area86 = Rect::new(0, 0, 86, 1);
+        let mut buf86 = Buffer::empty(area86);
         ActionsOverlay::new()
             .with_theme(&theme)
-            .render(area73, &mut buf73);
-        let rendered73: String = buf73
+            .render(area86, &mut buf86);
+        let rendered86: String = buf86
             .content()
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect();
-        assert_eq!(rendered73, LEADER_ACTIONS_MENU);
+        assert_eq!(rendered86, LEADER_ACTIONS_MENU);
 
         // Narrower widths (50 and 10 cols): clips cleanly without panic
         for width in [50_u16, 10] {
@@ -1590,7 +1660,7 @@ mod tests {
         assert_eq!(buf.content(), original.as_slice());
 
         // Value Widget, &Widget, and render_to_buffer_with_theme match identically
-        let area = Rect::new(0, 0, 100, 1);
+        let area = Rect::new(0, 0, 110, 1);
         let mut buf_val = Buffer::empty(area);
         let mut buf_ref = Buffer::empty(area);
         let mut buf_assoc = Buffer::empty(area);
@@ -1615,14 +1685,14 @@ mod tests {
             Theme::ansi(),
         ];
 
-        let area = Rect::new(0, 0, 100, 1);
+        let area = Rect::new(0, 0, 110, 1);
         for theme in &themes {
             let mut buf = Buffer::empty(area);
             ActionsOverlay::new()
                 .with_theme(theme)
                 .render(area, &mut buf);
 
-            for x in [0_u16, 1, 75, 88, 99] {
+            for x in [0_u16, 1, 88, 98, 109] {
                 let cell = buf.cell((x, 0)).unwrap();
                 assert_eq!(
                     cell.fg, theme.leader_fg,

@@ -6,6 +6,9 @@ use ratatui::{
     widgets::Widget,
 };
 
+pub use crate::tui::add_repo_modal::render_add_repo_modal;
+pub use crate::tui::add_repo_progress_modal::render_add_repo_progress_modal;
+
 /// Converts a `vt100::Color` into a `ratatui::style::Color`.
 pub fn vt_color_to_ratatui(color: vt100::Color) -> RatatuiColor {
     match color {
