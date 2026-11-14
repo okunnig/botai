@@ -1330,3 +1330,259 @@ fn test_integration_run_loop_with_receiver_conditional_redraw_and_wakeup_pulses(
         "Expected VT screen to contain 'pty_pulse_output', got: {output}"
     );
 }
+
+#[test]
+fn test_integration_actions_overlay_keeps_tabs_steady_and_preserves_pty_size() {
+    use botai::tui::app::TuiApp;
+    use botai::tui::status_bar::LEADER_ACTIONS_MENU;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+    let mut registry = SessionRegistry::new();
+    for (idx, &name) in ["alpha-api", "beta-web", "gamma-worker"].iter().enumerate() {
+        let config = PtyConfig::new(cmd, tmp.path())
+            .with_args(args.clone())
+            .with_dimensions(100, 23);
+        let pty = PtySession::spawn(config).unwrap();
+        let mut vt = VtScreen::new(100, 23);
+        let mut ps = ProjectSession::new(name, "ws", "claude");
+        ps.set_status(SessionStatus::Busy);
+        if idx == 0 {
+            vt.process(
+                b"\x1b[3;4;7;31;44mROW_ZERO_CHILD_PROMPT_DATA\x1b[0m\r\nROW_ONE_KEEP_INTACT\r\nROW_TWO_KEEP_INTACT\r\n",
+            );
+        } else if idx == 1 {
+            vt.process(b"SECOND_TAB_ROW_ZERO\r\nSECOND_TAB_ROW_ONE\r\n");
+        }
+        registry.add(ps, pty, vt).unwrap();
+    }
+
+    let mut app = TuiApp::new(registry);
+    let theme = app.config.theme();
+    let backend = TestBackend::new(100, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let row_cells = |buf: &Buffer, y: u16| -> Vec<_> {
+        (0..buf.area.width)
+            .map(|x| buf.cell((x, y)).unwrap().clone())
+            .collect()
+    };
+    let row_string = |buf: &Buffer, y: u16| -> String {
+        (0..buf.area.width)
+            .map(|x| buf.cell((x, y)).unwrap().symbol())
+            .collect()
+    };
+
+    // 1. Render initial normal frame (leader_active == false)
+    terminal.draw(|f| app.render_frame(f)).unwrap();
+    let buf_before = terminal.backend().buffer().clone();
+    let row0_before = row_cells(&buf_before, 0);
+    let row0_text_before = row_string(&buf_before, 0);
+    assert!(row0_text_before.contains("1 [ws] alpha-api"));
+    assert!(row0_text_before.contains("2 [ws] beta-web"));
+    assert!(row0_text_before.contains("3 [ws] gamma-worker"));
+    assert!(row0_text_before.contains("Ctrl+Space: Actions"));
+    assert!(row_string(&buf_before, 1).contains("ROW_ZERO_CHILD_PROMPT_DATA"));
+    assert!(row_string(&buf_before, 2).contains("ROW_ONE_KEEP_INTACT"));
+    assert!(row_string(&buf_before, 3).contains("ROW_TWO_KEEP_INTACT"));
+
+    // 2. Press Ctrl+Space (0x00) -> enters leader mode
+    app.handle_raw_bytes(&[0x00]);
+    assert!(app.leader_active);
+
+    terminal.draw(|f| app.render_frame(f)).unwrap();
+    let buf_leader = terminal.backend().buffer();
+
+    // Row 0 must be cell-for-cell identical (no tab jumping, re-windowing, or hiding)
+    assert_eq!(row_cells(buf_leader, 0), row0_before);
+
+    // Row 1 displays the actions overlay completely covering row 0 of TerminalView
+    let row1_leader = row_string(buf_leader, 1);
+    assert!(row1_leader.contains(LEADER_ACTIONS_MENU), "{row1_leader}");
+    assert!(row1_leader.contains("Esc: Cancel"), "{row1_leader}");
+    assert!(!row1_leader.contains("ROW_ZERO_CHILD_PROMPT_DATA"));
+    for x in 0..100 {
+        let cell = buf_leader.cell((x, 1)).unwrap();
+        assert_eq!(cell.fg, theme.leader_fg);
+        assert_eq!(cell.bg, theme.leader_bg);
+        assert!(!cell.modifier.contains(Modifier::ITALIC));
+        assert!(!cell.modifier.contains(Modifier::UNDERLINED));
+        assert!(!cell.modifier.contains(Modifier::REVERSED));
+    }
+
+    // Rows 2+ of TerminalView remain intact
+    assert!(row_string(buf_leader, 2).contains("ROW_ONE_KEEP_INTACT"));
+    assert!(row_string(buf_leader, 3).contains("ROW_TWO_KEEP_INTACT"));
+
+    // Child PTY/VT dimensions remain completely untouched
+    for session in app.registry.list() {
+        assert_eq!(session.vt().size(), (100, 23));
+    }
+
+    // 3. Cancel leader mode via Esc + flush_pending_input -> restores row 0 of TerminalView
+    app.handle_raw_bytes(b"\x1b");
+    app.flush_pending_input();
+    assert!(!app.leader_active);
+
+    terminal.draw(|f| app.render_frame(f)).unwrap();
+    let buf_restored = terminal.backend().buffer();
+    assert_eq!(row_cells(buf_restored, 0), row0_before);
+    assert!(row_string(buf_restored, 1).contains("ROW_ZERO_CHILD_PROMPT_DATA"));
+    assert!(!row_string(buf_restored, 1).contains(LEADER_ACTIONS_MENU));
+
+    // 4. Press Ctrl+Space then '2' -> switches tab and dismisses overlay
+    app.handle_raw_bytes(&[0x00, b'2']);
+    assert!(!app.leader_active);
+    assert_eq!(app.registry.active_index(), Some(1));
+
+    terminal.draw(|f| app.render_frame(f)).unwrap();
+    let buf_switched = terminal.backend().buffer();
+    assert!(row_string(buf_switched, 1).contains("SECOND_TAB_ROW_ZERO"));
+    assert!(row_string(buf_switched, 2).contains("SECOND_TAB_ROW_ONE"));
+}
+
+#[test]
+fn test_integration_actions_overlay_hides_and_restores_hardware_cursor() {
+    use botai::tui::app::TuiApp;
+    use ratatui::layout::Position;
+
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+    let mut registry = SessionRegistry::new();
+    let config = PtyConfig::new(cmd, tmp.path())
+        .with_args(args)
+        .with_dimensions(80, 23);
+    let pty = PtySession::spawn(config).unwrap();
+    let vt = VtScreen::new(80, 23);
+    assert!(!vt.hide_cursor());
+    assert_eq!(vt.cursor_position(), (0, 0));
+
+    let ps = ProjectSession::new("cursor-proj", "ws", "claude");
+    registry.add(ps, pty, vt).unwrap();
+
+    let mut app = TuiApp::new(registry);
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Normal mode: hardware cursor is visible at (0, 1) inside TerminalView
+    terminal.draw(|f| app.render_frame(f)).unwrap();
+    assert!(terminal.backend().cursor_visible());
+    assert_eq!(terminal.backend().cursor_position(), Position::new(0, 1));
+
+    // Leader active: hardware cursor is suppressed so it does not bleed onto the overlay
+    app.handle_raw_bytes(&[0x00]);
+    assert!(app.leader_active);
+    terminal.draw(|f| app.render_frame(f)).unwrap();
+    assert!(!terminal.backend().cursor_visible());
+
+    // Cancel leader: hardware cursor is restored at (0, 1)
+    app.handle_raw_bytes(b"\x1b");
+    app.flush_pending_input();
+    assert!(!app.leader_active);
+    terminal.draw(|f| app.render_frame(f)).unwrap();
+    assert!(terminal.backend().cursor_visible());
+    assert_eq!(terminal.backend().cursor_position(), Position::new(0, 1));
+}
+
+#[test]
+fn test_integration_actions_overlay_empty_registry_and_narrow_width() {
+    use botai::tui::app::TuiApp;
+    use botai::tui::status_bar::LEADER_ACTIONS_MENU;
+    use ratatui::buffer::Buffer;
+
+    let row_cells = |buf: &Buffer, y: u16| -> Vec<_> {
+        (0..buf.area.width)
+            .map(|x| buf.cell((x, y)).unwrap().clone())
+            .collect()
+    };
+    let row_string = |buf: &Buffer, y: u16| -> String {
+        (0..buf.area.width)
+            .map(|x| buf.cell((x, y)).unwrap().symbol())
+            .collect()
+    };
+
+    // 1. Empty registry keeps [No Active Sessions] steady on row 0 and shows overlay on row 1
+    let mut empty_app = TuiApp::new(SessionRegistry::new());
+    let theme = empty_app.config.theme();
+    let mut empty_term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+    empty_term.draw(|f| empty_app.render_frame(f)).unwrap();
+    let empty_row0_before = row_cells(empty_term.backend().buffer(), 0);
+    assert!(row_string(empty_term.backend().buffer(), 0).contains("[No Active Sessions]"));
+
+    empty_app.handle_raw_bytes(&[0x00]);
+    assert!(empty_app.leader_active);
+    empty_term.draw(|f| empty_app.render_frame(f)).unwrap();
+
+    assert_eq!(
+        row_cells(empty_term.backend().buffer(), 0),
+        empty_row0_before
+    );
+    let empty_row1 = row_string(empty_term.backend().buffer(), 1);
+    assert!(empty_row1.contains(LEADER_ACTIONS_MENU), "{empty_row1}");
+    assert!(empty_row1.contains("Esc: Cancel"), "{empty_row1}");
+    for x in 0..100 {
+        let cell = empty_term.backend().buffer().cell((x, 1)).unwrap();
+        assert_eq!(cell.fg, theme.leader_fg);
+        assert_eq!(cell.bg, theme.leader_bg);
+    }
+
+    // 2. Narrow width (60 cols) renders cleanly without panic and keeps row 0 unchanged
+    let tmp = tempdir().expect("Failed to create tempdir");
+    #[cfg(windows)]
+    let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+    #[cfg(not(windows))]
+    let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+    let mut narrow_reg = SessionRegistry::new();
+    for name in ["proj-one", "proj-two"] {
+        let config = PtyConfig::new(cmd, tmp.path())
+            .with_args(args.clone())
+            .with_dimensions(60, 23);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(60, 23);
+        let ps = ProjectSession::new(name, "ws", "claude");
+        narrow_reg.add(ps, pty, vt).unwrap();
+    }
+
+    let mut narrow_app = TuiApp::new(narrow_reg);
+    let mut narrow_term = Terminal::new(TestBackend::new(60, 24)).unwrap();
+
+    narrow_term.draw(|f| narrow_app.render_frame(f)).unwrap();
+    let narrow_row0_before = row_cells(narrow_term.backend().buffer(), 0);
+
+    narrow_app.handle_raw_bytes(&[0x00]);
+    assert!(narrow_app.leader_active);
+    narrow_term.draw(|f| narrow_app.render_frame(f)).unwrap();
+
+    assert_eq!(
+        row_cells(narrow_term.backend().buffer(), 0),
+        narrow_row0_before
+    );
+    assert_eq!(
+        row_string(narrow_term.backend().buffer(), 1),
+        &LEADER_ACTIONS_MENU[..60]
+    );
+    for x in 0..60 {
+        let cell = narrow_term.backend().buffer().cell((x, 1)).unwrap();
+        assert_eq!(cell.fg, theme.leader_fg);
+        assert_eq!(cell.bg, theme.leader_bg);
+    }
+
+    // 3. 1-row terminal fallback renders overlay onto row 0 cleanly without panic
+    let mut one_row_term = Terminal::new(TestBackend::new(80, 1)).unwrap();
+    one_row_term.draw(|f| narrow_app.render_frame(f)).unwrap();
+    let one_row_text = row_string(one_row_term.backend().buffer(), 0);
+    assert!(one_row_text.contains(LEADER_ACTIONS_MENU), "{one_row_text}");
+    assert!(!one_row_term.backend().cursor_visible());
+}

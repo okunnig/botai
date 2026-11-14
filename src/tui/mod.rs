@@ -25,7 +25,12 @@ pub use events::{
 };
 pub use progress_log::ProgressLog;
 pub use setup_modal::{render_setup_modal, run_setup_worker, SetupModalState, SetupProgressEvent};
-pub use status_bar::{compute_visible_tab_range, StatusBar, TopBar};
+pub use status_bar::{
+    compute_visible_tab_range, ActionsOverlay, StatusBar, TopBar, LEADER_ACTIONS_MENU,
+};
 pub use text_input::TextInput;
 pub use theme::Theme;
-pub use ui::{compute_layout, vt_color_to_ratatui, TerminalView, STATUS_BAR_HEIGHT};
+pub use ui::{
+    compute_actions_overlay_area, compute_layout, vt_color_to_ratatui, TerminalView,
+    STATUS_BAR_HEIGHT,
+};

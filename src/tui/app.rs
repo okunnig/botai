@@ -45,9 +45,11 @@ use crate::tui::events::{
     parse_sgr_mouse, translate_mouse_event, RawAction, RawLeaderDecoder,
 };
 use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
-use crate::tui::status_bar::StatusBar;
+use crate::tui::status_bar::{ActionsOverlay, StatusBar};
 use crate::tui::theme::Theme;
-use crate::tui::ui::{compute_layout, TerminalView, STATUS_BAR_HEIGHT};
+use crate::tui::ui::{
+    compute_actions_overlay_area, compute_layout, TerminalView, STATUS_BAR_HEIGHT,
+};
 use crate::update::{self, UpdateStatus};
 
 /// Main application runner managing the TUI loop, PTY streaming, activity tracking, and rendering.
@@ -638,81 +640,8 @@ impl TuiApp {
 
             // 3. Draw active frame conditionally
             if dirty {
-                let theme = self.config.theme();
                 terminal
-                    .draw(|f| {
-                        let (status_area, term_area) = compute_layout(f.area());
-
-                        if self.is_showing_dashboard() {
-                            if let Some(dashboard) = &self.dashboard {
-                                render_dashboard(
-                                    dashboard,
-                                    f.area(),
-                                    f.buffer_mut(),
-                                    &theme,
-                                    self.update_notice.as_deref(),
-                                );
-                                if let Some(pos) = dashboard.cursor_position(f.area()) {
-                                    f.set_cursor_position(pos);
-                                }
-                            }
-                        } else {
-                            f.render_widget(
-                                StatusBar::new(&self.registry)
-                                    .with_leader(self.leader_active)
-                                    .with_update_notice(self.update_notice.as_deref())
-                                    .with_theme(&theme),
-                                status_area,
-                            );
-
-                            if let Some(active) = self.registry.active_session() {
-                                f.render_widget(TerminalView::new(active.vt()), term_area);
-
-                                if active.status() == SessionStatus::Error {
-                                    render_error_banner(
-                                        active.project_session.exit_code,
-                                        term_area,
-                                        f.buffer_mut(),
-                                        &theme,
-                                    );
-                                } else if !active.vt().hide_cursor()
-                                    && active.vt().scrollback() == 0
-                                {
-                                    let (col, row) = active.vt().cursor_position();
-                                    if col < term_area.width && row < term_area.height {
-                                        f.set_cursor_position(ratatui::layout::Position::new(
-                                            term_area.x + col,
-                                            term_area.y + row,
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-
-                        if let Some(modal) = &self.creation_modal {
-                            modal.render_modal(f.area(), f.buffer_mut(), &theme);
-                            if let Some(pos) = modal.cursor_position(f.area()) {
-                                f.set_cursor_position(pos);
-                            }
-                        }
-
-                        if let Some(setup_modal) = &self.setup_modal {
-                            render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
-                        }
-
-                        if let Some(destroy_modal) = &self.destroy_modal {
-                            render_destroy_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
-                        }
-
-                        if let Some(destroy_modal) = &self.destroy_progress_modal {
-                            render_destroy_progress_modal(
-                                destroy_modal,
-                                f.area(),
-                                f.buffer_mut(),
-                                &theme,
-                            );
-                        }
-                    })
+                    .draw(|f| self.render_frame(f))
                     .map_err(|e| io::Error::other(e.to_string()))?;
 
                 dirty = false;
@@ -744,6 +673,83 @@ impl TuiApp {
         }
 
         Ok(())
+    }
+
+    /// Renders a single frame of the TUI, including the dashboard or active session, leader overlay, and modals.
+    pub fn render_frame(&self, f: &mut ratatui::Frame) {
+        let theme = self.config.theme();
+        let (status_area, term_area) = compute_layout(f.area());
+
+        if self.is_showing_dashboard() {
+            if let Some(dashboard) = &self.dashboard {
+                render_dashboard(
+                    dashboard,
+                    f.area(),
+                    f.buffer_mut(),
+                    &theme,
+                    self.update_notice.as_deref(),
+                );
+                if let Some(pos) = dashboard.cursor_position(f.area()) {
+                    f.set_cursor_position(pos);
+                }
+            }
+        } else {
+            f.render_widget(
+                StatusBar::new(&self.registry)
+                    .with_leader(self.leader_active)
+                    .with_update_notice(self.update_notice.as_deref())
+                    .with_theme(&theme),
+                status_area,
+            );
+
+            if let Some(active) = self.registry.active_session() {
+                f.render_widget(TerminalView::new(active.vt()), term_area);
+
+                if active.status() == SessionStatus::Error {
+                    render_error_banner(
+                        active.project_session.exit_code,
+                        term_area,
+                        f.buffer_mut(),
+                        &theme,
+                    );
+                } else if !self.leader_active
+                    && !active.vt().hide_cursor()
+                    && active.vt().scrollback() == 0
+                {
+                    let (col, row) = active.vt().cursor_position();
+                    if col < term_area.width && row < term_area.height {
+                        f.set_cursor_position(ratatui::layout::Position::new(
+                            term_area.x + col,
+                            term_area.y + row,
+                        ));
+                    }
+                }
+            }
+
+            if self.leader_active {
+                let overlay_area = compute_actions_overlay_area(f.area());
+                f.render_widget(ActionsOverlay::new().with_theme(&theme), overlay_area);
+            }
+        }
+
+        if let Some(modal) = &self.creation_modal {
+            modal.render_modal(f.area(), f.buffer_mut(), &theme);
+            if let Some(pos) = modal.cursor_position(f.area()) {
+                f.set_cursor_position(pos);
+            }
+        }
+
+        if let Some(setup_modal) = &self.setup_modal {
+            render_setup_modal(setup_modal, f.area(), f.buffer_mut(), &theme);
+        }
+
+        if let Some(destroy_modal) = &self.destroy_modal {
+            render_destroy_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
+        }
+
+        if let Some(destroy_modal) = &self.destroy_progress_modal {
+            render_destroy_progress_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
+        }
     }
 
     /// Routes incoming raw input bytes either to active modal/dashboard event decoders or directly to PTY passthrough/leader decoder.
