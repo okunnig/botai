@@ -44,6 +44,7 @@ use crate::tui::events::{
     is_incomplete_sgr_mouse, is_shift_enter, is_unmodified_enter, parse_raw_events,
     parse_sgr_mouse, translate_mouse_event, RawAction, RawLeaderDecoder,
 };
+use crate::tui::quit_modal::{render_quit_modal, QuitModalAction, QuitModalState};
 use crate::tui::setup_modal::{render_setup_modal, SetupModalState, SetupProgressEvent};
 use crate::tui::status_bar::{ActionsOverlay, StatusBar};
 use crate::tui::theme::Theme;
@@ -63,6 +64,7 @@ pub struct TuiApp {
     pub setup_modal: Option<SetupModalState>,
     pub destroy_modal: Option<DestroyModalState>,
     pub destroy_progress_modal: Option<DestroyProgressModalState>,
+    pub quit_modal: Option<QuitModalState>,
     pub config: Config,
     pub cwd: PathBuf,
     pub viewport_size: Option<(u16, u16)>,
@@ -282,6 +284,7 @@ impl TuiApp {
             setup_modal: None,
             destroy_modal: None,
             destroy_progress_modal: None,
+            quit_modal: None,
             config: Config::default(),
             cwd: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             viewport_size: None,
@@ -378,6 +381,45 @@ impl TuiApp {
     pub fn with_destroy_progress_modal(mut self, modal: DestroyProgressModalState) -> Self {
         self.destroy_progress_modal = Some(modal);
         self
+    }
+
+    /// Sets the quit confirmation modal state on `TuiApp`.
+    pub fn with_quit_modal(mut self, modal: QuitModalState) -> Self {
+        self.quit_modal = Some(modal);
+        self
+    }
+
+    /// Returns the number of currently active sessions in the registry.
+    pub fn active_session_count(&self) -> usize {
+        self.registry.iter().filter(|s| s.is_active()).count()
+    }
+
+    /// Requests quitting `botai`, opening the confirmation modal if active sessions are running.
+    pub fn request_quit(&mut self) {
+        let active_count = self.active_session_count();
+        if active_count > 0 {
+            self.quit_modal = Some(QuitModalState::new(active_count));
+        } else {
+            self.should_quit = true;
+        }
+    }
+
+    /// Handles keyboard events when the quit confirmation modal is active.
+    pub fn handle_quit_modal_key(&mut self, key: crossterm::event::KeyEvent) {
+        if let Some(mut modal) = self.quit_modal.take() {
+            match modal.handle_key(key) {
+                Some(QuitModalAction::Confirm) => {
+                    self.quit_modal = None;
+                    self.should_quit = true;
+                }
+                Some(QuitModalAction::Cancel) => {
+                    self.quit_modal = None;
+                }
+                None => {
+                    self.quit_modal = Some(modal);
+                }
+            }
+        }
     }
 
     /// Sets the configuration on `TuiApp`.
@@ -679,6 +721,7 @@ impl TuiApp {
     pub fn render_frame(&self, f: &mut ratatui::Frame) {
         let theme = self.config.theme();
         let (status_area, term_area) = compute_layout(f.area());
+        let quit_modal_open = self.quit_modal.is_some();
 
         if self.is_showing_dashboard() {
             if let Some(dashboard) = &self.dashboard {
@@ -689,8 +732,10 @@ impl TuiApp {
                     &theme,
                     self.update_notice.as_deref(),
                 );
-                if let Some(pos) = dashboard.cursor_position(f.area()) {
-                    f.set_cursor_position(pos);
+                if !quit_modal_open {
+                    if let Some(pos) = dashboard.cursor_position(f.area()) {
+                        f.set_cursor_position(pos);
+                    }
                 }
             }
         } else {
@@ -713,6 +758,7 @@ impl TuiApp {
                         &theme,
                     );
                 } else if !self.leader_active
+                    && !quit_modal_open
                     && !active.vt().hide_cursor()
                     && active.vt().scrollback() == 0
                 {
@@ -734,8 +780,10 @@ impl TuiApp {
 
         if let Some(modal) = &self.creation_modal {
             modal.render_modal(f.area(), f.buffer_mut(), &theme);
-            if let Some(pos) = modal.cursor_position(f.area()) {
-                f.set_cursor_position(pos);
+            if !quit_modal_open {
+                if let Some(pos) = modal.cursor_position(f.area()) {
+                    f.set_cursor_position(pos);
+                }
             }
         }
 
@@ -750,11 +798,22 @@ impl TuiApp {
         if let Some(destroy_modal) = &self.destroy_progress_modal {
             render_destroy_progress_modal(destroy_modal, f.area(), f.buffer_mut(), &theme);
         }
+
+        if let Some(quit_modal) = &self.quit_modal {
+            render_quit_modal(quit_modal, f.area(), f.buffer_mut(), &theme);
+        }
     }
 
     /// Routes incoming raw input bytes either to active modal/dashboard event decoders or directly to PTY passthrough/leader decoder.
     pub fn handle_input_bytes(&mut self, bytes: &[u8]) {
-        if self.destroy_progress_modal.is_some() {
+        if self.quit_modal.is_some() {
+            let events = parse_raw_events(bytes);
+            for event in events {
+                if let Event::Key(key) = event {
+                    self.handle_quit_modal_key(key);
+                }
+            }
+        } else if self.destroy_progress_modal.is_some() {
             let events = parse_raw_events(bytes);
             for event in events {
                 match event {
@@ -818,6 +877,7 @@ impl TuiApp {
             && self.setup_modal.is_none()
             && self.destroy_progress_modal.is_none()
             && self.destroy_modal.is_none()
+            && self.quit_modal.is_none()
             && !self.is_showing_dashboard();
 
         for session in self.registry.list_mut() {
@@ -970,7 +1030,7 @@ impl TuiApp {
     pub fn handle_dashboard_action(&mut self, action: DashboardAction) {
         match action {
             DashboardAction::Quit => {
-                self.should_quit = true;
+                self.request_quit();
             }
             DashboardAction::Attach(project) => {
                 if let Some(pos) = self
@@ -1290,7 +1350,7 @@ impl TuiApp {
             RawAction::Quit => {
                 self.leader_active = false;
                 self.raw_decoder.set_leader_active(false);
-                self.should_quit = true;
+                self.request_quit();
             }
             RawAction::Detach => {
                 self.leader_active = false;
@@ -1410,7 +1470,19 @@ impl TuiApp {
         self.raw_decoder.set_leader_active(self.leader_active);
         let actions = self.raw_decoder.decode(segment);
         for action in actions {
+            if self.quit_modal.is_some() {
+                if let RawAction::Passthrough(rest) = action {
+                    self.handle_input_bytes(&rest);
+                }
+                if self.should_quit {
+                    break;
+                }
+                continue;
+            }
             self.handle_raw_action(action);
+            if self.should_quit {
+                break;
+            }
         }
         false
     }
@@ -4264,5 +4336,277 @@ repos = []
         assert!(!app.poll_update_check());
         assert!(app.update_rx.is_none());
         assert!(app.update_notice.is_none());
+    }
+
+    fn spawn_idle_session(
+        tmp: &std::path::Path,
+        project_name: &str,
+        status: SessionStatus,
+    ) -> (ProjectSession, PtySession, VtScreen) {
+        #[cfg(windows)]
+        let (cmd, args) = ("cmd.exe", vec!["/c", "ping -n 10 127.0.0.1 > nul"]);
+        #[cfg(not(windows))]
+        let (cmd, args) = ("sh", vec!["-c", "sleep 10"]);
+
+        let config = PtyConfig::new(cmd, tmp).with_args(args);
+        let pty = PtySession::spawn(config).unwrap();
+        let vt = VtScreen::new(80, 24);
+        let mut ps = ProjectSession::new(project_name, "ws", "claude");
+        ps.set_status(status);
+        (ps, pty, vt)
+    }
+
+    #[test]
+    fn test_quit_with_zero_sessions_immediate_in_session_and_dashboard() {
+        // 1. In-session Ctrl+Space q with 0 sessions
+        let mut app = TuiApp::new(SessionRegistry::new());
+        app.handle_input_bytes(b"\x00q");
+        assert!(app.should_quit);
+        assert!(app.quit_modal.is_none());
+
+        // 2. Dashboard 'q' with 0 sessions
+        let mut app_dash_q =
+            TuiApp::new(SessionRegistry::new()).with_dashboard(DashboardState::new(vec![], vec![]));
+        app_dash_q.handle_input_bytes(b"q");
+        assert!(app_dash_q.should_quit);
+        assert!(app_dash_q.quit_modal.is_none());
+
+        // 3. Dashboard Esc with 0 sessions
+        let mut app_dash_esc =
+            TuiApp::new(SessionRegistry::new()).with_dashboard(DashboardState::new(vec![], vec![]));
+        app_dash_esc.handle_input_bytes(b"\x1b");
+        assert!(app_dash_esc.should_quit);
+        assert!(app_dash_esc.quit_modal.is_none());
+    }
+
+    #[test]
+    fn test_quit_with_only_terminal_sessions_quits_immediately() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = SessionRegistry::new();
+
+        for (name, status) in [
+            ("err-proj", SessionStatus::Error),
+            ("done-proj", SessionStatus::Done),
+            ("term-proj", SessionStatus::Terminated),
+        ] {
+            let (ps, pty, vt) = spawn_idle_session(tmp.path(), name, status);
+            registry.add(ps, pty, vt).unwrap();
+        }
+
+        let mut app = TuiApp::new(registry);
+        assert_eq!(app.active_session_count(), 0);
+
+        app.handle_input_bytes(b"\x00q");
+        assert!(app.should_quit);
+        assert!(app.quit_modal.is_none());
+    }
+
+    #[test]
+    fn test_quit_in_session_with_active_sessions_confirm_and_cancel() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = SessionRegistry::new();
+
+        for (name, status) in [
+            ("init-proj", SessionStatus::Initializing),
+            ("busy-proj", SessionStatus::Busy),
+            ("wait-proj", SessionStatus::WaitingForInput),
+            ("err-proj", SessionStatus::Error),
+        ] {
+            let (ps, pty, vt) = spawn_idle_session(tmp.path(), name, status);
+            registry.add(ps, pty, vt).unwrap();
+        }
+
+        let mut app = TuiApp::new(registry);
+        assert_eq!(app.active_session_count(), 3);
+
+        // Ctrl+Space q opens quit modal with snapshotted active count (3, excluding Error)
+        app.handle_input_bytes(b"\x00q");
+        assert!(!app.should_quit);
+        assert!(!app.leader_active);
+        assert_eq!(app.quit_modal, Some(QuitModalState::new(3)));
+
+        // Cancel with 'n' stays in session
+        app.handle_input_bytes(b"n");
+        assert!(!app.should_quit);
+        assert!(app.quit_modal.is_none());
+
+        // Re-open with Ctrl+Space Q and cancel with Esc
+        app.handle_input_bytes(b"\x00Q");
+        assert_eq!(app.quit_modal, Some(QuitModalState::new(3)));
+        app.handle_input_bytes(b"\x1b");
+        assert!(!app.should_quit);
+        assert!(app.quit_modal.is_none());
+
+        // Re-open and confirm with 'y'
+        app.handle_input_bytes(b"\x00q");
+        assert_eq!(app.quit_modal, Some(QuitModalState::new(3)));
+        app.handle_input_bytes(b"y");
+        assert!(app.should_quit);
+        assert!(app.quit_modal.is_none());
+
+        // Also verify Enter confirms
+        app.should_quit = false;
+        app.handle_input_bytes(b"\x00q");
+        assert!(app.quit_modal.is_some());
+        app.handle_input_bytes(b"\r");
+        assert!(app.should_quit);
+        assert!(app.quit_modal.is_none());
+    }
+
+    #[test]
+    fn test_quit_from_dashboard_with_background_active_sessions() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = SessionRegistry::new();
+        let (ps1, pty1, vt1) = spawn_idle_session(tmp.path(), "bg-1", SessionStatus::Busy);
+        let (ps2, pty2, vt2) =
+            spawn_idle_session(tmp.path(), "bg-2", SessionStatus::WaitingForInput);
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        let dashboard = DashboardState::new(vec!["ws".into()], vec!["bg-1".into(), "bg-2".into()]);
+        let mut app = TuiApp::new(registry).with_dashboard(dashboard);
+        app.showing_dashboard = true;
+        assert!(app.is_showing_dashboard());
+
+        // Dashboard 'q' opens quit_modal
+        app.handle_input_bytes(b"q");
+        assert!(!app.should_quit);
+        assert_eq!(app.quit_modal, Some(QuitModalState::new(2)));
+        assert!(app.is_showing_dashboard());
+
+        // Cancel with 'n' stays on dashboard
+        app.handle_input_bytes(b"n");
+        assert!(!app.should_quit);
+        assert!(app.quit_modal.is_none());
+        assert!(app.is_showing_dashboard());
+
+        // Dashboard Esc opens quit_modal; Esc cancels
+        app.handle_input_bytes(b"\x1b");
+        assert_eq!(app.quit_modal, Some(QuitModalState::new(2)));
+        app.handle_input_bytes(b"\x1b");
+        assert!(!app.should_quit);
+        assert!(app.quit_modal.is_none());
+        assert!(app.is_showing_dashboard());
+
+        // Dashboard 'q' then Enter confirms quit
+        app.handle_input_bytes(b"q");
+        assert_eq!(app.quit_modal, Some(QuitModalState::new(2)));
+        app.handle_input_bytes(b"\r");
+        assert!(app.should_quit);
+        assert!(app.quit_modal.is_none());
+
+        // Dashboard 'Q' then 'y' confirms quit
+        app.should_quit = false;
+        app.handle_input_bytes(b"Q");
+        assert_eq!(app.quit_modal, Some(QuitModalState::new(2)));
+        app.handle_input_bytes(b"y");
+        assert!(app.should_quit);
+        assert!(app.quit_modal.is_none());
+    }
+
+    #[test]
+    fn test_quit_modal_count_is_snapshotted_and_stays_open_if_sessions_finish() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = SessionRegistry::new();
+        let (ps1, pty1, vt1) = spawn_idle_session(tmp.path(), "snap-1", SessionStatus::Busy);
+        let (ps2, pty2, vt2) =
+            spawn_idle_session(tmp.path(), "snap-2", SessionStatus::WaitingForInput);
+        registry.add(ps1, pty1, vt1).unwrap();
+        registry.add(ps2, pty2, vt2).unwrap();
+
+        let dashboard = DashboardState::new(vec![], vec![]);
+        let mut app = TuiApp::new(registry).with_dashboard(dashboard);
+        app.request_quit();
+        assert_eq!(app.quit_modal, Some(QuitModalState::new(2)));
+
+        // Simulate all active sessions finishing while modal is open
+        for s in app.registry.list_mut() {
+            s.project_session.set_status(SessionStatus::Done);
+        }
+        assert_eq!(app.active_session_count(), 0);
+
+        // Modal must stay open with its snapshotted count of 2 until user responds
+        assert_eq!(app.quit_modal, Some(QuitModalState::new(2)));
+        assert!(!app.should_quit);
+
+        // User can still explicitly cancel or confirm
+        app.handle_quit_modal_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(app.quit_modal.is_none());
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_quit_modal_ignores_mouse_and_paste_and_suppresses_hardware_cursor() {
+        use ratatui::backend::TestBackend;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = SessionRegistry::new();
+        let (ps, pty, mut vt) =
+            spawn_idle_session(tmp.path(), "cursor-proj", SessionStatus::WaitingForInput);
+        // Generate scrollback lines so we can verify mouse scroll is ignored while quit_modal is open
+        let scroll_data: String = (0..40).map(|i| format!("line {i}\r\n")).collect();
+        vt.process(scroll_data.as_bytes());
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry).with_quit_modal(QuitModalState::new(1));
+
+        // 1. SGR mouse scroll up should be ignored (not scroll VT or close modal)
+        app.handle_input_bytes(b"\x1b[<64;10;5M");
+        assert!(app.quit_modal.is_some());
+        assert!(!app.should_quit);
+        assert_eq!(app.registry.active_session().unwrap().vt().scrollback(), 0);
+
+        // 2. Bracketed paste containing "y" must be ignored (not confirm quit or write to PTY)
+        app.handle_input_bytes(b"\x1b[200~y\x1b[201~");
+        assert!(app.quit_modal.is_some());
+        assert!(!app.should_quit);
+        assert_eq!(
+            app.registry.active_session().unwrap().status(),
+            SessionStatus::WaitingForInput
+        );
+
+        // 3. Hardware cursor must NOT be positioned when quit_modal is rendered over an active session
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let completed = terminal.draw(|f| app.render_frame(f)).unwrap();
+        let rendered: String = completed
+            .buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(rendered.contains("Confirm Quit"));
+        assert!(rendered.contains("You have 1 running session. Quit botai?"));
+        // Verify ratatui did not place/show the hardware cursor on the backend
+        assert!(!terminal.backend().cursor_visible());
+
+        // 4. Hardware cursor must also NOT be positioned when quit_modal is rendered over dashboard with creation modal
+        let mut dash = DashboardState::new(vec!["ws".into()], vec!["cursor-proj".into()]);
+        dash.open_creation_modal();
+        assert!(dash.cursor_position(Rect::new(0, 0, 100, 30)).is_some());
+        app = app.with_dashboard(dash);
+        app.showing_dashboard = true;
+
+        let backend2 = TestBackend::new(100, 30);
+        let mut terminal2 = Terminal::new(backend2).unwrap();
+        terminal2.draw(|f| app.render_frame(f)).unwrap();
+        assert!(!terminal2.backend().cursor_visible());
+    }
+
+    #[test]
+    fn test_standalone_detach_unchanged_with_active_session() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = SessionRegistry::new();
+        let (ps, pty, vt) = spawn_idle_session(tmp.path(), "detach-proj", SessionStatus::Busy);
+        registry.add(ps, pty, vt).unwrap();
+
+        let mut app = TuiApp::new(registry);
+        assert!(app.dashboard.is_none());
+        assert_eq!(app.active_session_count(), 1);
+
+        // Standalone detach (Ctrl+Space x) still sets should_quit immediately without quit_modal
+        app.handle_input_bytes(b"\x00x");
+        assert!(app.should_quit);
+        assert!(app.quit_modal.is_none());
     }
 }

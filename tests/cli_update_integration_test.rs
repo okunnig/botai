@@ -2,11 +2,24 @@ mod support;
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::RwLock;
 
+use assert_cmd::assert::Assert;
 use assert_cmd::Command;
 use botai::update::{platform, version};
 use predicates::prelude::*;
 use support::{serve, FixtureRelease, FixtureServer};
+
+/// Synchronizes copying the test executable with spawning child processes.
+///
+/// On Linux, a concurrent `fork()` from another test thread briefly inherits
+/// the open writable file descriptor created by `fs::copy()` before `O_CLOEXEC`
+/// closes it on `exec()`. If the copying thread immediately executes the copy
+/// before the sibling child completes `exec()`, Linux rejects it with
+/// `ETXTBSY` (`Text file busy`). Taking a write lock around `fs::copy()` and a
+/// read lock around command execution prevents overlap while keeping subprocess
+/// runs concurrent.
+static EXEC_LOCK: RwLock<()> = RwLock::new(());
 
 fn botai(server: &FixtureServer) -> Command {
     let mut cmd = Command::cargo_bin("botai").unwrap();
@@ -19,6 +32,7 @@ fn botai(server: &FixtureServer) -> Command {
 fn copied_botai() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let exe = dir.path().join(platform::binary_name());
+    let _guard = EXEC_LOCK.write().unwrap_or_else(|e| e.into_inner());
     fs::copy(env!("CARGO_BIN_EXE_botai"), &exe).unwrap();
     (dir, exe)
 }
@@ -30,12 +44,15 @@ fn copied_command(server: &FixtureServer, exe: &std::path::Path) -> Command {
     cmd
 }
 
+fn assert_cmd(cmd: &mut Command) -> Assert {
+    let _guard = EXEC_LOCK.read().unwrap_or_else(|e| e.into_inner());
+    cmd.assert()
+}
+
 #[test]
 fn update_check_prints_current_and_latest() {
     let server = serve(FixtureRelease::new("v99.0.0", b"new"), vec![]);
-    botai(&server)
-        .args(["update", "--check"])
-        .assert()
+    assert_cmd(botai(&server).args(["update", "--check"]))
         .success()
         .stdout(predicate::str::contains(format!(
             "Current version: {}",
@@ -49,9 +66,7 @@ fn update_check_prints_current_and_latest() {
 fn update_check_with_pre_includes_prereleases() {
     let rc = FixtureRelease::new("v99.1.0-rc.1", b"rc");
     let server = serve(FixtureRelease::new("v99.0.0", b"new"), vec![rc]);
-    botai(&server)
-        .args(["update", "--check", "--pre"])
-        .assert()
+    assert_cmd(botai(&server).args(["update", "--check", "--pre"]))
         .success()
         .stdout(predicate::str::contains("Latest version:  v99.1.0-rc.1"));
 }
@@ -59,9 +74,7 @@ fn update_check_with_pre_includes_prereleases() {
 #[test]
 fn update_check_exits_zero_when_up_to_date() {
     let server = serve(FixtureRelease::new("v0.0.0", b"old"), vec![]);
-    botai(&server)
-        .args(["update", "--check"])
-        .assert()
+    assert_cmd(botai(&server).args(["update", "--check"]))
         .success()
         .stdout(predicate::str::contains("botai is up to date."));
 }
@@ -69,19 +82,14 @@ fn update_check_exits_zero_when_up_to_date() {
 #[test]
 fn update_check_conflicts_with_version() {
     let server = serve(FixtureRelease::new("v99.0.0", b"new"), vec![]);
-    botai(&server)
-        .args(["update", "--check", "--version", "v99.0.0"])
-        .assert()
-        .failure();
+    assert_cmd(botai(&server).args(["update", "--check", "--version", "v99.0.0"])).failure();
 }
 
 #[test]
 fn update_reports_unknown_tag() {
     let server = serve(FixtureRelease::new("v99.0.0", b"new"), vec![]);
     let (_dir, exe) = copied_botai();
-    copied_command(&server, &exe)
-        .args(["update", "--version", "v42.0.0"])
-        .assert()
+    assert_cmd(copied_command(&server, &exe).args(["update", "--version", "v42.0.0"]))
         .failure()
         .stderr(predicate::str::contains("Release v42.0.0 not found"));
 }
@@ -92,12 +100,13 @@ fn update_works_with_a_broken_config() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
     fs::write(&config, "this is = = not toml").unwrap();
-    botai(&server)
-        .arg("--config")
-        .arg(&config)
-        .args(["update", "--check"])
-        .assert()
-        .success();
+    assert_cmd(
+        botai(&server)
+            .arg("--config")
+            .arg(&config)
+            .args(["update", "--check"]),
+    )
+    .success();
 }
 
 #[test]
@@ -108,9 +117,7 @@ fn update_version_replaces_the_running_copy() {
     );
     let (_dir, exe) = copied_botai();
 
-    let assert = copied_command(&server, &exe)
-        .args(["update", "--version", "v98.0.0"])
-        .assert()
+    let assert = assert_cmd(copied_command(&server, &exe).args(["update", "--version", "v98.0.0"]))
         .success()
         .stdout(predicate::str::contains(format!(
             "Updated botai {} -> v98.0.0",
@@ -132,9 +139,7 @@ fn update_without_newer_release_leaves_binary_alone() {
     let (_dir, exe) = copied_botai();
     let before = fs::read(&exe).unwrap();
 
-    copied_command(&server, &exe)
-        .arg("update")
-        .assert()
+    assert_cmd(copied_command(&server, &exe).arg("update"))
         .success()
         .stdout(predicate::str::contains("already up to date"))
         .stderr(predicate::str::contains("is a source build").not());
@@ -146,9 +151,7 @@ fn update_without_newer_release_leaves_binary_alone() {
 fn update_rejects_invalid_tag_without_a_request() {
     let server = serve(FixtureRelease::new("v99.0.0", b"new"), vec![]);
     let (_dir, exe) = copied_botai();
-    copied_command(&server, &exe)
-        .args(["update", "--version", "../latest"])
-        .assert()
+    assert_cmd(copied_command(&server, &exe).args(["update", "--version", "../latest"]))
         .failure()
         .stderr(predicate::str::contains("Invalid release tag"));
     assert!(server.requests().is_empty());

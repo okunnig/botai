@@ -60,6 +60,11 @@ impl SessionEntry {
         self.project_session.status
     }
 
+    /// Returns whether this session is currently active (Initializing, Busy, or WaitingForInput).
+    pub fn is_active(&self) -> bool {
+        self.project_session.is_active()
+    }
+
     /// Returns a reference to the virtual terminal screen.
     pub fn vt(&self) -> &VtScreen {
         &self.vt

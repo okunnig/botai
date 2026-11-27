@@ -1231,11 +1231,13 @@ fn test_integration_escape_timeout_in_run_loop_with_receiver() {
     // Send standalone 0x1b into channel
     stdin_tx.send(vec![0x1b]).unwrap();
 
-    // Spawn a thread to send Ctrl+Space + q after timeout has elapsed, quitting the loop
+    // Spawn a thread to send Ctrl+Space + q after timeout has elapsed, then confirm quit modal
     let tx_clone = stdin_tx.clone();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(60));
         let _ = tx_clone.send(vec![0x00, b'q']);
+        std::thread::sleep(Duration::from_millis(30));
+        let _ = tx_clone.send(vec![b'y']);
     });
 
     app.run_loop_with_receiver(&mut terminal, &stdin_rx)
@@ -1313,6 +1315,8 @@ fn test_integration_run_loop_with_receiver_conditional_redraw_and_wakeup_pulses(
             std::thread::sleep(Duration::from_millis(50));
         }
         let _ = tx_clone.send(vec![0x00, b'q']);
+        std::thread::sleep(Duration::from_millis(30));
+        let _ = tx_clone.send(vec![b'y']);
     });
 
     app.run_loop_with_receiver(&mut terminal, &stdin_rx)

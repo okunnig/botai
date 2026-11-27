@@ -5,6 +5,7 @@ pub mod destroy_progress_modal;
 pub mod events;
 mod modal_frame;
 mod progress_log;
+pub mod quit_modal;
 pub mod setup_modal;
 pub mod status_bar;
 pub mod text_input;
@@ -24,6 +25,7 @@ pub use events::{
     paste_to_bytes, translate_mouse_event, RawAction, RawLeaderDecoder, TuiAction,
 };
 pub use progress_log::ProgressLog;
+pub use quit_modal::{render_quit_modal, QuitModalAction, QuitModalState};
 pub use setup_modal::{render_setup_modal, run_setup_worker, SetupModalState, SetupProgressEvent};
 pub use status_bar::{
     compute_visible_tab_range, ActionsOverlay, StatusBar, TopBar, LEADER_ACTIONS_MENU,

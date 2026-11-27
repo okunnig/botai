@@ -350,8 +350,12 @@ repos = []
         .local_projects
         .contains(&"destroy-me".to_string()));
 
-    // 3. Trigger Quit action
+    // 3. Trigger Quit action (mock-service session is active -> opens quit confirmation modal)
     app.handle_dashboard_action(DashboardAction::Quit);
+    assert!(!app.should_quit);
+    assert!(app.quit_modal.is_some());
+    app.handle_quit_modal_key(key(KeyCode::Char('y')));
+    assert!(app.quit_modal.is_none());
     assert!(app.should_quit);
 }
 
