@@ -431,9 +431,22 @@ env = { PORT = "8080", NODE_ENV = "development" }
     - `Ctrl + Space` then `w`: Close / terminate active project session.
     - `Ctrl + Space` then `x`: Detach from active session (returns to dashboard when dashboard is present, or exits to host shell when running in standalone CLI mode).
     - `Ctrl + Space` then `d`: Destroy active project session workspace (prompts confirmation dialog and triggers clean worktree destruction and directory removal).
-    - `Ctrl + Space` then `q`: Quit `botai`.
+    - `Ctrl + Space` then `q`: Quit `botai` (quits immediately when no active sessions are running; opens the **Quit Confirmation Modal** when one or more active sessions exist).
     - `Ctrl + Space` then `Ctrl + Space` (or `Space`): Forward a literal `Ctrl + Space` (`0x00`) to the active PTY.
     - `Ctrl + Space` then `Esc` (or any unrecognized key): Cancel leader mode without executing an action.
+- **Quit Confirmation Modal (`QuitModalState`)**:
+  - **Trigger Condition**: Always enabled (no configuration flag). Whenever quitting is requested via in-session `Ctrl + Space` then `q` / `Q` (`RawAction::Quit`) or dashboard `q` / `Q` / `Esc` (`DashboardAction::Quit`), `botai` inspects `SessionRegistry` for active sessions (`SessionStatus::Initializing | SessionStatus::Busy | SessionStatus::WaitingForInput`).
+    - When 0 active sessions exist (including when only terminal `Done`, `Error`, or `Terminated` sessions remain), `botai` exits immediately without prompting.
+    - When 1 or more active sessions exist, `botai` opens a centered floating confirmation modal (` Confirm Quit `) snapshotting the running session count.
+    - Standalone CLI detach (`Ctrl + Space` then `x` without dashboard) and closing/exiting the last session (`close_session`) are unaffected and do not prompt.
+  - **Behavior & Input Isolation**:
+    - Captures input at highest modal priority while open; ignores mouse events and bracketed pastes, suppresses hardware cursor positioning, and excludes the active session from focused-mode notification suppression.
+    - `y` / `Y` / `Enter` (without Ctrl or Alt modifiers) confirms quitting (`should_quit = true`).
+    - `n` / `N` / `Esc` (without Ctrl or Alt modifiers) cancels and dismisses the modal, returning cleanly to the previous session or dashboard.
+    - Keeps its snapshotted count unchanged and waits for explicit user input even if background sessions finish while the modal is open.
+  - **Presentation**:
+    - Centered floating dialog (`76x8` max, `20x5` min) styled with `theme.status_waiting` border color and `" Confirm Quit "` title.
+    - Displays singular/plural running session count (`"You have 1 running session. Quit botai?"` / `"You have N running sessions. Quit botai?"`) with the count highlighted in bold `theme.modal_title`, a warning line (`"Quitting will terminate active sessions (project files stay on disk)."`), and key hints (`" [y] / [Enter] Confirm  |  [n] / [Esc] Cancel "`).
 
 ---
 
@@ -683,7 +696,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Completion & Dismissal**:
     - Stays open upon completion so the user can inspect final status and logs at their own pace.
     - Dismissing via `Enter`, `Esc`, `q`, or `Space` closes the modal and automatically refreshes the dashboard's project list.
-  - `q` / `Esc`: Quit `botai`.
+  - `q` / `Esc`: Quit `botai` (quits immediately when no active sessions are running; opens the centered ` Confirm Quit ` confirmation modal when active background sessions are running).
 
 ---
 
@@ -722,7 +735,7 @@ env = { PORT = "8080", NODE_ENV = "development" }
   - **Status Bar & Leader Actions Overlay**: Background, default text, active session tab, inactive tabs, tab index numbers (1..9), normal-mode hints, and dedicated 1-row `ActionsOverlay` styled with `leader_bg` and `leader_fg`.
   - **Agent Status Indicators**: Distinct contextual theme colors applied to semantic status glyphs (`○` Initializing, `●` Busy, `?` Waiting for Input, `✓` Done, `✗` Error, `—` Terminated), with Initializing and Terminated states rendered in `status_bar_fg`. Active tabs employ an automatic contrast guard fallback to `tab_active_fg` if the status indicator color matches `tab_active_bg`.
   - **Dashboard**: Panel borders (focused vs unfocused), list item selections, selection pointers (`>`), panel titles, top header status bar key hints, and live semantic status glyphs.
-  - **Modals (Creation Modal, Setup Progress Modal & Destroy Modal)**: Dialog borders, focused input borders/prompts, placeholder text, field labels, and button/key hints.
+  - **Modals (Creation Modal, Setup Progress Modal, Destroy Modal & Quit Confirmation Modal)**: Dialog borders (including `status_waiting` warning border for the Quit Confirmation Modal), focused input borders/prompts, placeholder text, field labels, and button/key hints.
   - **Exit & Crash Banners**: High-visibility error notification banners rendered across the bottom line upon non-zero process exits.
 
 ---
